@@ -1,0 +1,4 @@
+(module hello
+  (fn main () Unit
+    (uses Console)
+    (print "hello from witness")))

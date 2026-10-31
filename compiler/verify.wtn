@@ -1,0 +1,2690 @@
+; Contracts, proved: the translation from a body to the prover's formulas, in Witness.
+;
+; compiler/prove.wtn decides whether a goal follows from assumptions. This is the other
+; half of what witness/verify.py does -- reading a function and saying what it assumes on
+; entry, what it has established at each call, and what it must establish at the end --
+; for the part of the language that is only integers and booleans: `Int` and `Bool`
+; parameters, literals, `+ - *` (a product of two unknowns by its factors' bounds),
+; `< <= =`, `and or not`, `let`, `if`, and calls to other such functions, whose `requires` is an obligation
+; at the call and whose `ensures` is a fact after it. A newtype is read through to its
+; base type: its `requires` is known of a parameter or a result, and must be proved where
+; the constructor is applied.
+;
+; Types the prover has no structure for -- strings, labelled values, the formats of
+; floating point -- are names: a value is an atom that equals only itself, a primitive on
+; them is an unknown named by its arguments (so the same call twice is one value), and a
+; string literal is known by its lengths. Floating arithmetic rounds, so it is only that the
+; same operands give the same answer.
+;
+; Records and enums are read from the module's own declarations and the prelude's (Option,
+; Result, Fault). A record built in the function is exact; one that comes from outside is a
+; name whose fields are named after it, each with what its declared type says -- a range, a
+; refinement -- the way a parameter does. A `match` on a value whose variant is known takes
+; its arm; on any other it tags the value with the variant it is, exactly one of them, and
+; each arm's binders are parts of it, typed from the declaration with the value's own type
+; arguments put in.
+;
+; Forms that do something rather than compute -- `par`, `scope`, `infer`, `send`, `recv`,
+; `log.fields`, `update` -- are read as Python reads them: the work inside is read, and what
+; they answer is a value of its type and nothing more (unit for a send or a log line; a patched
+; record for an update of one known field by field). An array operation and a call to a
+; foreign function answer a value nothing is known of.
+;
+; A generic function is read with its type parameters as values nothing is known of.
+;
+; Anything else -- a conversion between formats, say -- is refused by name as
+; "not read yet", never guessed at, so the measure is the one the expression typer
+; settled on: where this reads a function it must say what Python says, and it must never
+; reject a function Python accepts. Nothing here is trusted: a goal is "proved" only when
+; the kernel's own replay accepts the reasons (`verdict`), so a mistake in the translation
+; can lose a proof or invent a fact, and the corpus is what catches the second.
+;
+; A function that reaches itself must make something smaller on the way round, as
+; witness/verify.py decides it: one parameter per member of each recursive group that every
+; call in the group lowers -- a number still above 0 handed something provably smaller, or a
+; part a `match` or field read took apart -- or passes on unchanged, with the calls that only
+; pass it on unable to go round by themselves (`no-termination-proof`, on the group's first
+; member). A group with a member this does not read is not read.
+;
+; A function's `(bounds (depth N) (alloc N) (repeats N))` is checked against what it may use,
+; counted as Python counts it (`resource-bound`): a pass through a body is a frame, its
+; deepest call and every allocating builtin it reaches; a group costs its passes times how
+; often it can be entered, the tightest bound the prover finds on each member's measure from
+; what is known on entry, plus one. A structural measure has no number, so it is unbounded.
+;
+; The facts an `if` branch learns hold only when the branch ran, so they are kept guarded
+; by its condition. A call to a function with no effects is named by its arguments, so the
+; same call twice is one value; one with effects is a fresh unknown each time.
+;
+;   witness run compiler/verify.wtn --grant Alloc,Console
+(module verify
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:341db8e3e6f1bc39d35ed90f4c8e78b275e1270bc6bb95034c49e3233d7b280c" as word_of)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  (use "wtn:0ea36c877618cc86be2bef4b0173f77bbb8fb09bee708ab4918e31c9ccb519f7" as digits)
+
+  (use "wtn:e9916022bdf6a09c8a04ab5a2a821db3285b9cbc341ff4ce4bcf558cdff91d2c" as add)
+
+  (use "wtn:1b33f22140759a452ab885ae6c470969cd80bbb780a5e1b7c30a2f29c74d3b45" as scale)
+
+  (use "wtn:85446292b9f1b4408b79ec18c5150840bd9c3dbbeebf2ddf767978727d9556a0" as num)
+
+  (use "wtn:e779a463f6179e82cdfc27b4d5d22c6d8470aa11f84c3671f88f344bd67258cd" as atom_term)
+
+  (use "wtn:a055a960542f0460dd3b8323d53fe33edffbca305447d9d5258c2d14c2b1944b" as formula_eq)
+
+  (use "wtn:2ba1b96f3cdd3a7d95ec2c5c24b603298248330f506fc9b8beb3d327ea4f81d0" as is_const)
+
+  (use "wtn:e9806d9294716a248a8392bf7547fe2479f386fc8fd942b268d6e46f6fffabdd" as holds)
+
+  (use "wtn:e5a6ab2c906fe1946e8c2c39266ac6c26bac2a09875208c709923b034d440a51" as verdict)
+
+  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+
+  ; --- formulas, built as the Python prover builds them -----------------------------------
+  (fn f_true () Formula (And (NoFormulas)))
+
+  (fn f_false () Formula (Or (NoFormulas)))
+
+  (fn lin_sub ((a Lin) (b Lin)) Lin (uses Alloc) (add a (scale b (- 0 1))))
+
+  (fn trivial_le ((x Lin)) Formula
+
+    (if (is_const x) (if (<= (get x const) 0) (f_true) (f_false)) (Le x)))
+
+  (fn f_le ((a Lin) (b Lin)) Formula (uses Alloc) (trivial_le (lin_sub a b)))
+
+  (fn f_lt ((a Lin) (b Lin)) Formula (uses Alloc) (f_le (add a (num 1)) b))
+
+  (fn f_eq ((a Lin) (b Lin)) Formula
+    (uses Alloc)
+    (if (is_const (lin_sub a b))
+      (if (= (get (lin_sub a b) const) 0) (f_true) (f_false))
+      (Eq (lin_sub a b))))
+
+  (fn f_neg ((p Formula)) Formula
+
+    (if (formula_eq p (f_true))
+      (f_false)
+      (if (formula_eq p (f_false))
+        (f_true)
+        (match p ((Not inner) inner) ((Atom n) (Not p)) ((Le x) (Not p)) ((Eq x) (Not p)) ((And ps) (Not p)) ((Or ps) (Not p))))))
+
+  (fn without ((ps Formulas) (gone Formula)) Formulas
+    (uses Alloc)
+    (match ps
+      ((NoFormulas) ps)
+      ((Formulas h rest) (if (formula_eq h gone) (without rest gone) (Formulas h (without rest gone))))))
+
+  (fn has_formula ((ps Formulas) (x Formula)) Bool
+    (uses Alloc)
+    (match ps ((NoFormulas) false) ((Formulas h rest) (or (formula_eq h x) (has_formula rest x)))))
+
+  (fn single ((ps Formulas) (otherwise Formula)) Formula
+    (match ps
+      ((NoFormulas) otherwise)
+      ((Formulas h rest) (match rest ((NoFormulas) h) ((Formulas a b) otherwise)))))
+
+  (fn f_conj ((ps Formulas)) Formula
+    (uses Alloc)
+    (if (has_formula ps (f_false))
+      (f_false)
+      (single (without ps (f_true)) (And (without ps (f_true))))))
+
+  (fn f_disj ((ps Formulas)) Formula
+    (uses Alloc)
+    (if (has_formula ps (f_true))
+      (f_true)
+      (single (without ps (f_false)) (Or (without ps (f_false))))))
+
+  (fn pair ((a Formula) (b Formula)) Formulas (Formulas a (Formulas b (NoFormulas))))
+
+  ; --- keys: two equal expressions share an atom ----------------------------------------------
+  ; There is no ordering on `Str`, so terms are put in order by comparing their bytes.
+  (fn byte_at ((b Bytes) (at Int)) Int
+    (match (bytes.at b (Octets at)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn bytes_before ((a Bytes) (b Bytes) (at Int) (left Int)) Bool
+    (requires (<= 0 left))
+    (if (<= left 0)
+      false
+      (if (< (byte_at a at) (byte_at b at))
+        true
+        (if (< (byte_at b at) (byte_at a at))
+          false
+          (if (< (byte_at a at) 0) false (bytes_before a b (+ at 1) (- left 1)))))))
+
+  (fn budget ((n Int)) Int
+    (ensures (<= 0 result))
+    (if (< n 0) 0 n))
+
+  (fn str_before ((a Str) (b Str)) Bool
+    (uses Alloc)
+    (bytes_before (str.encode a) (str.encode b) 0 (budget (+ 2 (+ (unwrap (bytes.len (str.encode a))) (unwrap (bytes.len (str.encode b))))))))
+
+  (fn insert_term ((ts Terms) (a Str) (k Int)) Terms
+    (uses Alloc)
+    (match ts
+      ((NoTerms) (Terms a k (NoTerms)))
+      ((Terms b c rest) (if (str_before a b) (Terms a k ts) (Terms b c (insert_term rest a k))))))
+
+  (fn sorted_terms ((ts Terms) (out Terms)) Terms
+    (uses Alloc)
+    (match ts ((NoTerms) out) ((Terms a k rest) (sorted_terms rest (insert_term out a k)))))
+
+  (fn terms_key ((ts Terms)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTerms) "")
+      ((Terms a k rest) (concat (num.to_str k) (concat "*" (concat a (concat " " (terms_key rest))))))))
+
+  (fn lin_key ((x Lin)) Str
+    (uses Alloc)
+    (concat (num.to_str (get x const)) (concat "+" (terms_key (sorted_terms (get x terms) (NoTerms))))))
+
+  (fn formula_key ((f Formula)) Str
+    (uses Alloc)
+    (match f
+      ((Atom n) (concat "A:" n))
+      ((Le x) (concat "L:" (lin_key x)))
+      ((Eq x) (concat "E:" (lin_key x)))
+      ((Not p) (concat "!" (formula_key p)))
+      ((And ps) (concat "&(" (concat (formulas_key ps) ")")))
+      ((Or ps) (concat "|(" (concat (formulas_key ps) ")")))))
+
+  (fn formulas_key ((ps Formulas)) Str
+    (uses Alloc)
+    (match ps ((NoFormulas) "") ((Formulas h rest) (concat (formula_key h) (concat "," (formulas_key rest))))))
+
+  ; --- symbolic values -----------------------------------------------------------------------------
+  (enum Sym (Num (lin Lin) (ty Str)) (Truth (form Formula)) (Rec (name Str) (fields Binds)) (Ctor (variant Str) (fields Syms)))
+
+  (enum Syms (NoSyms) (Syms (head Sym) (rest Syms)))
+
+  (enum Binds (NoBinds) (Binds (name Str) (sym Sym) (rest Binds)))
+
+  ; What is known so far, the count of unknowns made, and what has been found wrong.
+  ; `sites` are the calls the body makes, each with its arguments and what was known there:
+  ; what termination is decided from.
+  (record St (facts Formulas) (fresh Int) (errs Str) (always Formulas) (sites Sites))
+
+  (enum Sites (NoSites) (Sites (callee Str) (args Syms) (facts Formulas) (rest Sites)))
+
+  (record Out (sym Sym) (st St))
+
+  (record Termed (lin Lin) (ty Str) (st St))
+
+  (record Vals (syms Syms) (st St))
+
+  (fn sym_key ((s Sym)) Str
+    (uses Alloc)
+    (match s
+      ((Num x t) (lin_key x))
+      ((Truth f) (concat "[" (concat (formula_key f) "]")))
+      ((Rec n fs) (concat n (concat "{" (concat (binds_key fs) "}"))))
+      ((Ctor v fs) (concat v (concat "(" (concat (syms_key fs) ")"))))))
+
+  (fn binds_key ((bs Binds)) Str
+    (uses Alloc)
+    (match bs ((NoBinds) "") ((Binds n s rest) (concat n (concat "=" (concat (sym_key s) (concat "," (binds_key rest))))))))
+
+  (fn syms_key ((ss Syms)) Str
+    (uses Alloc)
+    (match ss ((NoSyms) "") ((Syms h rest) (concat (sym_key h) (concat "," (syms_key rest))))))
+
+  (fn var_of ((a Str)) Lin(atom_term a))
+
+  (fn facts_plus ((st St) (f Formula)) St
+    (uses Alloc)
+    (with st (facts (append_formula (get st facts) f))))
+
+  (fn append_formula ((ps Formulas) (f Formula)) Formulas
+    (uses Alloc)
+    (match ps ((NoFormulas) (Formulas f (NoFormulas))) ((Formulas h rest) (Formulas h (append_formula rest f)))))
+
+  (fn formula_count ((ps Formulas)) Int (match ps ((NoFormulas) 0) ((Formulas h rest) (+ 1 (formula_count rest)))))
+
+  (fn formulas_take ((ps Formulas) (n Int)) Formulas
+    (uses Alloc)
+    (if (<= n 0) (NoFormulas) (match ps ((NoFormulas) ps) ((Formulas h rest) (Formulas h (formulas_take rest (- n 1)))))))
+
+  (fn formulas_drop ((ps Formulas) (n Int)) Formulas
+    (if (<= n 0) ps (match ps ((NoFormulas) ps) ((Formulas h rest) (formulas_drop rest (- n 1))))))
+
+  (fn formulas_join ((a Formulas) (b Formulas)) Formulas
+    (uses Alloc)
+    (match a ((NoFormulas) b) ((Formulas h rest) (Formulas h (formulas_join rest b)))))
+
+  ; What holds everywhere stays plain: guarding it would cost a case split for each one.
+  (fn guarded ((cond Formula) (always Formulas) (ps Formulas)) Formulas
+    (uses Alloc)
+    (match ps
+      ((NoFormulas) ps)
+      ((Formulas h rest) (Formulas (if (has_formula always h) h (f_disj (pair (f_neg cond) h))) (guarded cond always rest)))))
+
+  ; A value nothing is known about, shared with nothing else: a number, or a boolean.
+  (fn unknown ((st St) (kind Str) (ranged Bool)) Out
+    (uses Alloc)
+    (let atom (concat "!" (num.to_str (+ 1 (get st fresh))))
+      (let st1 (with st (fresh (+ 1 (get st fresh))))
+        (if (str.eq kind "Bool")
+          (make Out (sym (Truth (Atom atom))) (st st1))
+          (make Out (sym (Num (var_of atom) kind)) (st (if ranged (in_range st1 (var_of atom) kind) st1)))))))
+
+  ; --- fixed widths --------------------------------------------------------------------
+  ; A value of a fixed width is known to sit inside its type's range, always. The
+  ; unsigned 64-bit top is beyond a machine word; this runs under the interpreter, whose
+  ; integers are not bounded.
+  (record Range (lo Int) (hi Int))
+
+  (fn pow2 ((n Int)) Int
+    (requires (<= 0 n))
+    (if (<= n 0) 1 (* 2 (pow2 (- n 1)))))
+
+  (fn bits_of ((kind Str)) Int
+    (if (or (str.eq kind "U8") (str.eq kind "I8")) 8
+      (if (or (str.eq kind "U16") (str.eq kind "I16")) 16
+        (if (or (str.eq kind "U32") (str.eq kind "I32")) 32
+          (if (or (str.eq kind "U64") (str.eq kind "I64")) 64 0)))))
+
+  (fn width_range ((kind Str)) (Option Range)
+    (uses Alloc)
+    (if (= (bits_of kind) 0)
+      (None)
+      (if (head_char_is kind 85)
+        (Some (make Range (lo 0) (hi (- (pow2 (budget (bits_of kind))) 1))))
+        (Some (make Range (lo (- 0 (pow2 (budget (- (bits_of kind) 1))))) (hi (- (pow2 (budget (- (bits_of kind) 1))) 1)))))))
+
+  (fn head_char_is ((kind Str) (c Int)) Bool
+    (uses Alloc)
+    (= (byte_at (str.encode kind) 0) c))
+
+  (fn in_range ((st St) (x Lin) (kind Str)) St
+    (uses Alloc)
+    (match (width_range kind)
+      ((None) st)
+      ((Some r) (facts_plus (facts_plus st (f_le (num (get r lo)) x)) (f_le x (num (get r hi)))))))
+
+  (fn range_goal ((x Lin) (kind Str)) Formula
+    (uses Alloc)
+    (match (width_range kind)
+      ((None) (f_true))
+      ((Some r) (f_conj (pair (f_le (num (get r lo)) x) (f_le x (num (get r hi))))))))
+
+  ; Does it provably fit? If so the value may be relied on to, from here on.
+  (fn fits ((st St) (x Lin) (kind Str)) St
+    (uses Alloc)
+    (match (width_range kind)
+      ((None) st)
+      ((Some r) (if (str.eq (verdict (get st facts) (range_goal x kind)) "proved")
+        (in_range st x kind)
+        (with st (errs (concat (get st errs) "overflow ")))))))
+
+  ; A value standing in a number's place. A boolean becomes an integer pinned to 0 or 1 by
+  ; the formula, so that `=` between two of them means what it says.
+  (fn termed ((st St) (s Sym)) Termed
+    (uses Alloc)
+    (match s
+      ((Num x t) (make Termed (lin x) (ty t) (st st)))
+      ((Rec n fs) (make Termed (lin (var_of (sym_key s))) (ty n) (st st)))
+      ((Ctor v fs) (make Termed (lin (var_of (sym_key s))) (ty "?") (st st)))
+      ((Truth f) (make Termed
+        (lin (var_of (concat "b:" (sym_key s))))
+        (ty "Int")
+        (st (facts_plus (facts_plus (facts_plus (facts_plus st (f_le (num 0) (var_of (concat "b:" (sym_key s))))) (f_le (var_of (concat "b:" (sym_key s))) (num 1))) (f_disj (pair (f_neg f) (f_eq (var_of (concat "b:" (sym_key s))) (num 1))))) (f_disj (pair f (f_eq (var_of (concat "b:" (sym_key s))) (num 0))))))))))
+
+  (fn as_formula ((s Sym)) Formula
+    (uses Alloc)
+    (match s ((Truth f) f) ((Num x t) (Atom (concat "bool:" (sym_key s)))) ((Rec n fs) (Atom (concat "bool:" (sym_key s)))) ((Ctor v fs) (Atom (concat "bool:" (sym_key s))))))
+
+  ; --- what is known about the functions ---------------------------------------------------------
+  (record FnInfo (name Str) (params Atoms) (kinds Atoms) (named Atoms) (ret Str) (retname Str) (pre Trees) (post Trees) (effectful Bool) (readable Bool))
+
+  (enum FnInfos (NoFnInfos) (FnInfos (head FnInfo) (rest FnInfos)))
+
+  ; A newtype as written: its inner type, and the binder and condition of its `requires`, if any.
+  (record NewT (name Str) (inner Str) (binder Str) (cond Trees))
+
+  (enum NewTs (NoNewTs) (NewTs (head NewT) (rest NewTs)))
+
+  (record Cx (fns FnInfos) (open Atoms) (news NewTs) (recs RecDs) (vars VarDs) (contract Bool) (me Str) (foreigns Atoms))
+
+  (fn newtype_of ((ns NewTs) (which Str)) (Option NewT)
+    (uses Alloc)
+    (match ns ((NoNewTs) (None)) ((NewTs h rest) (if (str.eq (get h name) which) (Some h) (newtype_of rest which)))))
+
+  ; The type at the bottom of a chain of newtypes; "?" when the chain does not end.
+  (fn base_kind ((ns NewTs) (name Str) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match (newtype_of ns name)
+        ((None) name)
+        ((Some n) (base_kind ns (get n inner) (- left 1))))))
+
+  (fn resolved ((ns NewTs) (ks Atoms)) Atoms
+    (uses Alloc)
+    (match ks ((NoAtoms) ks) ((Atoms k rest) (Atoms (base_kind ns k 20) (resolved ns rest)))))
+
+  (fn newtype_from ((after Trees)) (Option NewT)
+    (uses Alloc)
+    (match after
+      ((NoTrees) (None))
+      ((Trees n rest) (match rest
+        ((NoTrees) (None))
+        ((Trees inner clauses) (Some (match (clause_of clauses "requires")
+          ((Trees b more) (make NewT (name (word_of n)) (inner (word_of inner)) (binder (word_of b)) (cond more)))
+          ((NoTrees) (make NewT (name (word_of n)) (inner (word_of inner)) (binder "") (cond (NoTrees)))))))))))
+
+  (fn newtypes_of ((items Trees)) NewTs
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoNewTs))
+      ((Trees h rest) (if (head_is h "newtype")
+        (match (newtype_from (after_head h)) ((None) (newtypes_of rest)) ((Some n) (NewTs n (newtypes_of rest))))
+        (newtypes_of rest)))))
+
+  ; What a newtype's `requires` says of a value, read in the context of the module.
+  (fn refinement ((cx Cx) (n NewT) (x Sym) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (get n cond)
+      ((NoTrees) (Ok (make Out (sym (Truth (f_true))) (st st))))
+      ((Trees c rest) (if (holds (get cx open) (get n name))
+        (Ok (make Out (sym (Truth (f_true))) (st st)))
+        (value (with cx (open (Atoms (get n name) (get cx open))) (contract true)) (Binds (get n binder) x (NoBinds)) st c (- left 1)))))))
+
+  ; Everything the newtypes around a number say of it.
+  (fn refine ((cx Cx) (st St) (name Str) (x Lin) (left Int)) (Result St Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Ok st)
+      (match (newtype_of (get cx news) name)
+        ((None) (Ok st))
+        ((Some n) (if (str.eq (base_kind (get cx news) name 20) "Bool")
+          (Ok st)
+          (match (refinement cx n (Num x (base_kind (get cx news) name 20)) st (- left 1))
+            ((Err f) (Err f))
+            ((Ok o) (refine cx (facts_plus (get o st) (as_formula (get o sym))) (get n inner) x (- left 1)))))))))
+
+  (fn construct ((cx Cx) (binds Binds) (st St) (n NewT) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (values cx binds st args (- left 1))
+      ((Err f) (Err f))
+      ((Ok vs) (construct_with cx n (get vs syms) (get vs st) (- left 1))))))
+
+  (fn construct_with ((cx Cx) (n NewT) (ss Syms) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match ss
+      ((NoSyms) (unread "a newtype built from nothing"))
+      ((Syms s more) (construct_one cx n s st (- left 1))))))
+
+  (fn construct_one ((cx Cx) (n NewT) (s Sym) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match s
+      ((Num x ty) (construct_num cx n x ty st (- left 1)))
+      ((Truth t) (unread "a newtype over a boolean"))
+      ((Rec rn fs) (unread "a newtype over a record"))
+      ((Ctor vn fs) (unread "a newtype over a variant")))))
+
+  (fn construct_num ((cx Cx) (n NewT) (x Lin) (ty Str) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (let kind (of_type ty (base_kind (get cx news) (get n name) 20))
+      (match (refinement cx n (Num x kind) st (- left 1))
+        ((Err f) (Err f))
+        ((Ok o) (Ok (make Out (sym (Num x kind)) (st (must (get o st) (as_formula (get o sym)) "unproven-precondition" (get n name))))))))))
+
+  (fn info_of ((fs FnInfos) (which Str)) (Option FnInfo)
+    (uses Alloc)
+    (match fs ((NoFnInfos) (None)) ((FnInfos h rest) (if (str.eq (get h name) which) (Some h) (info_of rest which)))))
+
+  ; A type whose values are numbers, booleans or something the prover only sees as a name.
+  (fn scalar ((kind Str)) Bool (not (or (str.eq kind "?") (str.eq kind ""))))
+
+  (fn is_number ((t Tree)) Bool
+    (match (leaf_text t)
+      ((None) false)
+      ((Some b) (or (digit_byte (byte_at b 0)) (and (= (byte_at b 0) 45) (digit_byte (byte_at b 1)))))))
+
+  (fn digit_byte ((d Int)) Bool (and (<= 48 d) (<= d 57)))
+
+  (fn number_of ((t Tree)) Int
+    (match (leaf_text t)
+      ((None) 0)
+      ((Some b) (if (= (byte_at b 0) 45)
+        (- 0 (digits b 1 0 (budget (+ 1 (unwrap (bytes.len b))))))
+        (digits b 0 0 (budget (+ 1 (unwrap (bytes.len b)))))))))
+
+  ; --- the walk ------------------------------------------------------------------------------------------
+  (fn unread ((why Str)) (Result Out Fault)(Err (fault "verify" why)))
+
+  (fn unbuilt ((why Str)) (Result Built Fault) (Err (fault "verify" why)))
+
+  (fn unwalked ((why Str)) (Result Walked Fault) (Err (fault "verify" why)))
+
+  (fn unbound ((why Str)) (Result Bound Fault) (Err (fault "verify" why)))
+
+  (fn lookup ((binds Binds) (which Str)) (Option Sym)
+    (match binds ((NoBinds) (None)) ((Binds n s rest) (if (str.eq n which) (Some s) (lookup rest which)))))
+
+  (fn items_of ((t Tree)) Trees (match t ((Leaf x q) (NoTrees)) ((Node items) items)))
+
+  (fn trees_len ((ts Trees)) Int (match ts ((NoTrees) 0) ((Trees h rest) (+ 1 (trees_len rest)))))
+
+  (fn nth ((ts Trees) (i Int)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees h rest) (if (= i 0) (Some h) (nth rest (- i 1))))))
+
+  (fn value ((cx Cx) (binds Binds) (st St) (e Tree) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unread "the expression is nested too deeply")
+      (match e
+        ((Leaf text quoted) (if quoted (Ok (string_value st text)) (leaf_value binds st e)))
+        ((Node items) (match items
+          ((NoTrees) (unread "an empty list"))
+          ((Trees h args) (head_value cx binds st h args (- left 1))))))))
+
+  ; A string literal is an atom that equals only itself, and its lengths are known wherever
+  ; they are later asked for.
+  (fn string_value ((st St) (text Bytes)) Out
+    (uses Alloc)
+    (let name (match (bytes.decode text) ((Ok t) t) ((Err f) "?"))
+      (let x (var_of (concat "\"" (concat name "\"")))
+        (let key (concat (lin_key x) ",")
+          (let chars (f_eq (var_of (concat "str.chars(" key)) (num (chars_in text)))
+            (let octets (f_eq (var_of (concat "str.octets(" key)) (num (unwrap (bytes.len text))))
+              (make Out (sym (Num x "Str")) (st (assumed (assumed st chars) octets)))))))))
+
+  ; A fact taken as holding everywhere.
+  (fn assumed ((st St) (f Formula)) St
+    (uses Alloc)
+    (with (if (has_formula (get st facts) f) st (facts_plus st f)) (always (if (has_formula (get st always) f) (get st always) (append_formula (get st always) f)))))
+
+  ; The characters in UTF-8: every byte that does not continue a character.
+  (fn chars_in ((b Bytes)) Int (chars_from b 0 (budget (+ 1 (unwrap (bytes.len b))))))
+
+  (fn chars_from ((b Bytes) (at Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      0
+      (match (bytes.at b (Octets at))
+        ((None) 0)
+        ((Some d) (+ (if (= (bit.and d (u8.of 192)) (u8.of 128)) 0 1) (chars_from b (+ at 1) (- left 1)))))))
+
+  (fn leaf_value ((binds Binds) (st St) (e Tree)) (Result Out Fault)
+    (uses Alloc)
+    (if (is_number e)
+      (Ok (make Out (sym (Num (num (number_of e)) "?")) (st st)))
+      (if (is_word e "true")
+        (Ok (make Out (sym (Truth (f_true))) (st st)))
+        (if (is_word e "false")
+          (Ok (make Out (sym (Truth (f_false))) (st st)))
+          (if (is_word e "unit")
+            (Ok (unit_out st))
+            (match (lookup binds (word_of e))
+              ((Some s) (Ok (make Out (sym s) (st st))))
+              ((None) (unread "a name that is not a parameter or a let"))))))))
+
+  (fn head_value ((cx Cx) (binds Binds) (st St) (h Tree) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (is_word h "let")
+      (let_value cx binds st args (- left 1))
+      (if (is_word h "if")
+        (if_value cx binds st args (- left 1))
+        (match (newtype_of (get cx news) (word_of h))
+          ((Some n) (construct cx binds st n args (- left 1)))
+          ((None) (match (info_of (get cx fns) (word_of h))
+            ((Some info) (user_call cx binds st info args (- left 1)))
+            ((None) (operator_value cx binds st (word_of h) args (- left 1))))))))))
+
+  (fn user_call ((cx Cx) (binds Binds) (st St) (info FnInfo) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (and (get cx contract) (get info effectful))
+      (unread "a contract that performs an effect")
+      (if (get info readable)
+        (call_value cx binds st info args left)
+        (unread "a call to a function this does not read"))))
+
+  (fn let_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (nth args 0)
+      ((None) (unread "a let needs a name"))
+      ((Some n) (match (nth args 1)
+        ((None) (unread "a let needs a value"))
+        ((Some v) (match (nth args 2)
+          ((None) (unread "a let needs a body"))
+          ((Some b) (match (value cx binds st v (- left 1))
+            ((Err f) (Err f))
+            ((Ok o) (value cx (Binds (word_of n) (get o sym) binds) (get o st) b (- left 1))))))))))))
+
+  ; Facts learned inside a branch hold only if it ran, so they stay, guarded by its condition.
+  (fn branch ((cx Cx) (binds Binds) (st St) (cond Formula) (e Tree) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (value cx binds (facts_plus st cond) e (- left 1))
+      ((Err f) (Err f))
+      ((Ok o) (Ok (make Out
+        (sym (get o sym))
+        (st (with (get o st) (facts (formulas_join (formulas_take (get (get o st) facts) (formula_count (get st facts))) (guarded cond (get (get o st) always) (formulas_drop (get (get o st) facts) (+ 1 (formula_count (get st facts)))))))))))))))
+
+  (fn if_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (nth args 0)
+      ((None) (unread "an if needs a condition"))
+      ((Some c) (match (nth args 1)
+        ((None) (unread "an if needs a then"))
+        ((Some a) (match (nth args 2)
+          ((None) (unread "an if needs an else"))
+          ((Some b) (match (value cx binds st c (- left 1))
+            ((Err f) (Err f))
+            ((Ok co) (if_branches cx binds (get co st) (as_formula (get co sym)) a b (- left 1))))))))))))
+
+  (fn if_branches ((cx Cx) (binds Binds) (st St) (cond Formula) (a Tree) (b Tree) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (branch cx binds st cond a (- left 1))
+      ((Err f) (Err f))
+      ((Ok ao) (match (branch cx binds (get ao st) (f_neg cond) b (- left 1))
+        ((Err f) (Err f))
+        ((Ok bo) (Ok (joined (get bo st) cond (get ao sym) (f_neg cond) (get bo sym)))))))))
+
+  ; One value out of two exclusive branches.
+  (fn joined ((st St) (c1 Formula) (s1 Sym) (c2 Formula) (s2 Sym)) Out
+    (uses Alloc)
+    (joined_all st (Cases (make Case (cond c1) (sym s1)) (Cases (make Case (cond c2) (sym s2)) (NoCases)))))
+
+  ; Of two operands' types, the one that says something: a literal has no width of its own.
+  (fn of_type ((a Str) (b Str)) Str
+    (if (str.eq a "?") (if (str.eq b "?") "Int" b) a))
+
+  ; The arguments, left to right, each seeing what the ones before it established.
+  (fn values ((cx Cx) (binds Binds) (st St) (es Trees) (left Int)) (Result Vals Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match es
+      ((NoTrees) (Ok (make Vals (syms (NoSyms)) (st st))))
+      ((Trees h rest) (match (value cx binds st h (- left 1))
+        ((Err f) (Err f))
+        ((Ok o) (match (values cx binds (get o st) rest (- left 1))
+          ((Err f) (Err f))
+          ((Ok more) (Ok (make Vals (syms (Syms (get o sym) (get more syms))) (st (get more st))))))))))))
+
+  (fn sym_at ((ss Syms) (i Int)) (Option Sym)
+    (match ss ((NoSyms) (None)) ((Syms h rest) (if (= i 0) (Some h) (sym_at rest (- i 1))))))
+
+  (fn syms_len ((ss Syms)) Int (match ss ((NoSyms) 0) ((Syms h rest) (+ 1 (syms_len rest)))))
+
+  (fn operator_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (or (str.eq op "unwrap") (str.eq op "seq"))
+      (passed_value cx binds st op args (- left 1))
+      (if (is_form op)
+        (form_value cx binds st op args (- left 1))
+        (variant_or_operator cx binds st op args (- left 1))))))
+
+  (fn variant_or_operator ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (var_named (get cx vars) op)
+      ((Some v) (variant_value cx binds st v args (- left 1)))
+      ((None) (plain_operator cx binds st op args (- left 1))))))
+
+  (fn plain_operator ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (not (known_operator op))
+      (primitive_value cx binds st op args (- left 1))
+      (match (values cx binds st args (- left 1))
+        ((Err f) (Err f))
+        ((Ok vs) (if (= (syms_len (get vs syms)) (operator_arity op))
+          (applied op (get vs syms) (get vs st))
+          (unread "an operator is given a different number of arguments")))))))
+
+  ; `unwrap` changes the type of a value, not the value; `seq` is each in turn, answering the last.
+  (fn passed_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (values cx binds st args (- left 1))
+      ((Err f) (Err f))
+      ((Ok vs) (match (last_sym (get vs syms))
+        ((None) (unread "nothing to answer"))
+        ((Some s) (if (or (str.eq op "seq") (= (syms_len (get vs syms)) 1))
+          (Ok (make Out (sym s) (st (get vs st))))
+          (unread "an operator is given a different number of arguments"))))))))
+
+  ; The prover sees no structure in an array: what an operation on one answers is a value it
+  ; knows nothing of, and only the arguments are read. Building one is an effect in a contract.
+  (fn foreigns_of ((items Trees)) Atoms
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoAtoms))
+      ((Trees h rest) (if (head_is h "foreign")
+        (match (after_head h) ((NoTrees) (foreigns_of rest)) ((Trees n more) (Atoms (word_of n) (foreigns_of rest))))
+        (foreigns_of rest)))))
+
+  (fn array_op ((op Str)) Bool
+    (or (or (str.eq op "array.len") (str.eq op "array.at")) (or (str.eq op "array.empty") (str.eq op "array.push"))))
+
+  ; So is a foreign function's answer: it is not Witness, and its effects make it one in a contract.
+  (fn array_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (and (get cx contract) (or (holds (get cx foreigns) op) (or (str.eq op "array.empty") (str.eq op "array.push"))))
+      (unread "a contract that performs an effect")
+      (match (values cx binds st args left)
+        ((Err f) (Err f))
+        ((Ok vs) (Ok (unknown (get vs st) "?" false))))))
+
+  (fn last_sym ((ss Syms)) (Option Sym)
+    (match ss ((NoSyms) (None)) ((Syms h rest) (match rest ((NoSyms) (Some h)) ((Syms n more) (last_sym rest))))))
+
+  ; A primitive nothing above reads exactly: an unknown named by its arguments, as the translation
+  ; of a call to a function whose body is not seen.
+  (fn primitive_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match (primitive op)
+        ((None) (if (or (array_op op) (holds (get cx foreigns) op)) (array_value cx binds st op args (- left 1)) (unread (concat "the form `" (concat op "` is not read yet")))))
+        ((Some b) (if (and (get cx contract) (effectful_builtin b))
+          (unread "a contract that performs an effect")
+          (match (values cx binds st args (- left 1))
+            ((Err f) (Err f))
+            ((Ok vs) (Ok (primitive_result b op (get vs syms) (get vs st))))))))))
+
+  (fn effectful_builtin ((b Builtin)) Bool
+    (match (get b effects) ((NoNames) false) ((Names n more) true)))
+
+  (fn other_conversion ((op Str)) Bool
+    (or (or (str.eq op "bf16.of") (str.eq op "bytes.of")) (or (str.eq op "f16.of") (str.eq op "f32.of"))))
+
+  (fn primitive_result ((b Builtin) (op Str) (ss Syms) (st St)) Out
+    (uses Alloc)
+    (if (str.eq op "str.eq")
+      (same_text ss st)
+      (let kind (answer_kind b ss)
+        (match (get b effects)
+          ((Names n more) (if (str.eq kind "Unit") (make Out (sym (Num (num 0) "Unit")) (st st)) (unknown st kind false)))
+          ((NoNames) (named_primitive op kind ss st))))))
+
+  (fn same_text ((ss Syms) (st St)) Out
+    (uses Alloc)
+    (match (sym_at ss 0)
+      ((None) (unknown st "Bool" false))
+      ((Some a) (match (sym_at ss 1)
+        ((None) (unknown st "Bool" false))
+        ((Some d) (let ka (sym_key a)
+          (let kd (sym_key d)
+            (make Out (sym (Truth (if (str.eq ka kd) (f_true) (if (str_before ka kd) (Atom (concat "str.eq(" (concat ka (concat "," (concat kd ")"))))) (Atom (concat "str.eq(" (concat kd (concat "," (concat ka ")"))))))))) (st st)))))))))
+
+  (fn answer_kind ((b Builtin) (ss Syms)) Str
+    (uses Alloc)
+    (match (get b ret)
+      ((RetBase n) n)
+      ((RetNumber) (number_kind ss))
+      ((RetOptionOfNumber) "Option")
+      ((RetWritten t) "Opaque")))
+
+  ; The format a call is at: that of the first argument that has one.
+  (fn number_kind ((ss Syms)) Str
+    (uses Alloc)
+    (match ss
+      ((NoSyms) "Int")
+      ((Syms h rest) (match h
+        ((Num x t) (if (str.eq t "?") (number_kind rest) t))
+        ((Truth f) (number_kind rest))
+        ((Rec n fs) (number_kind rest))
+        ((Ctor v fs) (number_kind rest))))))
+
+  (fn named_primitive ((op Str) (kind Str) (ss Syms) (st St)) Out
+    (uses Alloc)
+    (let key (concat op (concat "(" (syms_key ss)))
+      (if (str.eq kind "Bool")
+        (make Out (sym (Truth (Atom key))) (st st))
+        (let x (var_of key)
+          (make Out (sym (Num x kind)) (st (masked op ss x (lengthened op x (in_range st x kind)))))))))
+
+  (fn lengthened ((op Str) (x Lin) (st St)) St
+    (uses Alloc)
+    (if (or (str.eq op "str.chars") (or (str.eq op "str.octets") (str.eq op "bytes.len")))
+      (assumed st (f_le (num 0) x))
+      st))
+
+  ; Masking with a non-negative constant leaves a value in 0 .. k, on any width.
+  (fn masked ((op Str) (ss Syms) (x Lin) (st St)) St
+    (uses Alloc)
+    (if (str.eq op "bit.and")
+      (mask_facts ss x st)
+      st))
+
+  (fn mask_facts ((ss Syms) (x Lin) (st St)) St
+    (uses Alloc)
+    (match ss
+      ((NoSyms) st)
+      ((Syms h rest) (mask_facts rest x (match h
+        ((Truth f) st)
+        ((Rec n fs) st)
+        ((Ctor v fs) st)
+        ((Num m t) (if (and (is_const m) (<= 0 (get m const)))
+          (facts_plus (facts_plus st (f_le (num 0) x)) (f_le x m))
+          st)))))))
+
+  (fn known_operator ((op Str)) Bool
+    (or (or (or (or (str.eq op "+") (str.eq op "-")) (or (str.eq op "*") (str.eq op "<"))) (or (or (str.eq op "<=") (str.eq op "=")) (or (str.eq op "and") (str.eq op "or")))) (or (or (str.eq op "not") (is_conversion op)) (is_wrapping op))))
+
+  ; `int.of` widens, `u8.of` and its kin narrow; each keeps the value and the second must fit.
+  ; A conversion to a float format or to bytes keeps the value too, as Python has it: only the
+  ; type changes, and those types have no range to fit.
+  (fn is_conversion ((op Str)) Bool
+    (or (or (str.eq op "int.of") (width_conversion op)) (other_conversion op)))
+
+  (fn width_conversion ((op Str)) Bool
+    (or (or (or (str.eq op "u8.of") (str.eq op "u16.of")) (or (str.eq op "u32.of") (str.eq op "u64.of"))) (or (or (str.eq op "i8.of") (str.eq op "i16.of")) (or (str.eq op "i32.of") (str.eq op "i64.of")))))
+
+  (fn is_wrapping ((op Str)) Bool
+    (or (or (or (str.eq op "wrap.add") (str.eq op "wrap.sub")) (or (str.eq op "wrap.mul") (str.eq op "sat.add"))) (or (str.eq op "sat.sub") (str.eq op "sat.mul"))))
+
+  ; "u8.of" is about U8: the prefix, in capitals.
+  (fn conversion_kind ((op Str)) Str
+    (if (str.eq op "int.of") "Int"
+      (if (str.eq op "u8.of") "U8" (if (str.eq op "u16.of") "U16" (if (str.eq op "u32.of") "U32" (if (str.eq op "u64.of") "U64"
+        (if (str.eq op "i8.of") "I8" (if (str.eq op "i16.of") "I16" (if (str.eq op "i32.of") "I32" (if (str.eq op "i64.of") "I64"
+          (if (str.eq op "f32.of") "F32" (if (str.eq op "f16.of") "F16" (if (str.eq op "bf16.of") "BF16" "Bytes")))))))))))))
+
+  (fn operator_arity ((op Str)) Int
+    (if (or (str.eq op "not") (is_conversion op)) 1 2))
+
+  (fn applied ((op Str) (ss Syms) (st St)) (Result Out Fault)
+    (uses Alloc)
+    (match (sym_at ss 0)
+      ((None) (unread "no argument"))
+      ((Some first) (if (str.eq op "not")
+        (Ok (make Out (sym (Truth (f_neg (as_formula first)))) (st st)))
+        (if (is_conversion op)
+          (converted op first st)
+          (match (sym_at ss 1)
+            ((None) (unread "one argument"))
+            ((Some second) (applied_pair op first second st))))))))
+
+  (fn converted ((op Str) (x Sym) (st St)) (Result Out Fault)
+    (uses Alloc)
+    (let t (termed st x)
+      (if (str.eq op "int.of")
+        (Ok (make Out (sym (Num (get t lin) "Int")) (st (get t st))))
+        (Ok (make Out (sym (Num (get t lin) (conversion_kind op))) (st (fits (get t st) (get t lin) (conversion_kind op))))))))
+
+  (fn applied_pair ((op Str) (a Sym) (d Sym) (st St)) (Result Out Fault)
+    (uses Alloc)
+    (if (or (str.eq op "and") (str.eq op "or"))
+      (Ok (make Out (sym (Truth (if (str.eq op "and") (f_conj (pair (as_formula a) (as_formula d))) (f_disj (pair (as_formula a) (as_formula d)))))) (st st)))
+      (let ta (termed st a)
+        (let td (termed (get ta st) d)
+          (applied_terms op (get ta lin) (get td lin) (pair_kind (get ta ty) (get td ty)) (get td st))))))
+
+  ; The checker has both operands of one type, so where either is known to be a fixed width
+  ; -- the other being a type parameter's value, say -- that is the type of both.
+  (fn pair_kind ((a Str) (b Str)) Str
+    (if (is_width a) a (if (is_width b) b (of_type a b))))
+
+  (fn applied_terms ((op Str) (a Lin) (d Lin) (kind Str) (st St)) (Result Out Fault)
+    (uses Alloc)
+    (if (and (is_float kind) (or (str.eq op "+") (or (str.eq op "-") (str.eq op "*"))))
+      (Ok (opaque_float op a d kind st))
+    (if (str.eq op "+")
+      (Ok (arithmetic st (add a d) kind))
+      (if (str.eq op "-")
+        (Ok (arithmetic st (lin_sub a d) kind))
+        (if (str.eq op "*")
+          (if (is_const a)
+            (Ok (arithmetic st (scale d (get a const)) kind))
+            (if (is_const d)
+              (Ok (arithmetic st (scale a (get d const)) kind))
+              (if (is_width kind) (Ok (product a d kind st)) (Ok (unknown st kind false)))))
+          (if (is_wrapping op)
+            (wrapped op a d kind st)
+            (if (str.eq op "<")
+              (Ok (make Out (sym (Truth (f_lt a d))) (st st)))
+              (if (str.eq op "<=")
+                (Ok (make Out (sym (Truth (f_le a d))) (st st)))
+                (Ok (make Out (sym (Truth (f_eq a d))) (st st)))))))))))
+
+ ; A product of two unknowns is not linear, so it is bounded through its factors: each is
+  ; pinned between the tightest constants the facts support, and the product lies between
+  ; the least and greatest of the four corners. The result is otherwise unknown, so it fits
+  ; only if those corners do.
+  (fn product ((a Lin) (d Lin) (kind Str) (st St)) Out
+    (uses Alloc)
+    (let x (var_of (concat "!" (num.to_str (+ 1 (get st fresh)))))
+      (let st1 (with st (fresh (+ 1 (get st fresh))))
+        (make Out (sym (Num x kind)) (st (fits (match (width_range kind) ((None) st1) ((Some r) (by_lemma st1 x a d r))) x kind))))))
+
+  (fn by_lemma ((st St) (x Lin) (a Lin) (d Lin) (r Range)) St
+    (uses Alloc)
+    (if (and (pinned st a r) (pinned st d r))
+      (let fs (get st facts)
+        (cornered st x (lowest fs a r) (highest fs a r) (lowest fs d r) (highest fs d r)))
+      st))
+
+  (fn pinned ((st St) (x Lin) (r Range)) Bool
+    (uses Alloc)
+    (str.eq (verdict (get st facts) (f_conj (pair (f_le (num (get r lo)) x) (f_le x (num (get r hi)))))) "proved"))
+
+  (fn highest ((fs Formulas) (x Lin) (r Range)) Int
+    (uses Alloc)
+    (narrowed_to fs x (get r lo) (get r hi) 80))
+
+  (fn lowest ((fs Formulas) (x Lin) (r Range)) Int
+    (uses Alloc)
+    (- 0 (narrowed_to fs (scale x (- 0 1)) (- 0 (get r hi)) (- 0 (get r lo)) 80)))
+
+  (fn cornered ((st St) (x Lin) (la Int) (ha Int) (ld Int) (hd Int)) St
+    (uses Alloc)
+    (let lo (min_int (min_int (* la ld) (* la hd)) (min_int (* ha ld) (* ha hd)))
+      (let hi (max_int (max_int (* la ld) (* la hd)) (max_int (* ha ld) (* ha hd)))
+        (facts_plus (facts_plus st (f_le (num lo) x)) (f_le x (num hi))))))
+
+  (fn min_int ((a Int) (b Int)) Int (if (< a b) a b))
+
+  (fn is_float ((kind Str)) Bool (or (str.eq kind "F16") (or (str.eq kind "BF16") (str.eq kind "F32"))))
+
+  ; Floating arithmetic rounds, which this logic cannot express: only that the same operands
+  ; give the same answer.
+  (fn opaque_float ((op Str) (a Lin) (d Lin) (kind Str) (st St)) Out
+    (uses Alloc)
+    (make Out (sym (Num (var_of (concat op (concat "(" (concat (lin_key a) (concat "," (concat (lin_key d) ",")))))) kind)) (st st)))
+
+  (fn is_width ((kind Str)) Bool (< 0 (bits_of kind)))
+
+  (fn arithmetic ((st St) (x Lin) (kind Str)) Out
+    (uses Alloc)
+    (make Out (sym (Num x kind)) (st (fits st x kind))))
+
+  ; Wrapping is modular, which this logic cannot express: only the range is known. Saturating
+  ; arithmetic is the exact value clamped to the range.
+  (fn wrapped ((op Str) (a Lin) (d Lin) (kind Str) (st St)) (Result Out Fault)
+    (uses Alloc)
+    (if (not (is_width kind))
+      (unread "wrapping or saturating arithmetic needs a fixed width")
+      (let out (unknown st kind true)
+        (if (str.eq op "sat.add") (Ok (saturated out (f_exact (add a d)) kind))
+          (if (str.eq op "sat.sub") (Ok (saturated out (f_exact (lin_sub a d)) kind))
+            (Ok out))))))
+
+  (fn f_exact ((x Lin)) Lin x)
+
+  (fn saturated ((out Out) (want Lin) (kind Str)) Out
+    (uses Alloc)
+    (match (get out sym)
+      ((Truth t) out)
+      ((Rec n fs) out)
+      ((Ctor v fs) out)
+      ((Num term t) (match (width_range kind)
+        ((None) out)
+        ((Some r) (make Out (sym (get out sym)) (st (facts_plus (facts_plus (facts_plus (get out st)
+          (f_disj (Formulas (f_lt (num (get r hi)) want) (Formulas (f_lt want (num (get r lo))) (Formulas (f_eq term want) (NoFormulas))))))
+          (f_disj (pair (f_le want (num (get r hi))) (f_eq term (num (get r hi))))))
+          (f_disj (pair (f_le (num (get r lo)) want) (f_eq term (num (get r lo)))))))))))))
+
+  ; --- a call to a function we have the contract of ------------------------------------------------------
+  (fn bind_params ((names Atoms) (ss Syms) (binds Binds)) Binds
+    (uses Alloc)
+    (match names
+      ((NoAtoms) binds)
+      ((Atoms n rest) (match ss ((NoSyms) binds) ((Syms s more) (Binds n s (bind_params rest more binds)))))))
+
+  ; A contract read in the caller's context. One that reaches itself cannot be unfolded,
+  ; so `on_cycle` is the safe answer: nothing assumed of an `ensures`, nothing proved of a
+  ; `requires`.
+  (fn instantiate ((cx Cx) (info FnInfo) (clause Trees) (binds Binds) (st St) (on_cycle Formula) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match clause
+      ((NoTrees) (Ok (make Out (sym (Truth (f_true))) (st st))))
+      ((Trees c rest) (if (holds (get cx open) (get info name))
+        (Ok (make Out (sym (Truth on_cycle)) (st st)))
+        (value (with cx (open (Atoms (get info name) (get cx open))) (contract true)) binds st c (- left 1)))))))
+
+  (fn call_value ((cx Cx) (binds Binds) (st St) (info FnInfo) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (values cx binds st args (- left 1))
+      ((Err f) (Err f))
+      ((Ok vs) (if (= (syms_len (get vs syms)) (atoms_len (get info params)))
+        (call_checked cx info (get vs syms) (get vs st) (- left 1))
+        (unread "a call is given a different number of arguments"))))))
+
+  (fn atoms_len ((as Atoms)) Int (match as ((NoAtoms) 0) ((Atoms a rest) (+ 1 (atoms_len rest)))))
+
+  (fn call_checked ((cx Cx) (info FnInfo) (ss Syms) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (let bound (bind_params (get info params) ss (NoBinds))
+      (match (instantiate cx info (get info pre) bound (sited cx info ss st) (f_false) (- left 1))
+        ((Err f) (Err f))
+        ((Ok pre) (call_result cx info ss bound (must (get pre st) (as_formula (get pre sym)) "unproven-precondition" (get info name)) (- left 1)))))))
+
+  (fn call_result ((cx Cx) (info FnInfo) (ss Syms) (bound Binds) (st St) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (refined cx info (named_result info ss st) (- left 1))
+      ((Err f) (Err f))
+      ((Ok named) (match (get info post)
+        ((NoTrees) (Ok named))
+        ((Trees e rest) (match (instantiate cx info (get info post) (Binds "result" (get named sym) bound) (get named st) (f_true) (- left 1))
+          ((Err f) (Err f))
+          ((Ok post) (Ok (make Out (sym (get named sym)) (st (facts_plus (get post st) (as_formula (get post sym))))))))))))))
+
+  ; A result of a refined type is known to satisfy the refinement.
+  (fn refined ((cx Cx) (info FnInfo) (o Out) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (get o sym)
+      ((Truth t) (Ok o))
+      ((Rec n fs) (Ok o))
+      ((Ctor v fs) (Ok o))
+      ((Num x t) (match (refine cx (get o st) (get info retname) x left)
+        ((Err f) (Err f))
+        ((Ok s) (Ok (make Out (sym (get o sym)) (st s))))))))
+
+  ; A pure function answers the same way for the same arguments, so the call names its
+  ; result; one with effects may answer differently each time.
+  (fn named_result ((info FnInfo) (ss Syms) (st St)) Out
+    (uses Alloc)
+    (if (get info effectful)
+      (unknown st (get info ret) true)
+      (if (str.eq (get info ret) "Bool")
+        (make Out (sym (Truth (Atom (concat (get info name) (concat "(" (syms_key ss)))))) (st st))
+        (make Out (sym (Num (var_of (concat (get info name) (concat "(" (syms_key ss)))) (get info ret))) (st (in_range st (var_of (concat (get info name) (concat "(" (syms_key ss)))) (get info ret)))))))
+
+  ; A call in the body is kept for termination; one in a contract is not a step the program takes.
+  (fn sited ((cx Cx) (info FnInfo) (ss Syms) (st St)) St
+    (if (get cx contract) st (with st (sites (Sites (get info name) ss (get st facts) (get st sites))))))
+
+  ; --- an obligation -----------------------------------------------------------------------------------------------
+  (fn must ((st St) (goal Formula) (rule Str) (where Str)) St
+    (uses Alloc)
+    (if (str.eq (verdict (get st facts) goal) "proved")
+      st
+      (with st (errs (concat (get st errs) (concat rule " "))))))
+
+  ; --- records, enums and match -----------------------------------------------------------------------------------
+  ; The declarations as written: a record's fields or an enum's variants, and the type parameters
+  ; they are written over. A field's type is read off the declaration with the value's own
+  ; arguments put in for them, the way the checker settled the binder's type.
+  (record FieldD (name Str) (ty Tree))
+
+  (enum FieldDs (NoFieldDs) (FieldDs (head FieldD) (rest FieldDs)))
+
+  (record RecD (name Str) (params Atoms) (fields FieldDs))
+
+  (enum RecDs (NoRecDs) (RecDs (head RecD) (rest RecDs)))
+
+  (record VarD (name Str) (owner Str) (params Atoms) (fields FieldDs))
+
+  (enum VarDs (NoVarDs) (VarDs (head VarD) (rest VarDs)))
+
+  (record Arm (variant Str) (binders Atoms) (body Tree))
+
+  (enum Arms (NoArms) (Arms (head Arm) (rest Arms)))
+
+  (record Case (cond Formula) (sym Sym))
+
+  (enum Cases (NoCases) (Cases (head Case) (rest Cases)))
+
+  (fn atoms_join ((a Atoms) (b Atoms)) Atoms
+    (uses Alloc)
+    (match a ((NoAtoms) b) ((Atoms h rest) (Atoms h (atoms_join rest b)))))
+
+  (fn words_of ((ts Trees)) Atoms
+    (uses Alloc)
+    (match ts ((NoTrees) (NoAtoms)) ((Trees h rest) (Atoms (word_of h) (words_of rest)))))
+
+  ; `Name` or `(Name T U)`: the name, and the parameters.
+  (fn declared_name ((t Tree)) Str
+    (uses Alloc)
+    (match (node_items t) ((None) (word_of t)) ((Some items) (match items ((NoTrees) "") ((Trees h more) (word_of h))))))
+
+  (fn declared_params ((t Tree)) Atoms
+    (uses Alloc)
+    (match (node_items t) ((None) (NoAtoms)) ((Some items) (match items ((NoTrees) (NoAtoms)) ((Trees h more) (words_of more))))))
+
+  (fn fields_of ((ts Trees)) FieldDs
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (NoFieldDs))
+      ((Trees h rest) (match (node_items h)
+        ((None) (fields_of rest))
+        ((Some parts) (match parts
+          ((NoTrees) (fields_of rest))
+          ((Trees n more) (if (is_word n "schema")
+            (fields_of rest)
+            (match more ((NoTrees) (fields_of rest)) ((Trees t none) (FieldDs (make FieldD (name (word_of n)) (ty t)) (fields_of rest))))))))))))
+
+  (fn recs_of ((items Trees)) RecDs
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoRecDs))
+      ((Trees h rest) (if (head_is h "record")
+        (match (after_head h)
+          ((NoTrees) (recs_of rest))
+          ((Trees n fields) (RecDs (make RecD (name (declared_name n)) (params (declared_params n)) (fields (fields_of fields))) (recs_of rest))))
+        (recs_of rest)))))
+
+  (fn variants_of ((owner Str) (params Atoms) (vs Trees)) VarDs
+    (uses Alloc)
+    (match vs
+      ((NoTrees) (NoVarDs))
+      ((Trees h rest) (match (node_items h)
+        ((None) (variants_of owner params rest))
+        ((Some parts) (match parts
+          ((NoTrees) (variants_of owner params rest))
+          ((Trees n fields) (VarDs (make VarD (name (word_of n)) (owner owner) (params params) (fields (fields_of fields))) (variants_of owner params rest)))))))))
+
+  (fn vars_join ((a VarDs) (b VarDs)) VarDs
+    (uses Alloc)
+    (match a ((NoVarDs) b) ((VarDs h rest) (VarDs h (vars_join rest b)))))
+
+  (fn vars_of ((items Trees)) VarDs
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoVarDs))
+      ((Trees h rest) (if (head_is h "enum")
+        (match (after_head h)
+          ((NoTrees) (vars_of rest))
+          ((Trees n vs) (vars_join (variants_of (declared_name n) (declared_params n) vs) (vars_of rest))))
+        (vars_of rest)))))
+
+  ; Option and Result are the language's own.
+  (fn prelude_items () Trees
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode "(module p (enum (Option T) (None) (Some (value T))) (enum (Result T E) (Ok (value T)) (Err (error E))) (record Fault (op Str) (why Str) (cause (Option Fault))) (newtype Chars Int) (newtype Octets Int) (newtype Count Int) (newtype Instant I64) (newtype WallTime I64) (newtype Ticks I64) (newtype Duration I64) (fn fault ((op Str) (why Str)) Fault (bounds (depth 1) (alloc 0)) (make Fault (op op) (why why) (cause (None)))) (fn (context T) ((r (Result T Fault)) (op Str) (why Str)) (Result T Fault) (bounds (depth 1) (alloc 0)) (match r ((Ok v) (Ok v)) ((Err cause) (Err (make Fault (op op) (why why) (cause (Some cause))))))))")))
+      ((Err f) (NoTrees))
+      ((Ok t) (module_items t))))
+
+  (fn trees_append ((a Trees) (b Trees)) Trees
+    (uses Alloc)
+    (match a ((NoTrees) b) ((Trees h rest) (Trees h (trees_append rest b)))))
+
+  (fn rec_named ((rs RecDs) (n Str)) (Option RecD)
+    (match rs ((NoRecDs) (None)) ((RecDs h rest) (if (str.eq (get h name) n) (Some h) (rec_named rest n)))))
+
+  (fn var_named ((vs VarDs) (n Str)) (Option VarD)
+    (match vs ((NoVarDs) (None)) ((VarDs h rest) (if (str.eq (get h name) n) (Some h) (var_named rest n)))))
+
+  (fn field_named ((fs FieldDs) (n Str)) (Option FieldD)
+    (match fs ((NoFieldDs) (None)) ((FieldDs h rest) (if (str.eq (get h name) n) (Some h) (field_named rest n)))))
+
+  ; A type as text, with the parameters of its declaration replaced by the arguments it was used at,
+  ; and the labels, which say nothing about what a value is, taken off.
+  (fn ty_with ((t Tree) (params Atoms) (args Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match (node_items t)
+        ((None) (ty_leaf t params args (- left 1)))
+        ((Some parts) (ty_node t parts params args (- left 1))))))
+
+  (fn ty_leaf ((t Tree) (params Atoms) (args Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (word_of t)
+      (match (index_of params (word_of t) 0)
+        ((Some i) (ty_arg args i (word_of t) (- left 1)))
+        ((None) (word_of t)))))
+
+  (fn ty_arg ((args Trees) (i Int) (fallback Str) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      fallback
+      (match (nth args i)
+        ((Some a) (ty_with a (NoAtoms) (NoTrees) (- left 1)))
+        ((None) fallback))))
+
+  (fn ty_node ((t Tree) (parts Trees) (params Atoms) (args Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (if (head_is t "label")
+        (ty_label parts params args (- left 1))
+        (concat "(" (concat (tys_with parts params args (- left 1)) ")")))))
+
+  (fn ty_label ((parts Trees) (params Atoms) (args Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match (last_of parts)
+        ((Some inner) (ty_with inner params args (- left 1)))
+        ((None) "?"))))
+
+  (fn tys_with ((ts Trees) (params Atoms) (args Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match ts
+        ((NoTrees) "")
+        ((Trees h rest) (match rest
+          ((NoTrees) (ty_with h params args (- left 1)))
+          ((Trees n more) (concat (ty_with h params args (- left 1)) (concat " " (tys_with rest params args (- left 1))))))))))
+
+  (fn index_of ((names Atoms) (which Str) (i Int)) (Option Int)
+    (match names ((NoAtoms) (None)) ((Atoms n rest) (if (str.eq n which) (Some i) (index_of rest which (+ i 1))))))
+
+  ; The head and the arguments of a type written out.
+  (fn type_head ((ty Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode ty)))
+      ((Err f) "?")
+      ((Ok t) (declared_name t))))
+
+  (fn type_args ((ty Str)) Trees
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode ty)))
+      ((Err f) (NoTrees))
+      ((Ok t) (match (node_items t) ((None) (NoTrees)) ((Some items) (match items ((NoTrees) (NoTrees)) ((Trees h more) more)))))))
+
+  (fn field_ty ((cx Cx) (ty Str) (field Str)) (Option Str)
+    (uses Alloc)
+    (match (rec_named (get cx recs) (type_head ty))
+      ((None) (None))
+      ((Some r) (match (field_named (get r fields) field)
+        ((None) (None))
+        ((Some f) (Some (ty_with (get f ty) (get r params) (type_args ty) 20)))))))
+
+  ; The type of the i-th field of a variant matched at a type.
+  (fn variant_ty ((v VarD) (ty Str) (i Int)) (Option Str)
+    (uses Alloc)
+    (match (nth_field (get v fields) i)
+      ((None) (None))
+      ((Some f) (Some (ty_with (get f ty) (get v params) (type_args ty) 20)))))
+
+  (fn nth_field ((fs FieldDs) (i Int)) (Option FieldD)
+    (match fs ((NoFieldDs) (None)) ((FieldDs h rest) (if (= i 0) (Some h) (nth_field rest (- i 1))))))
+
+  ; The name an atom is known by, for keying what is derived from it.
+  (fn ref_of ((x Lin)) Str
+    (uses Alloc)
+    (match (get x terms)
+      ((NoTerms) (lin_key x))
+      ((Terms a k rest) (match rest
+        ((NoTerms) (if (and (= k 1) (= (get x const) 0)) a (lin_key x)))
+        ((Terms b c more) (lin_key x))))))
+
+  ; A value of a named type with everything its type already says about it.
+  (fn known_value ((cx Cx) (st St) (atom Str) (ty Str) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let head (type_head ty)
+      (let base (base_kind (get cx news) head 20)
+        (if (str.eq base "Bool")
+          (Ok (make Out (sym (Truth (Atom atom))) (st st)))
+          (let x (var_of atom)
+            (match (refine cx (in_range st x base) head x left)
+              ((Err f) (Err f))
+              ((Ok s) (Ok (make Out (sym (Num x (if (str.eq head ty) base ty))) (st s))))))))))
+
+  ; --- the forms ---------------------------------------------------------------------------------------------------
+  (fn is_form ((op Str)) Bool
+    (or (or (or (str.eq op "get") (str.eq op "make")) (or (str.eq op "with") (or (str.eq op "match") (str.eq op "declassify"))))
+      (effect_form op)))
+
+  ; Forms that do something rather than compute: what they answer is a value of their type and
+  ; nothing more, or unit, as witness/verify.py has it; the work inside them is still read.
+  (fn effect_form ((op Str)) Bool
+    (or (or (or (str.eq op "par") (str.eq op "scope")) (or (str.eq op "infer") (str.eq op "send")))
+      (or (or (str.eq op "recv") (str.eq op "log.fields")) (str.eq op "update"))))
+
+  (fn form_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (str.eq op "get")
+      (get_value cx binds st args (- left 1))
+      (if (str.eq op "make")
+        (make_value cx binds st args (- left 1))
+        (if (str.eq op "with")
+          (with_value cx binds st args (- left 1))
+          (if (str.eq op "match")
+            (match_value cx binds st args (- left 1))
+            (if (effect_form op)
+              (if (get cx contract) (unread "a contract that performs an effect") (effect_value cx binds st op args (- left 1)))
+              (declassify_value cx binds st args (- left 1)))))))))
+
+  (fn unit_out ((st St)) Out (make Out (sym (Num (num 0) "Unit")) (st st)))
+
+  (fn effect_value ((cx Cx) (binds Binds) (st St) (op Str) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (if (str.eq op "par")
+        (par_value cx binds st args (- left 1))
+        (if (str.eq op "scope")
+          (scope_value cx binds st args (- left 1))
+          (if (str.eq op "update")
+            (update_value cx binds st args (- left 1))
+            (if (str.eq op "recv")
+              (Ok (unknown st "?" false))
+              ; `infer` and `send` read their second item; `log.fields` the values of its pairs.
+              (match (values cx binds st (if (str.eq op "log.fields") (values_of args) (match (nth args 1) ((None) (NoTrees)) ((Some e) (Trees e (NoTrees))))) (- left 1))
+                ((Err f) (Err f))
+                ((Ok vs) (Ok (if (str.eq op "infer") (unknown (get vs st) "?" false) (unit_out (get vs st))))))))))))
+
+  ; `(par ((name work [(on where)])...) body)`: each branch is read before the block, and the
+  ; body sees their values.
+  (fn par_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match args
+        ((NoTrees) (unread "a par needs branches"))
+        ((Trees bs rest) (match (branch_values cx binds binds st (items_of bs) (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (match rest
+            ((NoTrees) (unread "a par needs a body"))
+            ((Trees body none) (value cx (get b binds) (get b st) body (- left 1))))))))))
+
+  (fn branch_values ((cx Cx) (outer Binds) (inner Binds) (st St) (bs Trees) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match bs
+        ((NoTrees) (Ok (make Bound (binds inner) (st st))))
+        ((Trees b rest) (match (nth (items_of b) 1)
+          ((None) (unbound "a branch needs work"))
+          ((Some work) (match (value cx outer st work (- left 1))
+            ((Err f) (Err f))
+            ((Ok o) (branch_values cx outer (Binds (match (nth (items_of b) 0) ((None) "") ((Some n) (word_of n))) (get o sym) inner) (get o st) rest (- left 1))))))))))
+
+  ; `(scope ((name work (deadline d) ...)...) body)`: a task's name is a value of the type its
+  ; work carries and nothing more, and the scope may answer an escalated failure instead, so
+  ; nothing is known of what it answers.
+  (fn scope_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match args
+        ((NoTrees) (unread "a scope needs tasks"))
+        ((Trees ts rest) (match (task_values cx binds binds st (items_of ts) (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (match rest
+            ((NoTrees) (unread "a scope needs a body"))
+            ((Trees body none) (match (value cx (get b binds) (get b st) body (- left 1))
+              ((Err f) (Err f))
+              ((Ok o) (Ok (unknown (get o st) "?" false))))))))))))
+
+  (fn task_values ((cx Cx) (outer Binds) (inner Binds) (st St) (ts Trees) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match ts
+        ((NoTrees) (Ok (make Bound (binds inner) (st st))))
+        ((Trees t rest) (match (task_value cx outer st (items_of t) (- left 1))
+          ((Err f) (Err f))
+          ((Ok o) (task_values cx outer (Binds (match (nth (items_of t) 0) ((None) "") ((Some n) (word_of n))) (get o sym) inner) (get o st) rest (- left 1))))))))
+
+  ; The work and then the deadline are read; the task's name is a fresh value of what it carries.
+  (fn task_value ((cx Cx) (outer Binds) (st St) (parts Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match (nth parts 1)
+        ((None) (unread "a task needs work"))
+        ((Some work) (match (value cx outer st work (- left 1))
+          ((Err f) (Err f))
+          ((Ok w) (match (values cx outer (get w st) (deadlines (drop_two parts)) (- left 1))
+            ((Err f) (Err f))
+            ((Ok d) (let at (+ 1 (get (get d st) fresh))
+              (known_value cx (with (get d st) (fresh at)) (concat "!" (num.to_str at)) (carried_ty (get w sym)) (- left 1)))))))))))
+
+  ; What a `(Result T Fault)` carries: T, read off the value where its type is known.
+  (fn carried_ty ((s Sym)) Str
+    (uses Alloc)
+    (match s
+      ((Num x ty) (match (type_args ty) ((NoTrees) "?") ((Trees t rest) (type_ty t 20))))
+      ((Ctor v fs) (match fs ((NoSyms) "?") ((Syms f more) (sym_ty f))))
+      ((Truth f) "?")
+      ((Rec n fs) "?")))
+
+  (fn sym_ty ((s Sym)) Str
+    (match s ((Num x ty) ty) ((Truth f) "Bool") ((Rec n fs) n) ((Ctor v fs) "?")))
+
+  ; `(update base patch)`: a patch is a record of Options, and each `(Some v)` replaces a field.
+  (fn update_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+      (match (values cx binds st args (- left 1))
+        ((Err f) (Err f))
+        ((Ok vs) (match (get vs syms)
+          ((NoSyms) (unread "an update needs a record and a patch"))
+          ((Syms base more) (match more
+            ((NoSyms) (unread "an update needs a record and a patch"))
+            ((Syms given_patch none) (match base
+              ((Rec n fs) (match given_patch
+                ((Rec pn pfs) (Ok (make Out (sym (Rec n (patched fs pfs))) (st (get vs st)))))
+                ((Num x t) (Ok (unknown (get vs st) "?" false)))
+                ((Truth t) (Ok (unknown (get vs st) "?" false)))
+                ((Ctor v cs) (Ok (unknown (get vs st) "?" false)))))
+              ((Num x t) (Ok (unknown (get vs st) "?" false)))
+              ((Truth t) (Ok (unknown (get vs st) "?" false)))
+              ((Ctor v cs) (Ok (unknown (get vs st) "?" false))))))))))))
+
+  (fn patched ((fs Binds) (changes Binds)) Binds
+    (uses Alloc)
+    (match fs
+      ((NoBinds) fs)
+      ((Binds n v rest) (Binds n (match (lookup changes n) ((Some given) (match given ((Ctor c cs) (if (str.eq c "Some") (match cs ((NoSyms) v) ((Syms g more) g)) v)) ((Num x t) v) ((Truth t) v) ((Rec r rs) v))) ((None) v)) (patched rest changes)))))
+
+  ; Taking a label off changes the type of a value, not the value, and is an effect in a contract.
+  (fn declassify_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (get cx contract)
+      (unread "a contract that performs an effect")
+      (match (nth args 1)
+        ((None) (unread "a declassify needs a value"))
+        ((Some e) (value cx binds st e (- left 1)))))))
+
+  (fn get_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (nth args 0)
+      ((None) (unread "a get needs a record"))
+      ((Some e) (match (nth args 1)
+        ((None) (unread "a get needs a field"))
+        ((Some f) (match (value cx binds st e (- left 1))
+          ((Err x) (Err x))
+          ((Ok o) (field_of cx (get o sym) (get o st) (word_of f) (- left 1))))))))))
+
+  (fn field_of ((cx Cx) (s Sym) (st St) (field Str) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match s
+      ((Rec n fs) (rec_field fs st field))
+      ((Num x ty) (num_field cx x ty st field (- left 1)))
+      ((Truth f) (unread "a field of a boolean"))
+      ((Ctor v fs) (unread "a field of a variant")))))
+
+  (fn rec_field ((fs Binds) (st St) (field Str)) (Result Out Fault)
+    (uses Alloc)
+    (match (lookup fs field)
+      ((Some v) (Ok (make Out (sym v) (st st))))
+      ((None) (Ok (unknown st "?" false)))))
+
+  ; A field of a value whose type is not read here is still the same atom each time it is read;
+  ; nothing is known of it beyond that.
+  (fn num_field ((cx Cx) (x Lin) (ty Str) (st St) (field Str) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (field_ty cx ty field)
+      ((None) (known_value cx st (concat (ref_of x) (concat "." field)) "?" (- left 1)))
+      ((Some ft) (known_value cx st (concat (ref_of x) (concat "." field)) ft (- left 1))))))
+
+  ; Each field's value, in the order written, each seeing what the ones before established.
+  (record Built (fields Binds) (st St))
+
+  (fn built_fields ((cx Cx) (binds Binds) (st St) (items Trees) (left Int)) (Result Built Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match items
+      ((NoTrees) (Ok (make Built (fields (NoBinds)) (st st))))
+      ((Trees h rest) (match (node_items h)
+        ((None) (unbuilt "a field written without a name"))
+        ((Some parts) (match parts
+          ((NoTrees) (unbuilt "a field written without a name"))
+          ((Trees n more) (match more
+            ((NoTrees) (unbuilt "a field written without a value"))
+            ((Trees e none) (match (value cx binds st e (- left 1))
+              ((Err f) (Err f))
+              ((Ok o) (match (built_fields cx binds (get o st) rest (- left 1))
+                ((Err f) (Err f))
+                ((Ok more_built) (Ok (make Built (fields (Binds (word_of n) (get o sym) (get more_built fields))) (st (get more_built st))))))))))))))))))
+
+  (fn make_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match args
+      ((NoTrees) (unread "a make needs a type"))
+      ((Trees t fields) (match (built_fields cx binds st fields (- left 1))
+        ((Err f) (Err f))
+        ((Ok b) (Ok (make Out (sym (Rec (word_of t) (get b fields))) (st (get b st))))))))))
+
+  (fn with_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match args
+      ((NoTrees) (unread "a with needs a record"))
+      ((Trees e fields) (match (value cx binds st e (- left 1))
+        ((Err f) (Err f))
+        ((Ok o) (match (built_fields cx binds (get o st) fields (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (match (get o sym)
+            ((Rec n fs) (Ok (make Out (sym (Rec n (replaced fs (get b fields)))) (st (get b st)))))
+            ((Num x ty) (Ok (unknown (get b st) ty false)))
+            ((Truth t) (Ok (unknown (get b st) "?" false)))
+            ((Ctor v fs) (Ok (unknown (get b st) "?" false))))))))))))
+
+  ; The record's fields, those that were written again taking the new value.
+  (fn replaced ((old Binds) (changes Binds)) Binds
+    (uses Alloc)
+    (match old
+      ((NoBinds) (NoBinds))
+      ((Binds n s rest) (Binds n (match (lookup changes n) ((Some v) v) ((None) s)) (replaced rest changes)))))
+
+  ; A variant applied to its fields.
+  (fn variant_value ((cx Cx) (binds Binds) (st St) (v VarD) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (values cx binds st args (- left 1))
+      ((Err f) (Err f))
+      ((Ok vs) (Ok (make Out (sym (Ctor (get v name) (get vs syms))) (st (get vs st))))))))
+
+  (fn arms_of ((ts Trees)) Arms
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (NoArms))
+      ((Trees h rest) (match (node_items h)
+        ((None) (Arms (make Arm (variant "") (binders (NoAtoms)) (body h)) (arms_of rest)))
+        ((Some parts) (match parts
+          ((NoTrees) (Arms (make Arm (variant "") (binders (NoAtoms)) (body h)) (arms_of rest)))
+          ((Trees pattern more) (match more
+            ((NoTrees) (Arms (make Arm (variant "") (binders (NoAtoms)) (body h)) (arms_of rest)))
+            ((Trees body none) (match (node_items pattern)
+              ((None) (Arms (make Arm (variant "") (binders (NoAtoms)) (body body)) (arms_of rest)))
+              ((Some pp) (match pp
+                ((NoTrees) (Arms (make Arm (variant "") (binders (NoAtoms)) (body body)) (arms_of rest)))
+                ((Trees v bs) (Arms (make Arm (variant (word_of v)) (binders (words_of bs)) (body body)) (arms_of rest)))))))))))))))
+
+  (fn match_value ((cx Cx) (binds Binds) (st St) (args Trees) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match args
+      ((NoTrees) (unread "a match needs a value"))
+      ((Trees scrut arms) (match_on cx binds st scrut (arms_of arms) (- left 1))))))
+
+  (fn match_on ((cx Cx) (binds Binds) (st St) (scrut Tree) (arms Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (value cx binds st scrut (- left 1))
+      ((Err f) (Err f))
+      ((Ok o) (match_sym cx binds (get o st) (get o sym) arms (- left 1))))))
+
+  (fn match_sym ((cx Cx) (binds Binds) (st St) (s Sym) (arms Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match s
+      ((Ctor v fs) (known_arm cx binds st v fs arms (- left 1)))
+      ((Num x ty) (opaque_match cx binds st x ty arms (- left 1)))
+      ((Truth t) (unread "a match on a boolean"))
+      ((Rec n fs) (unread "a match on a record")))))
+
+  ; A value whose variant is known takes exactly its arm.
+  (fn known_arm ((cx Cx) (binds Binds) (st St) (v Str) (fs Syms) (arms Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match arms
+      ((NoArms) (Ok (unknown st "?" false)))
+      ((Arms a rest) (known_pick cx binds st v fs a rest (- left 1))))))
+
+  (fn known_pick ((cx Cx) (binds Binds) (st St) (v Str) (fs Syms) (a Arm) (rest Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (if (str.eq (get a variant) v)
+      (value cx (bind_params (get a binders) fs binds) st (get a body) (- left 1))
+      (known_arm cx binds st v fs rest (- left 1)))))
+
+  (fn tag_of ((variant Str) (key Str)) Formula
+    (uses Alloc)
+    (Atom (concat "is:" (concat variant (concat ":" key)))))
+
+  (fn tags_of ((arms Arms) (key Str)) Formulas
+    (uses Alloc)
+    (match arms ((NoArms) (NoFormulas)) ((Arms a rest) (Formulas (tag_of (get a variant) key) (tags_of rest key)))))
+
+  ; Exactly one arm runs: the variants cover the value and exclude each other.
+  (fn exclusive ((arms Arms) (key Str) (st St)) St
+    (uses Alloc)
+    (match arms
+      ((NoArms) st)
+      ((Arms a rest) (exclusive rest key (excluding a rest key st)))))
+
+  (fn excluding ((a Arm) (others Arms) (key Str) (st St)) St
+    (uses Alloc)
+    (match others
+      ((NoArms) st)
+      ((Arms b more) (excluding a more key (facts_plus st (f_disj (pair (f_neg (tag_of (get a variant) key)) (f_neg (tag_of (get b variant) key)))))))))
+
+  (fn opaque_match ((cx Cx) (binds Binds) (st St) (x Lin) (ty Str) (arms Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match arms
+      ((NoArms) (unread "a match without arms"))
+      ((Arms first more) (opaque_arms cx binds st (ref_of x) ty arms (- left 1))))))
+
+  (fn opaque_arms ((cx Cx) (binds Binds) (st St) (key Str) (ty Str) (arms Arms) (left Int)) (Result Out Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (arm_cases cx binds (exclusive arms key (facts_plus st (f_disj (tags_of arms key)))) key ty arms (- left 1))
+      ((Err f) (Err f))
+      ((Ok done) (Ok (joined_all (get done st) (get done cases)))))))
+
+  (record Walked (cases Cases) (st St))
+
+  (fn arm_cases ((cx Cx) (binds Binds) (st St) (key Str) (ty Str) (arms Arms) (left Int)) (Result Walked Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match arms
+      ((NoArms) (Ok (make Walked (cases (NoCases)) (st st))))
+      ((Arms a rest) (arm_case cx binds st key ty a rest (- left 1))))))
+
+  (fn arm_case ((cx Cx) (binds Binds) (st St) (key Str) (ty Str) (a Arm) (rest Arms) (left Int)) (Result Walked Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (var_named (get cx vars) (get a variant))
+      ((None) (unwalked "a match arm that is not a variant"))
+      ((Some v) (arm_bound cx binds st key ty v a rest (- left 1))))))
+
+  (fn arm_bound ((cx Cx) (binds Binds) (st St) (key Str) (ty Str) (v VarD) (a Arm) (rest Arms) (left Int)) (Result Walked Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (arm_binds cx st key ty v (get a variant) (get a binders) 0 binds (- left 1))
+      ((Err f) (Err f))
+      ((Ok bound) (arm_branch cx binds key ty a rest bound (- left 1))))))
+
+  (fn arm_branch ((cx Cx) (binds Binds) (key Str) (ty Str) (a Arm) (rest Arms) (bound Bound) (left Int)) (Result Walked Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (let cond (tag_of (get a variant) key)
+      (match (branch cx (get bound binds) (get bound st) cond (get a body) (- left 1))
+        ((Err f) (Err f))
+        ((Ok o) (arm_next cx binds (get o st) key ty cond (get o sym) rest (- left 1)))))))
+
+  (fn arm_next ((cx Cx) (binds Binds) (st St) (key Str) (ty Str) (cond Formula) (answer Sym) (rest Arms) (left Int)) (Result Walked Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (arm_cases cx binds st key ty rest (- left 1))
+      ((Err f) (Err f))
+      ((Ok more) (Ok (make Walked (cases (Cases (make Case (cond cond) (sym answer)) (get more cases))) (st (get more st))))))))
+
+  (record Bound (binds Binds) (st St))
+
+  ; Each binder is a value of its field's type, known to be a part of the whole.
+  (fn arm_binds ((cx Cx) (st St) (key Str) (ty Str) (v VarD) (variant Str) (names Atoms) (i Int) (binds Binds) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match names
+      ((NoAtoms) (Ok (make Bound (binds binds) (st st))))
+      ((Atoms n rest) (arm_bind cx st key ty v variant n rest i binds (- left 1))))))
+
+  (fn arm_bind ((cx Cx) (st St) (key Str) (ty Str) (v VarD) (variant Str) (n Str) (rest Atoms) (i Int) (binds Binds) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "verify" "the expression is nested too deeply"))
+    (match (variant_ty v ty i)
+      ((None) (unbound "a variant field of a type this does not know"))
+      ((Some ft) (match (known_value cx st (concat key (concat "@" (concat variant (concat "." (num.to_str i))))) ft (- left 1))
+        ((Err f) (Err f))
+        ((Ok o) (arm_binds cx (get o st) key ty v variant rest (+ i 1) (Binds n (get o sym) binds) (- left 1))))))))
+
+  ; One value out of mutually exclusive branches: a boolean if every one is, else an unknown equal
+  ; to the one that ran.
+  (fn joined_all ((st St) (cs Cases)) Out
+    (uses Alloc)
+    (if (all_truth cs)
+      (make Out (sym (Truth (f_disj (truth_cases cs)))) (st st))
+      (let fresh (unknown st (cases_type cs) false)
+        (match (get fresh sym)
+          ((Truth t) fresh)
+          ((Num out t) (make Out (sym (get fresh sym)) (st (case_facts (get fresh st) out cs))))
+          ((Rec n fs) fresh)
+          ((Ctor v fs) fresh)))))
+
+  (fn all_truth ((cs Cases)) Bool
+    (match cs
+      ((NoCases) true)
+      ((Cases c rest) (match (get c sym) ((Truth f) (all_truth rest)) ((Num x t) false) ((Rec n fs) false) ((Ctor v fs) false)))))
+
+  (fn truth_cases ((cs Cases)) Formulas
+    (uses Alloc)
+    (match cs
+      ((NoCases) (NoFormulas))
+      ((Cases c rest) (Formulas (f_conj (pair (get c cond) (as_formula (get c sym)))) (truth_cases rest)))))
+
+  (fn cases_type ((cs Cases)) Str
+    (uses Alloc)
+    (match cs
+      ((NoCases) "Int")
+      ((Cases c rest) (of_type (match (get c sym) ((Num x t) t) ((Truth f) "Int") ((Rec n fs) n) ((Ctor v fs) "?")) (cases_type rest)))))
+
+  (fn case_facts ((st St) (out Lin) (cs Cases)) St
+    (uses Alloc)
+    (match cs
+      ((NoCases) st)
+      ((Cases c rest) (let t (termed st (get c sym))
+        (case_facts (facts_plus (get t st) (f_disj (pair (f_neg (get c cond)) (f_eq out (get t lin))))) out rest)))))
+
+  ; --- a function ------------------------------------------------------------------------------------------------------
+  (fn param_binds ((fname Str) (names Atoms) (kinds Atoms)) Binds
+    (uses Alloc)
+    (match names
+      ((NoAtoms) (NoBinds))
+      ((Atoms n rest) (match kinds
+        ((NoAtoms) (NoBinds))
+        ((Atoms k more) (Binds n (if (str.eq k "Bool") (Truth (Atom (concat "p:" (concat fname (concat ":" n))))) (Num (var_of (concat "p:" (concat fname (concat ":" n)))) k)) (param_binds fname rest more)))))))
+
+  ; What a parameter's type says of it: a fixed width keeps it inside its range, a refined newtype its condition.
+  (fn param_facts ((cx Cx) (st St) (fname Str) (names Atoms) (kinds Atoms) (named Atoms)) (Result St Fault)
+    (uses Alloc)
+    (match names
+      ((NoAtoms) (Ok st))
+      ((Atoms n rest) (match kinds
+        ((NoAtoms) (Ok st))
+        ((Atoms k more) (match named
+          ((NoAtoms) (Ok st))
+          ((Atoms w wmore) (let x (var_of (concat "p:" (concat fname (concat ":" n))))
+            (match (refine cx (in_range st x k) w x 4000)
+              ((Err f) (Err f))
+              ((Ok s) (param_facts cx s fname rest more wmore)))))))))))
+
+  (fn checked ((cx Cx) (info FnInfo) (body Tree)) (Result St Fault)
+    (uses Alloc)
+    (let binds (param_binds (get info name) (get info params) (get info kinds))
+      (match (param_facts cx (make St (facts (NoFormulas)) (fresh 0) (errs "") (always (NoFormulas)) (sites (NoSites))) (get info name) (get info params) (get info kinds) (get info named))
+        ((Err f) (Err f))
+        ((Ok st1) (match (instantiate_own cx info binds st1)
+          ((Err f) (Err f))
+          ((Ok st0) (match (value cx binds st0 body 4000)
+            ((Err f) (Err f))
+            ((Ok done) (finish cx info binds (get done sym) (get done st))))))))))
+
+  ; The function's own `requires`, taken as known on entry.
+  (fn instantiate_own ((cx Cx) (info FnInfo) (binds Binds) (st St)) (Result St Fault)
+    (uses Alloc)
+    (match (get info pre)
+      ((NoTrees) (Ok st))
+      ((Trees c rest) (match (value (with cx (open (Atoms (get info name) (NoAtoms))) (contract true)) binds st c 4000)
+        ((Err f) (Err f))
+        ((Ok o) (Ok (facts_plus (get o st) (as_formula (get o sym)))))))))
+
+  (fn finish ((cx Cx) (info FnInfo) (binds Binds) (answer Sym) (st St)) (Result St Fault)
+    (uses Alloc)
+    (match (get info post)
+      ((NoTrees) (Ok st))
+      ((Trees c rest) (match (value (with cx (open (Atoms (get info name) (NoAtoms))) (contract true)) (Binds "result" answer binds) st c 4000)
+        ((Err f) (Err f))
+        ((Ok o) (Ok (must (get o st) (as_formula (get o sym)) "unproven-postcondition" (get info name))))))))
+
+  ; --- reading the module --------------------------------------------------------------------------------------------------
+  (fn param_pairs ((ps Trees)) Trees ps)
+
+  (fn param_names ((ps Trees)) Atoms
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (NoAtoms))
+      ((Trees p rest) (match (node_items p)
+        ((None) (param_names rest))
+        ((Some parts) (match parts ((NoTrees) (param_names rest)) ((Trees n more) (Atoms (word_of n) (param_names rest)))))))))
+
+  ; A type's name as the checker sees it: a label is only a mark on the type it wraps.
+  (fn type_name ((t Tree) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match (node_items t)
+        ((None) (word_of t))
+        ((Some parts) (if (head_is t "label")
+          (match (last_of parts) ((Some inner) (type_name inner (- left 1))) ((None) "?"))
+          (match parts ((NoTrees) "?") ((Trees h more) (word_of h))))))))
+
+  ; A type as the value carries it: its name, or all of it when it has arguments.
+  (fn type_ty ((t Tree) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (ty_with t (NoAtoms) (NoTrees) left))
+
+  (fn heads_of ((ks Atoms)) Atoms
+    (uses Alloc)
+    (match ks ((NoAtoms) ks) ((Atoms k rest) (Atoms (type_head k) (heads_of rest)))))
+
+  (fn param_kinds ((ps Trees)) Atoms
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (NoAtoms))
+      ((Trees p rest) (match (node_items p)
+        ((None) (Atoms "?" (param_kinds rest)))
+        ((Some parts) (match parts
+          ((NoTrees) (Atoms "?" (param_kinds rest)))
+          ((Trees n more) (match more ((NoTrees) (Atoms "?" (param_kinds rest))) ((Trees t none) (Atoms (type_ty t 20) (param_kinds rest)))))))))))
+
+  (fn all_scalar ((ks Atoms)) Bool
+    (uses Alloc)
+    (match ks ((NoAtoms) true) ((Atoms k rest) (and (scalar k) (all_scalar rest)))))
+
+  ; The clause named `which` among the items between the result type and the body.
+  (fn clause_of ((clauses Trees) (which Str)) Trees
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) (NoTrees))
+      ((Trees c rest) (if (head_is c which) (after_head c) (clause_of rest which)))))
+
+  (fn effectful_in ((clauses Trees)) Bool
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) false)
+      ((Trees c rest) (or (and (head_is c "uses") (< 0 (trees_len (after_head c)))) (effectful_in rest)))))
+
+  ; Everything between the result type and the last item, which is the body.
+  (fn middle ((ts Trees)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (match rest ((NoTrees) (NoTrees)) ((Trees n more) (Trees h (middle rest)))))))
+
+  (fn last_of ((ts Trees)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees h rest) (match rest ((NoTrees) (Some h)) ((Trees n more) (last_of rest))))))
+
+  ; `(fn name (params) ret clause... body)`, or `(fn (name T...) ...)` for a generic one, whose
+  ; type parameters are values nothing is known of.
+  (fn info_from ((ns NewTs) (after Trees)) (Option FnInfo)
+    (uses Alloc)
+    (match after
+      ((NoTrees) (None))
+      ((Trees n rest) (match rest
+          ((NoTrees) (None))
+          ((Trees params more) (match more
+            ((NoTrees) (None))
+            ((Trees ret clauses) (Some (info_with ns (declared_name n) (items_of params) (type_ty ret 20) (middle clauses))))))))))
+
+  (fn info_with ((ns NewTs) (name Str) (params Trees) (ret Str) (clauses Trees)) FnInfo
+    (uses Alloc)
+    (make FnInfo
+      (name name)
+      (params (param_names params))
+      (kinds (resolved ns (param_kinds params)))
+      (named (heads_of (param_kinds params)))
+      (ret (base_kind ns ret 20))
+      (retname (type_head ret))
+      (pre (clause_of clauses "requires"))
+      (post (clause_of clauses "ensures"))
+      (effectful (effectful_in clauses))
+      (readable (and (all_scalar (resolved ns (param_kinds params))) (scalar (base_kind ns ret 20))))))
+
+  (fn infos_of ((ns NewTs) (items Trees)) FnInfos
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoFnInfos))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (info_from ns (after_head h)) ((None) (infos_of ns rest)) ((Some i) (FnInfos i (infos_of ns rest))))
+        (infos_of ns rest)))))
+
+  (fn body_of ((h Tree)) (Option Tree) (last_of (after_head h)))
+
+  ; --- termination -----------------------------------------------------------------------------------------------------
+  ; A function that reaches itself must make something smaller on the way round. For each
+  ; group of functions that call each other, one parameter per member is looked for such that
+  ; every call in the group either lowers it -- a number still above 0 passed something
+  ; provably smaller, or a part of it that a `match` or a field read took apart -- or passes it
+  ; on unchanged, and the calls that pass it on cannot go round for ever by themselves. That is
+  ; witness/verify.py's rule. A group with a member this does not read is not read either.
+  (record Seen (name Str) (text Str) (read Bool) (sites Sites) (callees Atoms) (params Atoms) (kinds Atoms) (line Bool) (item Tree) (entry Formulas) (declared Trees))
+
+  (enum Seens (NoSeens) (Seens (head Seen) (rest Seens)))
+
+  (record Done (text Str) (read Bool) (sites Sites) (entry Formulas))
+
+  (fn done_of ((cx Cx) (info FnInfo) (body (Option Tree))) Done
+    (uses Alloc)
+    (if (not (get info readable))
+      (make Done (text "not read yet: a parameter or result that is not Int or Bool") (read false) (sites (NoSites)) (entry (NoFormulas)))
+      (match body
+        ((None) (make Done (text "not read yet: no body") (read false) (sites (NoSites)) (entry (NoFormulas))))
+        ((Some b) (match (checked cx info b)
+          ((Err f) (make Done (text (concat "not read yet: " (get f why))) (read false) (sites (NoSites)) (entry (NoFormulas))))
+          ((Ok st) (make Done (text (get st errs)) (read true) (sites (get st sites)) (entry (entry_facts cx info)))))))))
+
+  ; What is known on entry: the parameters' types and the function's own `requires`.
+  (fn entry_facts ((cx Cx) (info FnInfo)) Formulas
+    (uses Alloc)
+    (match (param_facts cx (make St (facts (NoFormulas)) (fresh 0) (errs "") (always (NoFormulas)) (sites (NoSites))) (get info name) (get info params) (get info kinds) (get info named))
+      ((Err f) (NoFormulas))
+      ((Ok st1) (match (instantiate_own cx info (param_binds (get info name) (get info params) (get info kinds)) st1)
+        ((Err f) (NoFormulas))
+        ((Ok st0) (get st0 facts))))))
+
+  ; The names of every function in the module, generic ones too.
+  (fn fn_names ((items Trees)) Atoms
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoAtoms))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (after_head h) ((NoTrees) (fn_names rest)) ((Trees n more) (Atoms (declared_name n) (fn_names rest))))
+        (fn_names rest)))))
+
+  ; The functions a tree calls, among `names`.
+  (fn calls_in ((names Atoms) (t Tree) (acc Atoms) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) acc
+      (match t
+        ((Leaf x q) acc)
+        ((Node items) (match items
+          ((NoTrees) acc)
+          ((Trees h rest) (match h
+            ((Leaf x q) (calls_in_all names rest (named_call names (word_of h) acc) (- left 1)))
+            ((Node inner) (calls_in_all names rest (calls_in names h acc (- left 1)) (- left 1))))))))))
+
+  (fn named_call ((names Atoms) (w Str) (acc Atoms)) Atoms
+    (if (and (holds names w) (not (holds acc w))) (Atoms w acc) acc))
+
+  (fn calls_in_all ((names Atoms) (ts Trees) (acc Atoms) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) acc
+      (match ts ((NoTrees) acc) ((Trees h rest) (calls_in_all names rest (calls_in names h acc (- left 1)) (- left 1))))))
+
+  ; `(fn name (params) ret clause... body)`: what follows the parameters is where calls are.
+  (fn seen_of ((cx Cx) (names Atoms) (h Tree)) Seen
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) (make Seen (name "") (text "") (read false) (sites (NoSites)) (callees (NoAtoms)) (params (NoAtoms)) (kinds (NoAtoms)) (line false) (item h) (entry (NoFormulas)) (declared (NoTrees))))
+      ((Trees n rest) (let callees (match rest ((NoTrees) (NoAtoms)) ((Trees ps more) (calls_in_all names more (NoAtoms) 100000)))
+        (match (info_from (get cx news) (after_head h))
+          ((None) (make Seen (name (declared_name n)) (text "") (read false) (sites (NoSites)) (callees callees) (params (NoAtoms)) (kinds (NoAtoms)) (line false) (item h) (entry (NoFormulas)) (declared (NoTrees))))
+          ((Some info) (let d (done_of cx info (body_of h))
+            (make Seen (name (get info name)) (text (get d text)) (read (get d read)) (sites (get d sites)) (callees callees) (params (get info params)) (kinds (get info kinds)) (line true) (item h) (entry (get d entry)) (declared (bounds_of h))))))))))
+
+  (fn bounds_of ((h Tree)) Trees
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) (NoTrees))
+      ((Trees n rest) (match rest ((NoTrees) (NoTrees)) ((Trees ps more) (match more ((NoTrees) (NoTrees)) ((Trees ret clauses) (clause_of (middle clauses) "bounds"))))))))
+
+  (fn seens_of ((cx Cx) (names Atoms) (items Trees)) Seens
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoSeens))
+      ((Trees h rest) (if (head_is h "fn") (Seens (seen_of cx names h) (seens_of cx names rest)) (seens_of cx names rest)))))
+
+  (fn seen_named ((ss Seens) (n Str)) (Option Seen)
+    (match ss ((NoSeens) (None)) ((Seens h rest) (if (str.eq (get h name) n) (Some h) (seen_named rest n)))))
+
+  ; Everything reachable from `todo` by calls, `done` included.
+  (fn reach ((ss Seens) (todo Atoms) (done Atoms) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) done
+      (match todo
+        ((NoAtoms) done)
+        ((Atoms n rest) (if (holds done n)
+          (reach ss rest done (- left 1))
+          (match (seen_named ss n)
+            ((None) (reach ss rest (Atoms n done) (- left 1)))
+            ((Some s) (reach ss (atoms_join (get s callees) rest) (Atoms n done) (- left 1)))))))))
+
+  (fn reached_from ((ss Seens) (n Str)) Atoms
+    (uses Alloc)
+    (match (seen_named ss n) ((None) (NoAtoms)) ((Some s) (reach ss (get s callees) (NoAtoms) 100000))))
+
+  ; The functions `n` is mutually recursive with, itself included; none when it does not recur.
+  (fn group_of ((ss Seens) (n Str)) Atoms
+    (uses Alloc)
+    (let mine (reached_from ss n)
+      (if (holds mine n) (back_to ss n mine) (NoAtoms))))
+
+  (fn back_to ((ss Seens) (n Str) (cands Atoms)) Atoms
+    (uses Alloc)
+    (match cands
+      ((NoAtoms) (NoAtoms))
+      ((Atoms c rest) (if (holds (reached_from ss c) n) (Atoms c (back_to ss n rest)) (back_to ss n rest)))))
+
+  (fn least ((as Atoms) (best Str)) Str
+    (uses Alloc)
+    (match as ((NoAtoms) best) ((Atoms a rest) (least rest (if (str_before a best) a best)))))
+
+  (fn all_read ((ss Seens) (ms Atoms)) Bool
+    (match ms
+      ((NoAtoms) true)
+      ((Atoms m rest) (match (seen_named ss m) ((None) false) ((Some s) (and (get s read) (all_read ss rest)))))))
+
+  ; --- the measure ---
+  (record Edge (caller Str) (callee Str) (args Syms) (facts Formulas))
+
+  (enum Edges (NoEdges) (Edges (head Edge) (rest Edges)))
+
+  (enum Placed (NoPlaced) (Placed (name Str) (at Int) (rest Placed)))
+
+  (fn edges_from ((caller Str) (ms Atoms) (sites Sites) (acc Edges)) Edges
+    (uses Alloc)
+    (match sites
+      ((NoSites) acc)
+      ((Sites c args facts rest) (edges_from caller ms rest (if (holds ms c) (Edges (make Edge (caller caller) (callee c) (args args) (facts facts)) acc) acc)))))
+
+  (fn group_edges ((ss Seens) (ms Atoms) (all Atoms) (acc Edges)) Edges
+    (uses Alloc)
+    (match ms
+      ((NoAtoms) acc)
+      ((Atoms m rest) (group_edges ss rest all (match (seen_named ss m) ((None) acc) ((Some s) (edges_from m all (get s sites) acc)))))))
+
+  (fn placed_at ((p Placed) (n Str)) (Option Int)
+    (match p ((NoPlaced) (None)) ((Placed m at rest) (if (str.eq m n) (Some at) (placed_at rest n)))))
+
+  (fn atom_at ((as Atoms) (i Int)) Str
+    (match as ((NoAtoms) "") ((Atoms a rest) (if (<= i 0) a (atom_at rest (- i 1))))))
+
+  (fn integer_kind ((k Str)) Bool (or (str.eq k "Int") (is_width k)))
+
+  ; The one atom a value is, when it is exactly one.
+  (fn lone_atom ((s Sym)) Str
+    (match s
+      ((Num x t) (match (get x terms)
+        ((NoTerms) "")
+        ((Terms a k rest) (match rest ((NoTerms) (if (and (= k 1) (= (get x const) 0)) a "")) ((Terms b c more) "")))))
+      ((Truth f) "") ((Rec n fs) "") ((Ctor v fs) "")))
+
+  ; A part of `whole`: a binder of a match on it (`whole@Variant.i`) or a field of it (`whole.f`).
+  (fn part_of ((a Str) (whole Str)) Bool
+    (uses Alloc)
+    (let n (unwrap (bytes.len (str.encode whole)))
+      (and (< n (unwrap (bytes.len (str.encode a))))
+        (and (bytes.eq (bytes.slice (str.encode a) (Octets 0) (Octets n)) (str.encode whole))
+          (let c (byte_at (str.encode a) n) (or (= c 64) (= c 46)))))))
+
+  (fn edge_ends ((ss Seens) (e Edge) (p Placed)) (Option Ends)
+    (uses Alloc)
+    (match (placed_at p (get e caller))
+      ((None) (None))
+      ((Some here) (match (placed_at p (get e callee))
+        ((None) (None))
+        ((Some there) (match (seen_named ss (get e caller))
+          ((None) (None))
+          ((Some me) (match (seen_named ss (get e callee))
+            ((None) (None))
+            ((Some it) (match (sym_at (get e args) there)
+              ((None) (None))
+              ((Some arg) (Some (make Ends
+                (measure (concat "p:" (concat (get e caller) (concat ":" (atom_at (get me params) here)))))
+                (arg arg)
+                (numeric (and (integer_kind (atom_at (get me kinds) here)) (integer_kind (atom_at (get it kinds) there)))))))))))))))))
+
+  (record Ends (measure Str) (arg Sym) (numeric Bool))
+
+  ; Does the call lower the caller's measure to a smaller value that is still not negative?
+  (fn lowers ((ends Ends) (facts Formulas)) Bool
+    (uses Alloc)
+    (let m (get ends measure)
+      (if (part_of (lone_atom (get ends arg)) m)
+        true
+        (if (not (get ends numeric))
+          false
+          (match (get ends arg)
+            ((Num x t) (str.eq (verdict facts (f_conj (pair (f_lt x (var_of m)) (f_lt (num 0) (var_of m))))) "proved"))
+            ((Truth f) false) ((Rec n fs) false) ((Ctor v fs) false))))))
+
+  (fn passes ((ends Ends)) Bool (str.eq (lone_atom (get ends arg)) (get ends measure)))
+
+  ; Every edge both of whose ends are placed and one of which is `placed`.
+  (fn edges_hold ((ss Seens) (es Edges) (p Placed) (placed Str)) Bool
+    (uses Alloc)
+    (match es
+      ((NoEdges) true)
+      ((Edges e rest) (and
+        (if (or (str.eq (get e caller) placed) (str.eq (get e callee) placed))
+          (match (edge_ends ss e p) ((None) true) ((Some ends) (or (passes ends) (lowers ends (get e facts)))))
+          true)
+        (edges_hold ss rest p placed)))))
+
+  ; The edges that pass the measure on without lowering it may not go round by themselves.
+  (fn passing ((ss Seens) (es Edges) (p Placed)) Edges
+    (uses Alloc)
+    (match es
+      ((NoEdges) es)
+      ((Edges e rest) (match (edge_ends ss e p)
+        ((None) (passing ss rest p))
+        ((Some ends) (if (and (passes ends) (not (lowers ends (get e facts)))) (Edges e (passing ss rest p)) (passing ss rest p)))))))
+
+  (fn passed_to ((es Edges) (n Str)) Atoms
+    (uses Alloc)
+    (match es ((NoEdges) (NoAtoms)) ((Edges e rest) (if (str.eq (get e caller) n) (Atoms (get e callee) (passed_to rest n)) (passed_to rest n)))))
+
+  (fn pass_reach ((es Edges) (todo Atoms) (done Atoms) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) done
+      (match todo
+        ((NoAtoms) done)
+        ((Atoms n rest) (if (holds done n) (pass_reach es rest done (- left 1)) (pass_reach es (atoms_join (passed_to es n) rest) (Atoms n done) (- left 1)))))))
+
+  (fn no_endless ((es Edges) (ms Atoms)) Bool
+    (uses Alloc)
+    (match ms
+      ((NoAtoms) true)
+      ((Atoms m rest) (and (not (holds (pass_reach es (passed_to es m) (NoAtoms) 10000) m)) (no_endless es rest)))))
+
+  (enum Ints (NoInts) (Ints (head Int) (rest Ints)))
+
+  (fn positions ((ks Atoms) (i Int) (numeric Bool)) Ints
+    (uses Alloc)
+    (match ks ((NoAtoms) (NoInts)) ((Atoms k rest) (if (if numeric (integer_kind k) (not (integer_kind k))) (Ints i (positions rest (+ i 1) numeric)) (positions rest (+ i 1) numeric)))))
+
+  (fn ints_join ((a Ints) (b Ints)) Ints
+    (uses Alloc)
+    (match a ((NoInts) b) ((Ints h rest) (Ints h (ints_join rest b)))))
+
+  ; Numbers first: a measure is numeric or structural, and a number has no parts.
+  (fn candidates ((ss Seens) (n Str)) Ints
+    (uses Alloc)
+    (match (seen_named ss n) ((None) (NoInts)) ((Some s) (ints_join (positions (get s kinds) 0 true) (positions (get s kinds) 0 false)))))
+
+  (record Search (found Bool) (left Int) (placed Placed))
+
+  ; Place the members in order, abandoning a placement at the first edge it cannot justify.
+  ; `left` bounds the placements tried: running out loses a proof, it never invents one.
+  (fn place ((ss Seens) (es Edges) (ms Atoms) (order Atoms) (p Placed) (left Int)) Search
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Search (found false) (left 0) (placed p))
+      (match order
+        ((NoAtoms) (make Search (found (no_endless (passing ss es p) ms)) (left left) (placed p)))
+        ((Atoms n rest) (try_at ss es ms n rest p (candidates ss n) (- left 1))))))
+
+  (fn try_at ((ss Seens) (es Edges) (ms Atoms) (n Str) (rest Atoms) (p Placed) (cs Ints) (left Int)) Search
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Search (found false) (left 0) (placed p))
+      (match cs
+        ((NoInts) (make Search (found false) (left left) (placed p)))
+        ((Ints at more) (let q (Placed n at p)
+          (if (edges_hold ss es q n)
+            (let got (place ss es ms rest q (- left 1))
+              (if (get got found) got (try_at ss es ms n rest p more (if (and (<= 0 (get got left)) (< (get got left) left)) (get got left) (- left 1)))))
+            (try_at ss es ms n rest p more (- left 1))))))))
+
+  (fn measure_of ((ss Seens) (ms Atoms)) (Option Placed)
+    (uses Alloc)
+    (let got (place ss (group_edges ss ms ms (NoEdges)) ms ms (NoPlaced) 4096)
+      (if (get got found) (Some (get got placed)) (None))))
+
+  (fn terminates ((ss Seens) (ms Atoms)) Bool
+    (uses Alloc)
+    (match (measure_of ss ms) ((None) false) ((Some p) true)))
+
+
+  ; --- resource bounds -----------------------------------------------------------------------------------------------
+  ; How deep the calls go and how much is built, per group of functions, as witness/verify.py
+  ; counts them: one pass through a body is its deepest call plus a frame and every allocating
+  ; builtin it reaches; a group costs its passes times how often it can be entered, which is
+  ; the tightest bound the prover finds on each member's measure from what is known on entry,
+  ; plus one. A structural measure has no number, so a recursion over data is unbounded. Work
+  ; placed with memory of its own spends another machine's stack and heap.
+  (enum Amt (Is (n Int)) (Unbounded) (Unread))
+
+  ; `calls` is the most calls back into the group being costed that one pass can make: how
+  ; many there are in a body decides how often the group's bodies can run (`runs`).
+  (enum Pass (Costs (deep Int) (alloc Int) (calls Int)) (NoBound) (NotRead))
+
+  (record GCost (deep Amt) (alloc Amt) (repeats Amt))
+
+  (enum Memo (NoMemo) (Memo (key Str) (cost GCost) (rest Memo)))
+
+  (record Walk (pass Pass) (memo Memo))
+
+  (record Costed (cost GCost) (memo Memo))
+
+  (fn max_int ((a Int) (b Int)) Int (if (< a b) b a))
+
+  (fn seq_pass ((a Pass) (b Pass)) Pass
+    (match a
+      ((NoBound) a)
+      ((NotRead) (match b ((NoBound) b) ((NotRead) a) ((Costs d x k) a)))
+      ((Costs d x k) (match b ((NoBound) b) ((NotRead) b) ((Costs e y j) (Costs (max_int d e) (+ x y) (+ k j)))))))
+
+  (fn worst_pass ((a Pass) (b Pass)) Pass
+    (match a
+      ((NoBound) a)
+      ((NotRead) (match b ((NoBound) b) ((NotRead) a) ((Costs d x k) a)))
+      ((Costs d x k) (match b ((NoBound) b) ((NotRead) b) ((Costs e y j) (Costs (max_int d e) (max_int x y) (max_int k j)))))))
+
+  ; Branches that run side by side: the deepest of them, and what all of them build.
+  (fn side_pass ((a Pass) (b Pass)) Pass
+    (match a
+      ((NoBound) a)
+      ((NotRead) (match b ((NoBound) b) ((NotRead) a) ((Costs d x k) a)))
+      ((Costs d x k) (match b ((NoBound) b) ((NotRead) b) ((Costs e y j) (Costs (max_int d e) (+ x y) (+ k j)))))))
+
+  ; Members of one group: the deepest of them and what all of them build, but each run of
+  ; the group is one member's body, so the calls back into it are the most any one makes.
+  (fn member_pass ((a Pass) (b Pass)) Pass
+    (match a
+      ((NoBound) a)
+      ((NotRead) (match b ((NoBound) b) ((NotRead) a) ((Costs d x k) a)))
+      ((Costs d x k) (match b ((NoBound) b) ((NotRead) b) ((Costs e y j) (Costs (max_int d e) (+ x y) (max_int k j)))))))
+
+  (fn none () Pass (Costs 0 0 0))
+
+  ; 1 + k + ... + k^(n-1): how often the bodies of a group entered `n` deep can run when each
+  ; calls back into it at most `k` times. It is `n` when `k` is one; a body that calls itself
+  ; twice runs 2^n - 1 times, which a count of the repeats alone would miss.
+  (fn runs ((k Int) (n Int)) Int
+    (requires (<= 0 n))
+    (if (<= n 0) 0 (+ 1 (* k (runs k (- n 1))))))
+
+  (fn part_of_fn ((ss Seens) (n Str)) Atoms
+    (uses Alloc)
+    (match (group_of ss n) ((NoAtoms) (Atoms n (NoAtoms))) ((Atoms a rest) (Atoms a rest))))
+
+  (fn memo_at ((m Memo) (k Str)) (Option GCost)
+    (match m ((NoMemo) (None)) ((Memo key c rest) (if (str.eq key k) (Some c) (memo_at rest k)))))
+
+  ; The cost of the group `n` is in, from the memo or worked out.
+  (fn group_cost ((ss Seens) (names Atoms) (n Str) (memo Memo) (left Int)) Costed
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let ms (part_of_fn ss n)
+      (let key (least ms n)
+        (match (memo_at memo key)
+          ((Some c) (make Costed (cost c) (memo memo)))
+          ((None) (if (<= left 0)
+            (make Costed (cost (make GCost (deep (Unread)) (alloc (Unread)) (repeats (Unread)))) (memo memo))
+            (let w (members_pass ss names ms ms (none) memo (- left 1))
+              (let c (scaled (get w pass) (repeats_of ss ms))
+                (make Costed (cost c) (memo (Memo key c (get w memo))))))))))))
+
+  (fn scaled ((p Pass) (r Amt)) GCost
+    (match p
+      ((NoBound) (make GCost (deep (Unbounded)) (alloc (Unbounded)) (repeats r)))
+      ((NotRead) (make GCost (deep (Unread)) (alloc (Unread)) (repeats r)))
+      ((Costs d a calls) (match r
+        ((Is k) (make GCost (deep (Is (* k d))) (alloc (Is (* (if (<= 0 k) (runs calls k) 0) a))) (repeats r)))
+        ((Unbounded) (make GCost (deep r) (alloc r) (repeats r)))
+        ((Unread) (make GCost (deep r) (alloc r) (repeats r)))))))
+
+  ; The members' passes: the deepest of them, and what they build added up.
+  (fn members_pass ((ss Seens) (names Atoms) (group Atoms) (ms Atoms) (acc Pass) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (make Walk (pass (NotRead)) (memo memo))
+      (match ms
+        ((NoAtoms) (make Walk (pass acc) (memo memo)))
+        ((Atoms m rest) (match (seen_named ss m)
+          ((None) (members_pass ss names group rest (member_pass acc (NotRead)) memo (- left 1)))
+          ((Some s) (match (body_of (get s item))
+            ((None) (members_pass ss names group rest (member_pass acc (NotRead)) memo (- left 1)))
+            ((Some b) (let w (walk_cost ss names group b memo (- left 1))
+              (members_pass ss names group rest (member_pass acc (framed (get w pass))) (get w memo) (- left 1)))))))))))
+
+  (fn framed ((p Pass)) Pass (match p ((Costs d a k) (Costs (+ d 1) a k)) ((NoBound) p) ((NotRead) p)))
+
+  ; How often a group can be entered, the first time included.
+  (fn repeats_of ((ss Seens) (ms Atoms)) Amt
+    (uses Alloc)
+    (match (group_edges ss ms ms (NoEdges))
+      ((NoEdges) (Is 1))
+      ((Edges e more) (if (not (all_read ss ms))
+        (Unread)
+        (match (measure_of ss ms)
+          ((None) (Unbounded))
+          ((Some p) (tops ss p 0)))))))
+
+  (fn tops ((ss Seens) (p Placed) (worst Int)) Amt
+    (uses Alloc)
+    (match p
+      ((NoPlaced) (Is (+ worst 1)))
+      ((Placed name at rest) (match (seen_named ss name)
+        ((None) (Unread))
+        ((Some s) (if (not (integer_kind (atom_at (get s kinds) at)))
+          (Unbounded)
+          (let top (upper (get s entry) (var_of (concat "p:" (concat name (concat ":" (atom_at (get s params) at))))) 0 1000000)
+            (if (<= 1000000 top) (Unbounded) (tops ss rest (max_int worst top))))))))))
+
+  ; The tightest bound on `x` that follows from `facts`, between `lo` and `hi`.
+  (fn upper ((facts Formulas) (x Lin) (lo Int) (hi Int)) Int
+    (uses Alloc)
+    (if (str.eq (verdict facts (f_le x (num hi))) "proved") (narrowed_to facts x lo hi 64) hi))
+
+  (fn narrowed_to ((facts Formulas) (x Lin) (lo Int) (hi Int) (left Int)) Int
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= hi lo))
+      hi
+      (let mid (half (+ lo hi))
+        (if (str.eq (verdict facts (f_le x (num mid))) "proved")
+          (narrowed_to facts x lo mid (- left 1))
+          (narrowed_to facts x (+ mid 1) hi (- left 1))))))
+
+  ; Rounded down, as Python's `//` has it, for the non-negative numbers asked here.
+  (fn half ((n Int)) Int (match (num.div n 2) ((Some q) q) ((None) 0)))
+
+  ; --- one pass through a body ---
+  (fn walk_cost ((ss Seens) (names Atoms) (group Atoms) (t Tree) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match t
+        ((Leaf x q) (make Walk (pass (none)) (memo memo)))
+        ((Node items) (match items
+          ((NoTrees) (make Walk (pass (none)) (memo memo)))
+          ((Trees h args) (match h
+            ((Node inner) (walk_all ss names group items (none) memo (- left 1)))
+            ((Leaf x q) (form_cost ss names group (word_of h) args memo (- left 1))))))))))
+
+  (fn walk_all ((ss Seens) (names Atoms) (group Atoms) (ts Trees) (acc Pass) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match ts
+        ((NoTrees) (make Walk (pass acc) (memo memo)))
+        ((Trees h rest) (let w (walk_cost ss names group h memo (- left 1))
+          (walk_all ss names group rest (seq_pass acc (get w pass)) (get w memo) (- left 1)))))))
+
+  ; The second item of each `(name value)`: the values of a make, a with or log.fields.
+  (fn values_of ((ts Trees)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (match (nth (items_of h) 1) ((None) (values_of rest)) ((Some v) (Trees v (values_of rest)))))))
+
+  (fn form_cost ((ss Seens) (names Atoms) (group Atoms) (op Str) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (if (str.eq op "if")
+        (if_cost ss names group args memo (- left 1))
+        (if (str.eq op "match")
+          (match_cost ss names group args memo (- left 1))
+          (form_more ss names group op args memo (- left 1))))))
+
+  (fn match_cost ((ss Seens) (names Atoms) (group Atoms) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match args
+        ((NoTrees) (make Walk (pass (none)) (memo memo)))
+        ((Trees scrut arms) (let w (walk_cost ss names group scrut memo (- left 1))
+          (let a (arms_cost ss names group arms (none) false (get w memo) (- left 1))
+            (make Walk (pass (seq_pass (get w pass) (get a pass))) (memo (get a memo)))))))))
+
+  (fn form_more ((ss Seens) (names Atoms) (group Atoms) (op Str) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+          (if (or (str.eq op "make") (or (str.eq op "with") (str.eq op "log.fields")))
+            (walk_all ss names group (fields_walked op args) (none) memo (- left 1))
+              (if (str.eq op "infer")
+                (let w (walk_all ss names group args (none) memo (- left 1)) (make Walk (pass (seq_pass (get w pass) (Costs 0 1 0))) (memo (get w memo))))
+                (if (str.eq op "par")
+                  (par_cost ss names group args memo (- left 1))
+                  (if (str.eq op "scope")
+                    (scope_cost ss names group args memo (- left 1))
+                    (call_cost ss names group op args memo (- left 1))))))))
+
+  ; What a make, a with or log.fields evaluates: the record changed (for a with) and the
+  ; values of its `(name value)` pairs.
+  (fn fields_walked ((op Str) (args Trees)) Trees
+    (uses Alloc)
+    (match args
+      ((NoTrees) args)
+      ((Trees r fields) (if (str.eq op "make") (values_of fields) (if (str.eq op "with") (Trees r (values_of fields)) (values_of args))))))
+
+  (fn if_cost ((ss Seens) (names Atoms) (group Atoms) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (make Walk (pass (NotRead)) (memo memo))
+    (match args
+      ((NoTrees) (make Walk (pass (none)) (memo memo)))
+      ((Trees c rest) (let w (walk_cost ss names group c memo (- left 1))
+        (let a (arms_cost ss names group rest (none) true (get w memo) (- left 1))
+          (make Walk (pass (seq_pass (get w pass) (get a pass))) (memo (get a memo)))))))))
+
+  ; Alternatives, only one of which runs: the worst. `bare` when they are expressions, not
+  ; `(pattern body)` arms.
+  (fn arms_cost ((ss Seens) (names Atoms) (group Atoms) (arms Trees) (acc Pass) (bare Bool) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match arms
+        ((NoTrees) (make Walk (pass acc) (memo memo)))
+        ((Trees a rest) (let body (if bare (Some a) (nth (items_of a) 1))
+          (match body
+            ((None) (arms_cost ss names group rest acc bare memo (- left 1)))
+            ((Some b) (let w (walk_cost ss names group b memo (- left 1))
+              (arms_cost ss names group rest (worst_pass acc (get w pass)) bare (get w memo) (- left 1))))))))))
+
+  (fn separate ((clauses Trees)) Bool
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) false)
+      ((Trees c rest) (if (head_is c "on")
+        (match (nth (items_of c) 1) ((None) false) ((Some w) (or (str.eq (word_of w) "process") (str.eq (word_of w) "node"))))
+        (separate rest)))))
+
+  ; `(par ((name work [(on where)])...) body)`: the branches side by side, then the body.
+  (fn par_cost ((ss Seens) (names Atoms) (group Atoms) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (make Walk (pass (NotRead)) (memo memo))
+    (match args
+      ((NoTrees) (make Walk (pass (none)) (memo memo)))
+      ((Trees bs rest) (let w (branches_cost ss names group (items_of bs) (none) memo (- left 1))
+        (let b (walk_all ss names group rest (none) (get w memo) (- left 1))
+          (make Walk (pass (seq_pass (get w pass) (get b pass))) (memo (get b memo)))))))))
+
+  (fn branches_cost ((ss Seens) (names Atoms) (group Atoms) (bs Trees) (acc Pass) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match bs
+        ((NoTrees) (make Walk (pass acc) (memo memo)))
+        ((Trees b rest) (let parts (items_of b)
+          (if (separate (drop_two parts))
+            (branches_cost ss names group rest (side_pass acc (none)) memo (- left 1))
+            (match (nth parts 1)
+              ((None) (branches_cost ss names group rest acc memo (- left 1)))
+              ((Some work) (let w (walk_cost ss names group work memo (- left 1))
+                (branches_cost ss names group rest (side_pass acc (get w pass)) (get w memo) (- left 1)))))))))))
+
+  (fn drop_two ((ts Trees)) Trees
+    (match ts ((NoTrees) ts) ((Trees a rest) (match rest ((NoTrees) rest) ((Trees b more) more)))))
+
+  ; `(scope ((name work (deadline d) (on-fail p) [(on where)])...) body)`: a task may run up to
+  ; its restart limit, its deadline is work too, and all of it is side by side with the body.
+  (fn scope_cost ((ss Seens) (names Atoms) (group Atoms) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (make Walk (pass (NotRead)) (memo memo))
+    (match args
+      ((NoTrees) (make Walk (pass (none)) (memo memo)))
+      ((Trees ts rest) (let w (tasks_cost ss names group (items_of ts) (none) memo (- left 1))
+        (let b (walk_all ss names group rest (none) (get w memo) (- left 1))
+          (make Walk (pass (side_pass (get w pass) (get b pass))) (memo (get b memo)))))))))
+
+  (fn tasks_cost ((ss Seens) (names Atoms) (group Atoms) (ts Trees) (acc Pass) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match ts
+        ((NoTrees) (make Walk (pass acc) (memo memo)))
+        ((Trees t rest) (let w (task_cost ss names group (items_of t) memo (- left 1))
+          (tasks_cost ss names group rest (side_pass acc (get w pass)) (get w memo) (- left 1)))))))
+
+  (fn task_cost ((ss Seens) (names Atoms) (group Atoms) (parts Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (make Walk (pass (NotRead)) (memo memo))
+      (match (nth parts 1)
+        ((None) (make Walk (pass (none)) (memo memo)))
+        ((Some work) (let w (walk_cost ss names group work memo (- left 1))
+          (let d (walk_all ss names group (deadlines (drop_two parts)) (none) (get w memo) (- left 1))
+            (make Walk (pass (side_pass (tried (get w pass) (drop_two parts)) (get d pass))) (memo (get d memo)))))))))
+
+  (fn tried ((p Pass) (clauses Trees)) Pass
+    (uses Alloc)
+    (match p
+      ((Costs dd a k) (if (separate clauses) (none) (Costs dd (* a (tries clauses)) (* k (tries clauses)))))
+      ((NoBound) p)
+      ((NotRead) p)))
+
+  (fn deadlines ((clauses Trees)) Trees
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) clauses)
+      ((Trees c rest) (if (head_is c "deadline") (match (nth (items_of c) 1) ((None) (deadlines rest)) ((Some d) (Trees d (deadlines rest)))) (deadlines rest)))))
+
+  (fn tries ((clauses Trees)) Int
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) 1)
+      ((Trees c rest) (if (head_is c "on-fail")
+        (if (str.eq (match (nth (items_of c) 1) ((None) "") ((Some w) (word_of w))) "restart")
+          (match (nth (items_of c) 2) ((None) 1) ((Some n) (+ 1 (number_of n))))
+          1)
+        (tries rest)))))
+
+  ; A call: its arguments, then what it is -- a function of another group adds that group's
+  ; cost, one of this group is counted by the repeats, an allocating builtin builds one thing.
+  (fn call_cost ((ss Seens) (names Atoms) (group Atoms) (op Str) (args Trees) (memo Memo) (left Int)) Walk
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (make Walk (pass (NotRead)) (memo memo))
+    (let w (walk_all ss names group args (none) memo (- left 1))
+      (if (holds names op)
+        (if (holds group op)
+          (make Walk (pass (seq_pass (get w pass) (Costs 0 0 1))) (memo (get w memo)))
+          (let c (group_cost ss names op (get w memo) (- left 1))
+            (make Walk (pass (seq_pass (get w pass) (pass_of (get c cost)))) (memo (get c memo)))))
+        (make Walk (pass (seq_pass (get w pass) (Costs 0 (if (builds op) 1 0) 0))) (memo (get w memo)))))))
+
+  (fn pass_of ((c GCost)) Pass
+    (match (get c deep)
+      ((Unbounded) (NoBound))
+      ((Unread) (NotRead))
+      ((Is d) (match (get c alloc) ((Is a) (Costs d a 0)) ((Unbounded) (NoBound)) ((Unread) (NotRead))))))
+
+  (fn builds ((op Str)) Bool
+    (uses Alloc)
+    (if (or (str.eq op "array.empty") (str.eq op "array.push"))
+      true
+      (match (primitive op) ((None) false) ((Some b) (names_has_alloc (get b effects))))))
+
+  (fn names_has_alloc ((ns Names)) Bool
+    (match ns ((NoNames) false) ((Names n rest) (or (str.eq n "Alloc") (names_has_alloc rest)))))
+
+  ; What a function's `(bounds (depth N) (alloc N) (repeats N))` says against what it may use:
+  ; a finding for each that is exceeded or unbounded, or "?" when it rests on what is not read.
+  (fn bound_findings ((c GCost) (bs Trees)) Str
+    (uses Alloc)
+    (match bs
+      ((NoTrees) "")
+      ((Trees b rest) (let what (word_of (match (nth (items_of b) 0) ((None) b) ((Some w) w)))
+        (let declared (match (nth (items_of b) 1) ((None) 0) ((Some n) (number_of n)))
+          (let actual (if (str.eq what "depth") (get c deep) (if (str.eq what "alloc") (get c alloc) (get c repeats)))
+            (let more (bound_findings c rest)
+              (match actual
+                ((Unread) "?")
+                ((Unbounded) (if (str.eq more "?") more (concat "resource-bound " more)))
+                ((Is n) (if (or (str.eq more "?") (<= n declared)) more (concat "resource-bound " more)))))))))))
+
+  ; --- the report: one line per fn --------------------------------------------------------------------------------------------
+  ; A recursive function's line says whether its group was read and, on the group's first
+  ; member as Python reports it, whether no measure was found.
+  (fn line_of ((ss Seens) (s Seen)) Str
+    (uses Alloc)
+    (let shown (termination_line ss s)
+      (match (get s declared)
+        ((NoTrees) shown)
+        ((Trees b more) (if (or (not (get s read)) (bytes.eq (bytes.slice (str.encode shown) (Octets 0) (Octets 12)) (str.encode "not read yet")))
+          shown
+          (let found (bound_findings (get (group_cost ss (fn_names_of ss) (get s name) (NoMemo) 100000) cost) (get s declared))
+            (if (str.eq found "?")
+              "not read yet: a bound that rests on a function this does not read"
+              (concat shown found))))))))
+
+  (fn fn_names_of ((ss Seens)) Atoms
+    (uses Alloc)
+    (match ss ((NoSeens) (NoAtoms)) ((Seens h rest) (Atoms (get h name) (fn_names_of rest)))))
+
+  (fn termination_line ((ss Seens) (s Seen)) Str
+    (uses Alloc)
+    (let ms (group_of ss (get s name))
+      (let text (match ms
+        ((NoAtoms) (get s text))
+        ((Atoms first more) (if (not (get s read))
+          (get s text)
+          (if (not (all_read ss ms))
+            "not read yet: a recursion through a function this does not read"
+            (if (and (str.eq (least ms (get s name)) (get s name)) (not (terminates ss ms)))
+              (concat (get s text) "no-termination-proof ")
+              (get s text))))))
+        text)))
+
+  (fn report_seens ((all Seens) (ss Seens)) Str
+    (uses Alloc)
+    (match ss
+      ((NoSeens) "")
+      ((Seens h rest) (concat (if (get h line) (let text (line_of all h) (concat (get h name) (concat ": " (concat (if (str.eq text "") "ok" text) "\n")))) "") (report_seens all rest)))))
+
+  (fn report_items ((cx Cx) (items Trees)) Str
+    (uses Alloc)
+    (let all (trees_append (prelude_items) items)
+      (let ss (seens_of cx (fn_names all) all)
+        (report_seens ss (seens_of_module ss items)))))
+
+  ; The module's own functions, as already seen among everything.
+  (fn seens_of_module ((all Seens) (items Trees)) Seens
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoSeens))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (after_head h) ((NoTrees) (seens_of_module all rest)) ((Trees n more) (match (seen_named all (declared_name n)) ((None) (seens_of_module all rest)) ((Some s) (Seens s (seens_of_module all rest))))))
+        (seens_of_module all rest)))))
+
+  (fn report_source ((src Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (concat "not a form: " (get f why)))
+      ((Ok tree) (report_items (make Cx (fns (infos_of (newtypes_of (module_items tree)) (trees_append (prelude_items) (module_items tree)))) (open (NoAtoms)) (news (newtypes_of (trees_append (prelude_items) (module_items tree)))) (recs (recs_of (trees_append (prelude_items) (module_items tree)))) (vars (vars_of (trees_append (prelude_items) (module_items tree)))) (contract false) (me "") (foreigns (foreigns_of (module_items tree)))) (module_items tree)))))
+
+  (test "a bound that follows from the requires is proved" (str.eq "f: ok\n" (report_source "(module m (fn f ((n Int)) Int (requires (<= 0 n)) (ensures (<= 0 result)) (+ n 1)))")))
+
+  (test "a bound that does not follow is refused" (str.eq "f: unproven-postcondition \n" (report_source "(module m (fn f ((n Int)) Int (ensures (<= 0 result)) (+ n 1)))")))
+
+  (test "a call must establish what the callee requires" (str.eq "f: ok\ng: unproven-precondition \n" (report_source "(module m (fn f ((n Int)) Int (requires (<= 0 n)) n) (fn g ((n Int)) Int (f n)))")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (report_source "(module m (fn f ((n Int)) Int (requires (<= 0 n)) (ensures (<= 0 result)) (+ n 1)))"))))

@@ -1,0 +1,42 @@
+; Doing several things at once, and supervising what might fail.
+;   par   says branches may run together, and stays deterministic
+;   scope starts child tasks: each one declares a deadline and what failure means
+(module survey
+  (newtype SiteId U16
+    (requires n (<= (u16.of 1) n)))
+
+  ; A reading is refined, so everything downstream knows its range without re-checking.
+  (newtype Reading U16
+    (requires n (<= n (u16.of 900))))
+
+  (fn poll ((site SiteId)) (Result Reading Fault)
+    (if (<= (unwrap site) (u16.of 900))
+      (Ok (Reading (unwrap site)))
+      (Err (fault "poll" "site is not answering"))))
+
+  ; Pure branches: whatever order they run in, the answer is the same, so nothing about
+  ; scheduling appears in the signature.
+  ; The refinement is what makes this sum provably fit: two readings are at most 1800.
+  (fn spread ((a Reading) (b Reading)) U16
+    (bounds (depth 2) (alloc 0))
+    (par ((low (unwrap a)) (high (unwrap b))) (+ low high)))
+
+  ; Two children, each with a deadline. The first is retried; the second escalates, so a
+  ; failure there becomes this function's (Err ...).
+  (fn sweep ((first SiteId) (second SiteId) (budget Duration)) (Result U16 Fault)
+    (uses Clock)
+    (bounds (depth 3) (alloc 0))
+    (scope ((a (poll first) (deadline budget) (on-fail restart 2)) (b (poll second) (deadline budget) (on-fail escalate)))
+      (Ok (spread a b))))
+
+  (fn report ((one SiteId) (two SiteId)) Str
+    (uses Clock Alloc)
+    (match (sweep one two (duration.of_ms (i64.of 500)))
+      ((Ok total) (concat "swept " (num.to_str total)))
+      ((Err f) (concat "gave up: " (get f why)))))
+
+  (fn main () Unit
+    (uses Clock Alloc Console)
+    (seq
+      (print (report (SiteId (u16.of 10)) (SiteId (u16.of 20))))
+      (print (report (SiteId (u16.of 10)) (SiteId (u16.of 999)))))))

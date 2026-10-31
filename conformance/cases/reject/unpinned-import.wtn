@@ -1,0 +1,7 @@
+; A dependency may be asked for by module.name, but it is not built on until `witness pin`
+; has written down the hash that name stands for. What the codebase holds under a name can
+; change; the hash cannot, so only the hash is ever checked.
+(module unpinned_import
+  (use text.reverse as rev)
+
+  (fn main () Int (rev 1)))

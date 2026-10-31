@@ -1,0 +1,1279 @@
+; The derivation half of the kernel, in Witness.
+;
+; A derivation is the core term of SPEC 9.1 with its judgement written at every node: the
+; rule that justifies the node, the type it concludes, the labels that type carries, and
+; the effects it performs. Nothing here infers anything. It verifies, bottom up, that each
+; node's rule applies to its parts and produces exactly the conclusion claimed.
+;
+; This is a transcription of witness/kernel.py, which is its model, and it shares no code
+; with it. It covers the twelve rules that need only the term, the scope and the module's
+; declarations; the rules for primitives, tasks, channels, models and tensors are not here
+; yet (docs/EVIDENCE.md 6).
+;
+; What it takes as given, because it is the statement and not the proof: the declarations
+; of the module, which say what the names mean, and the shape of the core term, which is
+; what is being judged. What it checks is every rule's side conditions, which are the
+; specification's rules read positively.
+;
+; It has no entry point and performs nothing but Alloc, so nothing can tell it what to
+; conclude. witness/judged.py writes a module's declarations and one derivation into a
+; copy of it and runs it.
+;
+;   witness check kernel/core.wtn
+;   witness evidence kernel/core.wtn
+(module core
+  ; --- names, in no particular order -----------------------------------------
+  ; A set of labels, effects or type parameters. The language has no ordering on `Str`,
+  ; so these are lists compared as sets: same size, and every member of one in the other.
+  (enum Names (NoNames) (Names (head Str) (rest Names)))
+
+  (fn names_count ((ns Names)) Int
+    (ensures (<= 0 result))
+    (match ns ((NoNames) 0) ((Names h rest) (+ 1 (names_count rest)))))
+
+  (fn names_has ((ns Names) (a Str)) Bool
+    (match ns ((NoNames) false) ((Names h rest) (or (str.eq a h) (names_has rest a)))))
+
+  ; Is every name in `p` also in `q`? This is how a label set is checked against a place
+  ; that accepts some labels, and how an effect set is checked against a declaration.
+  (fn names_within ((p Names) (q Names)) Bool
+    (match p ((NoNames) true) ((Names h rest) (and (names_has q h) (names_within rest q)))))
+
+  (fn names_eq ((p Names) (q Names)) Bool (and (names_within p q) (names_within q p)))
+
+  (fn names_plus ((ns Names) (a Str)) Names (if (names_has ns a) ns (Names a ns)))
+
+  (fn names_union ((p Names) (q Names)) Names
+    (uses Alloc)
+    (match p ((NoNames) q) ((Names h rest) (names_plus (names_union rest q) h))))
+
+  (fn names_without ((ns Names) (a Str)) Names
+    (uses Alloc)
+    (match ns
+      ((NoNames) (NoNames))
+      ((Names h rest) (if (str.eq a h) (names_without rest a) (Names h (names_without rest a))))))
+
+  (fn names_empty ((ns Names)) Bool (match ns ((NoNames) true) ((Names h rest) false)))
+
+  ; --- types -----------------------------------------------------------------
+  ; A type, and also a type *reference* as a declaration writes one: the base may name a
+  ; type parameter, which `instantiate` puts an argument in place of.
+  (record Ty (base Str) (labels Names) (args Tys) (dims Dims))
+
+  (enum Tys (NoTys) (Tys (head Ty) (rest Tys)))
+
+  ; A tensor's named axes, in order; empty for everything else.
+  (enum Dims (NoDims) (Dims (axis Str) (size Int) (rest Dims)))
+
+  (fn tys_count ((ts Tys)) Int (match ts ((NoTys) 0) ((Tys h rest) (+ 1 (tys_count rest)))))
+
+  (fn ty_at ((ts Tys) (i Int)) (Option Ty)
+    (match ts ((NoTys) (None)) ((Tys h rest) (if (= i 0) (Some h) (ty_at rest (- i 1))))))
+
+  (fn dims_eq ((p Dims) (q Dims)) Bool
+    (match p
+      ((NoDims) (match q ((NoDims) true) ((Dims b m more) false)))
+      ((Dims a n rest) (match q ((NoDims) false) ((Dims b m more) (and (and (str.eq a b) (= n m)) (dims_eq rest more)))))))
+
+  ; Unit carries no information to protect, so a label on it says nothing.
+  (fn ty_plus ((t Ty) (ls Names)) Ty
+    (uses Alloc)
+    (if (str.eq (get t base) "Unit") t (with t (labels (names_union (get t labels) ls)))))
+
+  (fn tys_plus ((ts Tys) (ls Names)) Tys
+    (uses Alloc)
+    (match ts ((NoTys) (NoTys)) ((Tys h rest) (Tys (ty_plus h ls) (tys_plus rest ls)))))
+
+  (fn ty_strip ((t Ty) (a Str)) Ty
+    (uses Alloc)
+    (with t (labels (names_without (get t labels) a)) (args (tys_strip (get t args) a))))
+
+  (fn tys_strip ((ts Tys) (a Str)) Tys
+    (uses Alloc)
+    (match ts ((NoTys) (NoTys)) ((Tys h rest) (Tys (ty_strip h a) (tys_strip rest a)))))
+
+  (fn ty_eq ((x Ty) (y Ty)) Bool
+    (and (and (str.eq (get x base) (get y base)) (names_eq (get x labels) (get y labels)))
+      (and (dims_eq (get x dims) (get y dims)) (tys_eq (get x args) (get y args)))))
+
+  (fn tys_eq ((p Tys) (q Tys)) Bool
+    (match p
+      ((NoTys) (match q ((NoTys) true) ((Tys b more) false)))
+      ((Tys a rest) (match q ((NoTys) false) ((Tys b more) (and (ty_eq a b) (tys_eq rest more)))))))
+
+  ; A value fits where its type matches and it carries no label the place refuses. The
+  ; labels may be fewer, never more: that is the whole of the information-flow rule.
+  (fn ty_fits ((got Ty) (want Ty)) Bool
+    (and (and (str.eq (get got base) (get want base)) (dims_eq (get got dims) (get want dims)))
+      (and (names_within (get got labels) (get want labels))
+        (tys_fit (get got args) (get want args)))))
+
+  (fn tys_fit ((p Tys) (q Tys)) Bool
+    (match p
+      ((NoTys) (match q ((NoTys) true) ((Tys b more) false)))
+      ((Tys a rest) (match q ((NoTys) false) ((Tys b more) (and (ty_fits a b) (tys_fit rest more)))))))
+
+  ; --- the declarations, as data ---------------------------------------------
+  (record FieldDecl (name Str) (ref Ty))
+
+  (enum FieldDecls (NoFieldDecls) (FieldDecls (head FieldDecl) (rest FieldDecls)))
+
+  (record VariantDecl (name Str) (fields FieldDecls))
+
+  (enum VariantDecls (NoVariantDecls) (VariantDecls (head VariantDecl) (rest VariantDecls)))
+
+  (record EnumDecl (name Str) (params Names) (variants VariantDecls))
+
+  (enum EnumDecls (NoEnumDecls) (EnumDecls (head EnumDecl) (rest EnumDecls)))
+
+  ; `has_schema` is whether the record has an agreed wire form, which is what decides
+  ; whether one of them may cross into memory of its own.
+  (record RecordDecl (name Str) (fields FieldDecls) (has_schema Bool))
+
+  (enum RecordDecls (NoRecordDecls) (RecordDecls (head RecordDecl) (rest RecordDecls)))
+
+  (record NewtypeDecl (name Str) (inner Ty))
+
+  (enum NewtypeDecls (NoNewtypeDecls) (NewtypeDecls (head NewtypeDecl) (rest NewtypeDecls)))
+
+  ; `label_param` is the empty string where the function takes no label parameter.
+  (record FnDecl
+    (name Str)
+    (params FieldDecls)
+    (ret Ty)
+    (type_params Names)
+    (label_param Str)
+    (effects Names)
+    (releases Names))
+
+  (enum FnDecls (NoFnDecls) (FnDecls (head FnDecl) (rest FnDecls)))
+
+  ; `types` is every type name the module knows; the primitives are known here.
+  (record ChannelDecl (name Str) (payload Str) (allows Names))
+
+  (enum ChannelDecls (NoChannelDecls) (ChannelDecls (head ChannelDecl) (rest ChannelDecls)))
+
+  ; `device` is where a model runs, which decides the effect running it performs.
+  (record ModelDecl (name Str) (input Ty) (output Ty) (trained_on Names) (device Str))
+
+  (enum ModelDecls (NoModelDecls) (ModelDecls (head ModelDecl) (rest ModelDecls)))
+
+  (record ForeignDecl (name Str) (params FieldDecls) (ret Ty) (effects Names))
+
+  (enum ForeignDecls (NoForeignDecls) (ForeignDecls (head ForeignDecl) (rest ForeignDecls)))
+
+  ; `types` is every type name the module knows; the primitives are known here. `redacted`
+  ; is every label that has a redaction policy, which is what a log line needs.
+  (record Program
+    (enums EnumDecls)
+    (records RecordDecls)
+    (newtypes NewtypeDecls)
+    (fns FnDecls)
+    (channels ChannelDecls)
+    (models ModelDecls)
+    (foreigns ForeignDecls)
+    (redacted Names)
+    (types Names))
+
+  (fn fields_count ((fs FieldDecls)) Int
+    (match fs ((NoFieldDecls) 0) ((FieldDecls h rest) (+ 1 (fields_count rest)))))
+
+  (fn variants_count ((vs VariantDecls)) Int
+    (ensures (<= 0 result))
+    (match vs ((NoVariantDecls) 0) ((VariantDecls h rest) (+ 1 (variants_count rest)))))
+
+  (fn variant_at ((vs VariantDecls) (i Int)) (Option VariantDecl)
+    (match vs
+      ((NoVariantDecls) (None))
+      ((VariantDecls h rest) (if (= i 0) (Some h) (variant_at rest (- i 1))))))
+
+  (fn field_at ((fs FieldDecls) (i Int)) (Option FieldDecl)
+    (match fs
+      ((NoFieldDecls) (None))
+      ((FieldDecls h rest) (if (= i 0) (Some h) (field_at rest (- i 1))))))
+
+  (fn find_enum ((ds EnumDecls) (name Str)) (Option EnumDecl)
+    (match ds
+      ((NoEnumDecls) (None))
+      ((EnumDecls h rest) (if (str.eq name (get h name)) (Some h) (find_enum rest name)))))
+
+  (fn find_record ((ds RecordDecls) (name Str)) (Option RecordDecl)
+    (match ds
+      ((NoRecordDecls) (None))
+      ((RecordDecls h rest) (if (str.eq name (get h name)) (Some h) (find_record rest name)))))
+
+  (fn find_newtype ((ds NewtypeDecls) (name Str)) (Option NewtypeDecl)
+    (match ds
+      ((NoNewtypeDecls) (None))
+      ((NewtypeDecls h rest) (if (str.eq name (get h name)) (Some h) (find_newtype rest name)))))
+
+  (fn find_channel ((ds ChannelDecls) (name Str)) (Option ChannelDecl)
+    (match ds
+      ((NoChannelDecls) (None))
+      ((ChannelDecls h rest) (if (str.eq name (get h name)) (Some h) (find_channel rest name)))))
+
+  (fn find_model ((ds ModelDecls) (name Str)) (Option ModelDecl)
+    (match ds
+      ((NoModelDecls) (None))
+      ((ModelDecls h rest) (if (str.eq name (get h name)) (Some h) (find_model rest name)))))
+
+  (fn find_foreign ((ds ForeignDecls) (name Str)) (Option ForeignDecl)
+    (match ds
+      ((NoForeignDecls) (None))
+      ((ForeignDecls h rest) (if (str.eq name (get h name)) (Some h) (find_foreign rest name)))))
+
+  (fn find_fn ((ds FnDecls) (name Str)) (Option FnDecl)
+    (match ds
+      ((NoFnDecls) (None))
+      ((FnDecls h rest) (if (str.eq name (get h name)) (Some h) (find_fn rest name)))))
+
+  ; --- the core term ---------------------------------------------------------
+  ; One node: the rule, what it concludes, the effects it performs, and the rule's own
+  ; detail. A rule reads only the slots that belong to it.
+  (record Core
+    (rule Str)
+    (type Ty)
+    (effects Names)
+    (ints Ints)
+    (strs Names)
+    ; `given` is the labels a call puts in place of the label parameter.
+    (given Names)
+    (tys Tys)
+    (arms Arms)
+    (tasks Tasks)
+    (parts Cores))
+
+  ; Where a supervised task runs, what to do when it fails, and how many times.
+  (record Task (placement Str) (policy Str) (limit Int))
+
+  (enum Tasks (NoTasks) (Tasks (head Task) (rest Tasks)))
+
+  ; One axis of a shape: its name, and how long it is.
+  (record Axis (axis Str) (size Int))
+
+  (enum Cores (NoCores) (Cores (head Core) (rest Cores)))
+
+  (enum Ints (NoInts) (Ints (head Int) (rest Ints)))
+
+  ; Which variant an arm is for, and how many of its fields it binds.
+  (record Arm (variant Int) (binders Int))
+
+  (enum Arms (NoArms) (Arms (head Arm) (rest Arms)))
+
+  (fn cores_count ((cs Cores)) Int
+    (match cs ((NoCores) 0) ((Cores h rest) (+ 1 (cores_count rest)))))
+
+  (fn ints_count ((is Ints)) Int
+    (match is ((NoInts) 0) ((Ints h rest) (+ 1 (ints_count rest)))))
+
+  (fn arms_count ((as Arms)) Int
+    (match as ((NoArms) 0) ((Arms h rest) (+ 1 (arms_count rest)))))
+
+  (fn first_int ((is Ints)) Int (match is ((NoInts) (- 0 1)) ((Ints h rest) h)))
+
+  (fn first_name ((ns Names)) Str (match ns ((NoNames) "") ((Names h rest) h)))
+
+  ; --- what the node is judged under -----------------------------------------
+  ; `gamma` is the types in scope, innermost last; `pc` the labels of the data that chose
+  ; this branch; `places` where this target can put work; `declares` the effects the
+  ; enclosing function declares; and `releases` the labels it may take off.
+  (record Where
+    (prog Program)
+    (gamma Tys)
+    (pc Names)
+    (places Names)
+    (declares Names)
+    (releases Names))
+
+  (fn with_var ((w Where) (t Ty)) Where
+    (uses Alloc)
+    (with w (gamma (tys_append (get w gamma) t))))
+
+  (fn with_vars ((w Where) (ts Tys)) Where
+    (uses Alloc)
+    (match ts ((NoTys) w) ((Tys h rest) (with_vars (with_var w h) rest))))
+
+  (fn under ((w Where) (ls Names)) Where
+    (uses Alloc)
+    (with w (pc (names_union (get w pc) ls))))
+
+  (fn tys_append ((ts Tys) (t Ty)) Tys
+    (uses Alloc)
+    (match ts ((NoTys) (Tys t (NoTys))) ((Tys h rest) (Tys h (tys_append rest t)))))
+
+  ; --- helpers the prelude does not carry ------------------------------------
+  (fn refuse ((why Str)) (Result Unit Fault) (Err (fault "kernel" why)))
+
+  (fn accept () (Result Unit Fault) (Ok unit))
+
+  ; Both must hold, and the first failure is the one reported.
+  (fn and_then ((first (Result Unit Fault)) (second (Result Unit Fault))) (Result Unit Fault)
+    (match first ((Err e) (Err e)) ((Ok u) second)))
+
+  (fn insist ((holds Bool) (why Str)) (Result Unit Fault) (if holds (accept) (refuse why)))
+
+  (fn names_index ((ns Names) (a Str)) Int
+    (match ns
+      ((NoNames) (- 0 1))
+      ((Names h rest) (if (str.eq a h) 0 (if (< (names_index rest a) 0) (- 0 1) (+ 1 (names_index rest a)))))))
+
+  ; --- resolving a declared type ---------------------------------------------
+  ; The primitives are part of the language, so the kernel knows them rather than being
+  ; told them.
+  ; `Tensor` and `Array` take a type argument; every other primitive is nullary. `Array`
+  ; is also the one whose crossing into other memory is not settled by its own name --
+  ; see `transferable`.
+  (fn is_primitive ((name Str)) Bool
+    (or (str.eq name "Array")
+      (or (or (or (str.eq name "Int") (str.eq name "Bool")) (or (str.eq name "Str") (str.eq name "Unit")))
+        (or (or (or (str.eq name "Bytes") (str.eq name "Tensor")) (or (str.eq name "I8") (str.eq name "I16")))
+          (or (or (or (str.eq name "I32") (str.eq name "I64")) (or (str.eq name "U8") (str.eq name "U16")))
+            (or (or (or (str.eq name "U32") (str.eq name "U64")) (or (str.eq name "F16") (str.eq name "BF16")))
+              (str.eq name "F32")))))))
+
+  (fn known ((prog Program) (name Str)) Bool
+    (or (is_primitive name) (names_has (get prog types) name)))
+
+  ; A declared type with a named type's arguments put in place of its parameters.
+  ; Substitution only: nothing is solved here.
+  (fn instantiate ((prog Program) (ref Ty) (params Names) (args Tys)) (Result Ty Fault)
+    (uses Alloc)
+    (if (< (names_index params (get ref base)) 0)
+      (match (instantiate_all prog (get ref args) params args)
+        ((Err e) (Err e))
+        ((Ok inner) (if (known prog (get ref base)) (Ok (make Ty (base (get ref base)) (labels (get ref labels)) (args inner) (dims (get ref dims)))) (Err (fault "kernel" "no type of that name")))))
+      (match (ty_at args (names_index params (get ref base)))
+        ((None) (Err (fault "kernel" "nothing was given for a type parameter")))
+        ((Some given) (Ok (ty_plus given (get ref labels)))))))
+
+  (fn instantiate_all ((prog Program) (refs Tys) (params Names) (args Tys)) (Result Tys Fault)
+    (uses Alloc)
+    (match refs
+      ((NoTys) (Ok (NoTys)))
+      ((Tys h rest) (match (instantiate prog h params args) ((Err e) (Err e)) ((Ok one) (match (instantiate_all prog rest params args) ((Err e) (Err e)) ((Ok more) (Ok (Tys one more)))))))))
+
+  ; A type as a declaration writes it, with no inference of any kind.
+  (fn declared ((prog Program) (ref Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (instantiate prog ref (NoNames) (NoTys)))
+
+  ; --- the primitives of SPEC 6.3 --------------------------------------------
+  ; The primitives are part of the language, not of a program, so the kernel carries
+  ; their signatures itself rather than being told them. A parameter wants a named type,
+  ; or stands for whichever number format the call is at: `WantInt` for the integers,
+  ; `WantNumber` for those and the floating formats too, `WantSource` for a position that
+  ; also takes a decimal literal.
+  (enum Want (WantType (name Str)) (WantInt) (WantNumber) (WantSource))
+
+  (enum Wants (NoWants) (Wants (head Want) (rest Wants)))
+
+  ; What a primitive answers: a named type, the number format the call is at, an Option of
+  ; that format, or a type written out in full.
+  (enum Ret (RetBase (name Str)) (RetNumber) (RetOptionOfNumber) (RetWritten (ty Ty)))
+
+  (record Builtin
+    (name Str)
+    (params Wants)
+    (ret Ret)
+    (effects Names)
+    (sink Bool)
+    (ret_labels Names)
+    (fixed Bool))
+
+  (enum Builtins (NoBuiltins) (Builtins (head Builtin) (rest Builtins)))
+
+  (fn wants_count ((ws Wants)) Int
+    (match ws ((NoWants) 0) ((Wants h rest) (+ 1 (wants_count rest)))))
+
+  (fn builtins_join ((p Builtins) (q Builtins)) Builtins
+    (uses Alloc)
+    (match p ((NoBuiltins) q) ((Builtins h rest) (Builtins h (builtins_join rest q)))))
+
+  (fn find_builtin ((bs Builtins) (name Str)) (Option Builtin)
+    (match bs
+      ((NoBuiltins) (None))
+      ((Builtins h rest) (if (str.eq name (get h name)) (Some h) (find_builtin rest name)))))
+
+  (fn primitive ((name Str)) (Option Builtin)
+    (uses Alloc)
+    (find_builtin (builtins_join (arithmetic) (builtins_join (wrapping) (builtins_join (bitwise) (builtins_join (conversions) (builtins_join (text) (builtins_join (time) (builtins_join (tensors) (the_world))))))))
+      name))
+
+  ; `+ - * < <= =` and the boolean connectives.
+  (fn arithmetic () Builtins
+    (Builtins (make Builtin (name "+") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "-") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+        (Builtins (make Builtin (name "*") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+          (Builtins (make Builtin (name "<") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+            (Builtins (make Builtin (name "<=") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+              (Builtins (make Builtin (name "=") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                (Builtins (make Builtin (name "and") (params (Wants (WantType "Bool") (Wants (WantType "Bool") (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                  (Builtins (make Builtin (name "or") (params (Wants (WantType "Bool") (Wants (WantType "Bool") (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                    (Builtins (make Builtin (name "not") (params (Wants (WantType "Bool") (NoWants))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                      (NoBuiltins)))))))))))
+
+  ; the alternatives to a checked operation: wrap round, or stop at the end.
+  (fn wrapping () Builtins
+    (Builtins (make Builtin (name "wrap.add") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+      (Builtins (make Builtin (name "wrap.sub") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+        (Builtins (make Builtin (name "wrap.mul") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+          (Builtins (make Builtin (name "sat.add") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+            (Builtins (make Builtin (name "sat.sub") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+              (Builtins (make Builtin (name "sat.mul") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+                (NoBuiltins))))))))
+
+  ; the bit patterns a fixed width holds. These are not arithmetic: nothing about an
+  ; unbounded `Int` says where its top bit is, so all seven are fixed widths only, and
+  ; none can leave the width it works in, so none of them carries an obligation.
+  (fn bitwise () Builtins
+    (Builtins (make Builtin (name "bit.and") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+      (Builtins (make Builtin (name "bit.or") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+        (Builtins (make Builtin (name "bit.xor") (params (Wants (WantInt) (Wants (WantInt) (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+          (Builtins (make Builtin (name "bit.not") (params (Wants (WantInt) (NoWants))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+            (Builtins (make Builtin (name "bit.shl") (params (Wants (WantInt) (Wants (WantType "Int") (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+              (Builtins (make Builtin (name "bit.shr") (params (Wants (WantInt) (Wants (WantType "Int") (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+                (Builtins (make Builtin (name "bit.sar") (params (Wants (WantInt) (Wants (WantType "Int") (NoWants)))) (ret (RetNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed true))
+                  (NoBuiltins)))))))))
+
+  ; between number formats, always written out.
+  (fn conversions () Builtins
+    (Builtins (make Builtin (name "num.div") (params (Wants (WantNumber) (Wants (WantNumber) (NoWants)))) (ret (RetOptionOfNumber)) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "f16.of") (params (Wants (WantSource) (NoWants))) (ret (RetBase "F16")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+        (Builtins (make Builtin (name "bf16.of") (params (Wants (WantSource) (NoWants))) (ret (RetBase "BF16")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+          (Builtins (make Builtin (name "f32.of") (params (Wants (WantSource) (NoWants))) (ret (RetBase "F32")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+            (Builtins (make Builtin (name "int.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "Int")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+              (Builtins (make Builtin (name "i8.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "I8")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                (Builtins (make Builtin (name "i16.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "I16")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                  (Builtins (make Builtin (name "i32.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "I32")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                    (Builtins (make Builtin (name "i64.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "I64")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                      (Builtins (make Builtin (name "u8.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "U8")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                        (Builtins (make Builtin (name "u16.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "U16")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                          (Builtins (make Builtin (name "u32.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "U32")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                            (Builtins (make Builtin (name "u64.of") (params (Wants (WantInt) (NoWants))) (ret (RetBase "U64")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                              (Builtins (make Builtin (name "num.to_str") (params (Wants (WantNumber) (NoWants))) (ret (RetBase "Str")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                                (NoBuiltins))))))))))))))))
+
+  ; text and bytes, and the unit-tagged lengths of each.
+  (fn text () Builtins
+    (Builtins (make Builtin (name "concat") (params (Wants (WantType "Str") (Wants (WantType "Str") (NoWants)))) (ret (RetBase "Str")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "str.eq") (params (Wants (WantType "Str") (Wants (WantType "Str") (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+        (Builtins (make Builtin (name "str.chars") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Chars")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+          (Builtins (make Builtin (name "str.octets") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Octets")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+            (Builtins (make Builtin (name "bytes.len") (params (Wants (WantType "Bytes") (NoWants))) (ret (RetBase "Octets")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+              (Builtins (make Builtin (name "bytes.eq") (params (Wants (WantType "Bytes") (Wants (WantType "Bytes") (NoWants)))) (ret (RetBase "Bool")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                (Builtins (make Builtin (name "bytes.concat") (params (Wants (WantType "Bytes") (Wants (WantType "Bytes") (NoWants)))) (ret (RetBase "Bytes")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                  (Builtins (make Builtin (name "bytes.at") (params (Wants (WantType "Bytes") (Wants (WantType "Octets") (NoWants)))) (ret (RetWritten (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base "U8") (labels (NoNames)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims))))) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                    (Builtins (make Builtin (name "bytes.slice") (params (Wants (WantType "Bytes") (Wants (WantType "Octets") (Wants (WantType "Octets") (NoWants))))) (ret (RetBase "Bytes")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                      (Builtins (make Builtin (name "bytes.of") (params (Wants (WantType "U8") (NoWants))) (ret (RetBase "Bytes")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                        (Builtins (make Builtin (name "str.encode") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Bytes")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                          (Builtins (make Builtin (name "bytes.decode") (params (Wants (WantType "Bytes") (NoWants))) (ret (RetWritten (make Ty (base "Result") (labels (NoNames)) (args (Tys (make Ty (base "Str") (labels (NoNames)) (args (NoTys)) (dims (NoDims))) (Tys (make Ty (base "Fault") (labels (NoNames)) (args (NoTys)) (dims (NoDims))) (NoTys)))) (dims (NoDims))))) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+                            (NoBuiltins))))))))))))))
+
+  ; the three clocks and what can be done with each.
+  (fn time () Builtins
+    (Builtins (make Builtin (name "clock.now") (params (NoWants)) (ret (RetBase "Instant")) (effects (Names "Clock" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "clock.wall") (params (NoWants)) (ret (RetBase "WallTime")) (effects (Names "Clock" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+        (Builtins (make Builtin (name "clock.ticks") (params (NoWants)) (ret (RetBase "Ticks")) (effects (Names "Clock" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+          (Builtins (make Builtin (name "instant.since") (params (Wants (WantType "Instant") (Wants (WantType "Instant") (NoWants)))) (ret (RetBase "Duration")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+            (Builtins (make Builtin (name "wall.since") (params (Wants (WantType "WallTime") (Wants (WantType "WallTime") (NoWants)))) (ret (RetBase "Duration")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+              (Builtins (make Builtin (name "ticks.since") (params (Wants (WantType "Ticks") (Wants (WantType "Ticks") (NoWants)))) (ret (RetBase "Ticks")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                (Builtins (make Builtin (name "instant.plus") (params (Wants (WantType "Instant") (Wants (WantType "Duration") (NoWants)))) (ret (RetBase "Instant")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                  (Builtins (make Builtin (name "wall.plus") (params (Wants (WantType "WallTime") (Wants (WantType "Duration") (NoWants)))) (ret (RetBase "WallTime")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                    (Builtins (make Builtin (name "duration.of_ms") (params (Wants (WantType "I64") (NoWants))) (ret (RetBase "Duration")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                      (Builtins (make Builtin (name "duration.ms") (params (Wants (WantType "Duration") (NoWants))) (ret (RetBase "I64")) (effects (NoNames)) (sink false) (ret_labels (NoNames)) (fixed false))
+                        (NoBuiltins))))))))))))
+
+  ; elementwise work and the matrix product.
+  (fn tensors () Builtins
+    (Builtins (make Builtin (name "tensor.add") (params (Wants (WantType "Tensor") (Wants (WantType "Tensor") (NoWants)))) (ret (RetBase "Tensor")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "tensor.matmul") (params (Wants (WantType "Tensor") (Wants (WantType "Tensor") (NoWants)))) (ret (RetBase "Tensor")) (effects (Names "Alloc" (NoNames))) (sink false) (ret_labels (NoNames)) (fixed false))
+        (NoBuiltins))))
+
+  ; everything that reaches outside the program.
+  (fn the_world () Builtins
+    (Builtins (make Builtin (name "print") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Unit")) (effects (Names "Console" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
+      (Builtins (make Builtin (name "log") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Unit")) (effects (Names "Log" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
+        (Builtins (make Builtin (name "net.send") (params (Wants (WantType "Str") (Wants (WantType "Str") (NoWants)))) (ret (RetBase "Str")) (effects (Names "Net" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
+          (Builtins (make Builtin (name "store.put") (params (Wants (WantType "Str") (Wants (WantType "Str") (NoWants)))) (ret (RetBase "Unit")) (effects (Names "Store" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
+            (Builtins (make Builtin (name "store.get") (params (Wants (WantType "Str") (NoWants))) (ret (RetWritten (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base "Str") (labels (NoNames)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims))))) (effects (Names "Store" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
+              (Builtins (make Builtin (name "env.secret") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Str")) (effects (Names "Env" (NoNames))) (sink true) (ret_labels (Names "Secret" (NoNames))) (fixed false))
+                (NoBuiltins))))))))
+
+  ; --- the judgement ---------------------------------------------------------
+  ; What the kernel promises about a definition: under its parameters, the body has the
+  ; declared type, carries no label the signature does not admit, and performs no effect
+  ; it does not declare. The last of those is `check`\'s business, at every node; the other
+  ; two are this one check at the top.
+  (fn judge ((w Where) (name Str) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (find_fn (get (get w prog) fns) name)
+      ((None) (refuse "no function of that name"))
+      ((Some f) (match (signature (get w prog) f (get f ret)) ((Err e) (Err e)) ((Ok want) (and_then (check w node) (insist (ty_fits (get node type) want) "the body is not what the signature declares")))))))
+
+  ; A signature\'s type, with its own parameters standing for themselves: inside the body
+  ; a type parameter is rigid, and the label parameter is whatever the caller will give.
+  (fn signature ((prog Program) (f FnDecl) (ref Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (if (< (names_index (get f type_params) (get ref base)) 0)
+      (match (signature_all prog f (get ref args))
+        ((Err e) (Err e))
+        ((Ok inner) (if (known prog (get ref base)) (Ok (make Ty (base (get ref base)) (labels (rigid_labels f (get ref labels))) (args inner) (dims (get ref dims)))) (Err (fault "kernel" "no type of that name")))))
+      (Ok (make Ty (base (get ref base)) (labels (rigid_labels f (get ref labels))) (args (NoTys)) (dims (NoDims))))))
+
+  (fn signature_all ((prog Program) (f FnDecl) (refs Tys)) (Result Tys Fault)
+    (uses Alloc)
+    (match refs
+      ((NoTys) (Ok (NoTys)))
+      ((Tys h rest) (match (signature prog f h) ((Err e) (Err e)) ((Ok one) (match (signature_all prog f rest) ((Err e) (Err e)) ((Ok more) (Ok (Tys one more)))))))))
+
+  ; The label parameter inside the body is a label of its own, distinct from any real one.
+  (fn rigid_labels ((f FnDecl) (ls Names)) Names
+    (uses Alloc)
+    (match ls
+      ((NoNames) (NoNames))
+      ((Names h rest) (if (str.eq h (get f label_param)) (names_plus (rigid_labels f rest) (concat "?" h)) (names_plus (rigid_labels f rest) h)))))
+
+  ; A derivation states, at every node, the type and effects it concludes. So each rule's
+  ; own conditions can be checked from the node and the *claims* of its premises, without
+  ; looking inside them -- and the walk into the premises is then a separate thing. That
+  ; split is what makes this reviewable: `local` is twelve independent rules that recurse
+  ; into nothing, and `descend` is the only recursion there is.
+  (fn check ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (and_then (and_then (insist (or (names_empty (get node effects)) (names_empty (get w pc))) "an effect happens where labelled data chose the branch") (insist (names_within (get node effects) (get w declares)) "something performs an effect the function does not declare")) (local w node))
+      (match (scopes w node) ((Err e) (Err e)) ((Ok ws) (descend ws (get node parts))))))
+
+  ; Each premise, judged under the scope its rule gives it.
+  (fn descend ((ws Wheres) (cs Cores)) (Result Unit Fault)
+    (uses Alloc)
+    (match cs
+      ((NoCores) (accept))
+      ((Cores node rest) (match ws ((NoWheres) (refuse "a premise has no scope to be judged under")) ((Wheres w more) (and_then (check w node) (descend more rest)))))))
+
+  (enum Wheres (NoWheres) (Wheres (head Where) (rest Wheres)))
+
+  (fn same_scope ((w Where) (cs Cores)) Wheres
+    (uses Alloc)
+    (match cs ((NoCores) (NoWheres)) ((Cores h rest) (Wheres w (same_scope w rest)))))
+
+  ; Which scope each premise is judged under. Only two rules change it: a `let` binds its
+  ; value for its body, and a `case` binds a variant's fields for its arm and carries the
+  ; labels of what it matched on into the program counter.
+  (fn scopes ((w Where) (node Core)) (Result Wheres Fault)
+    (uses Alloc)
+    (if (str.eq (get node rule) "let")
+      (match (get node parts)
+        ((NoCores) (Err (fault "kernel" "a let has a value and a body")))
+        ((Cores value more) (Ok (Wheres w (Wheres (with_var w (get value type)) (NoWheres))))))
+      (if (str.eq (get node rule) "case")
+        (case_scopes w node)
+        (if (str.eq (get node rule) "fork")
+          (fork_scopes w node)
+          (if (str.eq (get node rule) "supervise")
+            (supervise_scopes w node)
+            (Ok (same_scope w (get node parts))))))))
+
+  ; A fork binds each branch's answer for its body, in the order the branches were
+  ; written.
+  (fn fork_scopes ((w Where) (node Core)) (Result Wheres Fault)
+    (uses Alloc)
+    (Ok (wheres_append (same_scope w (all_but_last (get node parts))) (with_vars w (types_of (all_but_last (get node parts)))))))
+
+  ; A scope binds what each task's work carries -- not the work's own type, because what
+  ; the body sees is the answer or the failure, already unwrapped one level.
+  (fn supervise_scopes ((w Where) (node Core)) (Result Wheres Fault)
+    (uses Alloc)
+    (match (carried_types (take_cores (get node parts) (tasks_count (get node tasks))))
+      ((Err e) (Err e))
+      ((Ok bound) (Ok (wheres_append (same_scope w (all_but_last (get node parts))) (with_vars w bound))))))
+
+  (fn wheres_append ((ws Wheres) (w Where)) Wheres
+    (uses Alloc)
+    (match ws
+      ((NoWheres) (Wheres w (NoWheres)))
+      ((Wheres h rest) (Wheres h (wheres_append rest w)))))
+
+  (fn types_of ((cs Cores)) Tys
+    (uses Alloc)
+    (match cs ((NoCores) (NoTys)) ((Cores h rest) (Tys (get h type) (types_of rest)))))
+
+  (fn carried_types ((cs Cores)) (Result Tys Fault)
+    (uses Alloc)
+    (match cs
+      ((NoCores) (Ok (NoTys)))
+      ((Cores h rest) (match (fallible (get h type)) ((Err e) (Err e)) ((Ok one) (match (carried_types rest) ((Err e) (Err e)) ((Ok more) (Ok (Tys one more)))))))))
+
+  (fn case_scopes ((w Where) (node Core)) (Result Wheres Fault)
+    (uses Alloc)
+    (match (get node parts)
+      ((NoCores) (Err (fault "kernel" "a case has something to match on")))
+      ((Cores scrutinee bodies) (match (case_variants w (first_name (get node strs))) ((Err e) (Err e)) ((Ok vs) (match (arm_scopes (under w (get (get scrutinee type) labels)) (case_params w (first_name (get node strs))) vs (get scrutinee type) (get node arms)) ((Err e) (Err e)) ((Ok arms) (Ok (Wheres w arms)))))))))
+
+  (fn arm_scopes ((inside Where) (params Names) (vs VariantDecls) (matched Ty) (as Arms)) (Result Wheres Fault)
+    (uses Alloc)
+    (match as
+      ((NoArms) (Ok (NoWheres)))
+      ((Arms a more) (match (variant_at vs (get a variant)) ((None) (Err (fault "kernel" "an arm is for a variant that does not exist"))) ((Some v) (match (bound_types inside params (get matched args) (get matched labels) (get v fields)) ((Err e) (Err e)) ((Ok bound) (match (arm_scopes inside params vs matched more) ((Err e) (Err e)) ((Ok rest) (Ok (Wheres (with_vars inside bound) rest)))))))))))
+
+  ; --- the rules, each recursing into nothing --------------------------------
+  (fn local ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (if (str.eq (get node rule) "var")
+      (local_var w node)
+      (if (str.eq (get node rule) "const")
+        (local_const w node)
+        (if (str.eq (get node rule) "let")
+          (local_let w node)
+          (if (str.eq (get node rule) "release")
+            (local_release w node)
+            (if (str.eq (get node rule) "wrap")
+              (local_wrap w node)
+              (if (str.eq (get node rule) "unwrap")
+                (local_unwrap w node)
+                (if (str.eq (get node rule) "call")
+                  (local_call w node)
+                  (if (str.eq (get node rule) "con")
+                    (local_con w node)
+                    (if (str.eq (get node rule) "case")
+                      (local_case w node)
+                      (if (str.eq (get node rule) "rec")
+                        (local_rec w node)
+                        (if (str.eq (get node rule) "proj")
+                          (local_proj w node)
+                          (if (str.eq (get node rule) "upd")
+                            (local_upd w node)
+                            (if (str.eq (get node rule) "prim")
+                              (local_prim w node)
+                              (if (str.eq (get node rule) "fork")
+                                (local_fork w node)
+                                (if (str.eq (get node rule) "supervise")
+                                  (local_supervise w node)
+                                  (if (str.eq (get node rule) "send")
+                                    (local_send w node)
+                                    (if (str.eq (get node rule) "recv")
+                                      (local_recv w node)
+                                      (if (str.eq (get node rule) "run")
+                                        (local_run w node)
+                                        (if (str.eq (get node rule) "tensor")
+                                          (local_tensor w node)
+                                          (if (str.eq (get node rule) "outside")
+                                            (local_outside w node)
+                                            (if (str.eq (get node rule) "logfields")
+                                              (local_logfields w node)
+                                              (if (str.eq (get node rule) "array")
+                                                (local_array w node)
+                                                (refuse "no rule of that name"))))))))))))))))))))))))
+
+  ; A variable, by how many binders back it was bound. Innermost is zero.
+  (fn local_var ((w Where) (node Core)) (Result Unit Fault)
+    (and_then (insist (and (= (ints_count (get node ints)) 1) (names_empty (get node effects))) "a variable names one index and performs nothing")
+      (match (ty_at (get w gamma) (- (- (tys_count (get w gamma)) 1) (first_int (get node ints))))
+        ((None) (refuse "no variable of that index is in scope"))
+        ((Some bound) (insist (ty_eq (get node type) bound) "a variable claims a type it is not bound at")))))
+
+  (fn local_const ((w Where) (node Core)) (Result Unit Fault)
+    (and_then (insist (names_empty (get node effects)) "a literal performs nothing")
+      (insist (and (is_literal_kind (first_name (get node strs))) (ty_eq (get node type) (make Ty (base (first_name (get node strs))) (labels (NoNames)) (args (NoTys)) (dims (NoDims)))))
+        "a literal claims a type that is not its kind")))
+
+  (fn is_literal_kind ((kind Str)) Bool
+    (or (or (str.eq kind "Int") (str.eq kind "Real"))
+      (or (or (str.eq kind "Str") (str.eq kind "Bool")) (str.eq kind "Unit"))))
+
+  (fn local_let ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (two_parts node "a let has a value and a body")
+      ((Err e) (Err e))
+      ((Ok pair) (and_then (insist (ty_eq (get node type) (get (get pair second) type)) "a let answers with its body") (insist (names_eq (get node effects) (names_union (get (get pair first) effects) (get (get pair second) effects))) "a let performs what its value and body perform")))))
+
+  (fn local_release ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok inner) (and_then (insist (names_has (get w releases) (first_name (get node strs))) "the function does not declare that it releases that label") (and_then (insist (ty_eq (get node type) (ty_strip (get inner type) (first_name (get node strs)))) "a release takes off exactly the label it names") (insist (names_eq (get node effects) (get inner effects)) "a release performs what is under it"))))))
+
+  ; A newtype keeps the value and changes only the type.
+  (fn local_wrap ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok inner) (match (find_newtype (get (get w prog) newtypes) (first_name (get node strs))) ((None) (refuse "no newtype of that name")) ((Some decl) (match (declared (get w prog) (get decl inner)) ((Err e) (Err e)) ((Ok wrapped) (and_then (insist (ty_fits (with (get inner type) (labels (NoNames))) wrapped) "the value wrapped is not what the newtype wraps") (and_then (insist (ty_eq (get node type) (make Ty (base (get decl name)) (labels (get (get inner type) labels)) (args (NoTys)) (dims (NoDims)))) "a wrap answers with the newtype, carrying what it wrapped") (insist (names_eq (get node effects) (get inner effects)) "a wrap performs what is under it"))))))))))
+
+  ; And reading one back gives what it wraps, labels and all.
+  (fn local_unwrap ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok inner) (match (find_newtype (get (get w prog) newtypes) (get (get inner type) base)) ((None) (refuse "that type wraps nothing")) ((Some decl) (match (declared (get w prog) (get decl inner)) ((Err e) (Err e)) ((Ok wrapped) (and_then (insist (ty_eq (get node type) (ty_plus wrapped (get (get inner type) labels))) "an unwrap answers with what the newtype wraps") (insist (names_eq (get node effects) (get inner effects)) "an unwrap performs what is under it")))))))))
+
+  (record Pair (first Core) (second Core))
+
+  (fn one_part ((node Core)) (Result Core Fault)
+    (match (get node parts)
+      ((NoCores) (Err (fault "kernel" "this rule takes exactly one premise")))
+      ((Cores only rest) (match rest ((NoCores) (Ok only)) ((Cores extra beyond) (Err (fault "kernel" "this rule takes exactly one premise")))))))
+
+  (fn two_parts ((node Core) (why Str)) (Result Pair Fault)
+    (match (get node parts)
+      ((NoCores) (Err (fault "kernel" why)))
+      ((Cores a more) (match more ((NoCores) (Err (fault "kernel" why))) ((Cores b rest) (match rest ((Cores extra beyond) (Err (fault "kernel" why))) ((NoCores) (Ok (make Pair (first a) (second b))))))))))
+
+  ; --- a call ----------------------------------------------------------------
+  ; The elaborator chose the type and label arguments; the kernel puts them in place
+  ; itself and checks that everything fits. A wrong choice cannot make a value fit where
+  ; it does not, so soundness never rests on the choice being clever.
+  (fn local_call ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (find_fn (get (get w prog) fns) (first_name (get node strs)))
+      ((None) (refuse "no function of that name"))
+      ((Some f) (and_then (and_then (insist (= (cores_count (get node parts)) (fields_count (get f params))) "a call gives a different number of arguments than the function takes") (and_then (insist (= (tys_count (get node tys)) (names_count (get f type_params))) "a call gives a different number of type arguments") (insist (or (names_empty (get node given)) (not (str.eq (get f label_param) ""))) "a call gives a label argument to a function that takes none"))) (and_then (insist (names_eq (get node effects) (names_union (get f effects) (effects_of (get node parts)))) "a call performs what the function declares and its arguments do") (and_then (args_fit w f node (get node parts) (get f params)) (match (substitute w f (get f ret) node) ((Err e) (Err e)) ((Ok answered) (insist (ty_eq (get node type) answered) "a call claims an answer the function does not give")))))))))
+
+  (fn args_fit ((w Where) (f FnDecl) (node Core) (args Cores) (params FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match args
+      ((NoCores) (accept))
+      ((Cores arg rest) (match params ((NoFieldDecls) (refuse "more arguments than parameters")) ((FieldDecls prm more) (match (substitute w f (get prm ref) node) ((Err e) (Err e)) ((Ok wanted) (and_then (insist (ty_fits (get arg type) wanted) "an argument does not fit the parameter it is given for") (args_fit w f node rest more)))))))))
+
+  ; A declared type with this call's type and label arguments put in place of the
+  ; parameters. Substitution only: nothing is solved here.
+  (fn substitute ((w Where) (f FnDecl) (ref Ty) (node Core)) (Result Ty Fault)
+    (uses Alloc)
+    (match (substitute_all w f (get ref args) node)
+      ((Err e) (Err e))
+      ((Ok inner) (if (< (names_index (get f type_params) (get ref base)) 0) (if (known (get w prog) (get ref base)) (Ok (make Ty (base (get ref base)) (labels (label_arguments f (get ref labels) (get node given))) (args inner) (dims (get ref dims)))) (Err (fault "kernel" "no type of that name"))) (if (< 0 (tys_count (get ref args))) (Err (fault "kernel" "a type parameter takes no arguments")) (match (ty_at (get node tys) (names_index (get f type_params) (get ref base))) ((None) (Err (fault "kernel" "nothing was given for a type parameter"))) ((Some given) (Ok (ty_plus given (label_arguments f (get ref labels) (get node given)))))))))))
+
+  (fn substitute_all ((w Where) (f FnDecl) (refs Tys) (node Core)) (Result Tys Fault)
+    (uses Alloc)
+    (match refs
+      ((NoTys) (Ok (NoTys)))
+      ((Tys h rest) (match (substitute w f h node) ((Err e) (Err e)) ((Ok one) (match (substitute_all w f rest node) ((Err e) (Err e)) ((Ok more) (Ok (Tys one more)))))))))
+
+  ; The function's label parameter stands for whatever the call gave it; every other
+  ; label is itself.
+  (fn label_arguments ((f FnDecl) (ls Names) (given Names)) Names
+    (uses Alloc)
+    (match ls
+      ((NoNames) (NoNames))
+      ((Names h rest) (if (str.eq h (get f label_param)) (names_union given (label_arguments f rest given)) (names_plus (label_arguments f rest given) h)))))
+
+  ; --- variants, cases and records -------------------------------------------
+  (fn local_con ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (find_enum (get (get w prog) enums) (first_name (get node strs)))
+      ((None) (refuse "no enum of that name"))
+      ((Some e) (match (variant_at (get e variants) (first_int (get node ints))) ((None) (refuse "that enum has no variant of that index")) ((Some v) (and_then (and_then (insist (= (cores_count (get node parts)) (fields_count (get v fields))) "a variant is given a different number of fields than it has") (insist (str.eq (get (get node type) base) (get e name)) "a variant claims to be some other type than its enum")) (and_then (insist (names_eq (get node effects) (effects_of (get node parts))) "a variant performs what its fields perform") (fields_fit w (get e params) (get (get node type) args) (get node parts) (get v fields)))))))))
+
+  (fn fields_fit ((w Where) (params Names) (args Tys) (given Cores) (fields FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match given
+      ((NoCores) (accept))
+      ((Cores one rest) (match fields ((NoFieldDecls) (refuse "more values than fields")) ((FieldDecls f more) (match (instantiate (get w prog) (get f ref) params args) ((Err e) (Err e)) ((Ok wanted) (and_then (insist (ty_fits (get one type) wanted) "a field does not fit what it is declared as") (fields_fit w params args rest more)))))))))
+
+  ; A case over an enum, or over Bool, whose variants are False then True. One arm per
+  ; variant, each exactly once: a derivation's existence is the absence of a
+  ; non-exhaustive match, a duplicate arm and a wildcard, all three together.
+  (fn local_case ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (get node parts)
+      ((NoCores) (refuse "a case has something to match on"))
+      ((Cores scrutinee bodies) (match (case_variants w (first_name (get node strs))) ((Err e) (Err e)) ((Ok vs) (and_then (and_then (insist (str.eq (get (get scrutinee type) base) (first_name (get node strs))) "a case is for one type and the value is of another") (and_then (insist (= (cores_count bodies) (arms_count (get node arms))) "a case has one body per arm") (insist (covers (get node arms) (variants_count vs)) "a case must have one arm for each variant, each exactly once"))) (and_then (insist (names_within (get (get scrutinee type) labels) (get (get node type) labels)) "a case answers with at least the labels of what it matched on") (and_then (insist (names_eq (get node effects) (names_union (get scrutinee effects) (effects_of bodies))) "a case performs what it matches on and its arms perform") (arms_answer node vs (get node arms) bodies)))))))))
+
+  ; Every arm binds exactly its variant's fields, and answers what the case answers.
+  (fn arms_answer ((node Core) (vs VariantDecls) (as Arms) (bodies Cores)) (Result Unit Fault)
+    (uses Alloc)
+    (match as
+      ((NoArms) (accept))
+      ((Arms a more) (match bodies ((NoCores) (refuse "an arm has no body")) ((Cores body rest) (match (variant_at vs (get a variant)) ((None) (refuse "an arm is for a variant that does not exist")) ((Some v) (and_then (and_then (insist (= (get a binders) (fields_count (get v fields))) "an arm binds a different number of fields than its variant has") (insist (ty_fits (get body type) (get node type)) "an arm answers something the case does not")) (arms_answer node vs more rest)))))))))
+
+  ; What a case may be made on: a declared enum, or Bool, which the kernel knows.
+  (fn case_variants ((w Where) (name Str)) (Result VariantDecls Fault)
+    (if (str.eq name "Bool")
+      (Ok (VariantDecls (make VariantDecl (name "False") (fields (NoFieldDecls))) (VariantDecls (make VariantDecl (name "True") (fields (NoFieldDecls))) (NoVariantDecls))))
+      (match (find_enum (get (get w prog) enums) name)
+        ((None) (Err (fault "kernel" "no enum of that name")))
+        ((Some e) (Ok (get e variants))))))
+
+  (fn case_params ((w Where) (name Str)) Names
+    (match (find_enum (get (get w prog) enums) name)
+      ((None) (NoNames))
+      ((Some e) (get e params))))
+
+  ; Exactly one arm for each variant index below `count`, counted down from it.
+  (fn covers ((as Arms) (count Int)) Bool
+    (requires (<= 0 count))
+    (if (= count 0) true (and (= 1 (chosen_times as (- count 1))) (covers as (- count 1)))))
+
+  (fn chosen_times ((as Arms) (index Int)) Int
+    (match as
+      ((NoArms) 0)
+      ((Arms a rest) (+ (if (= (get a variant) index) 1 0) (chosen_times rest index)))))
+
+  ; What an arm binds: the variant's fields, with the matched value's type arguments in
+  ; place, carrying the labels of what was matched on.
+  (fn bound_types ((w Where) (params Names) (args Tys) (ls Names) (fields FieldDecls)) (Result Tys Fault)
+    (uses Alloc)
+    (match fields
+      ((NoFieldDecls) (Ok (NoTys)))
+      ((FieldDecls f more) (match (instantiate (get w prog) (get f ref) params args) ((Err e) (Err e)) ((Ok one) (match (bound_types w params args ls more) ((Err e) (Err e)) ((Ok rest) (Ok (Tys (ty_plus one ls) rest)))))))))
+
+  (fn local_rec ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (find_record (get (get w prog) records) (first_name (get node strs)))
+      ((None) (refuse "no record of that name"))
+      ((Some r) (and_then (and_then (insist (= (cores_count (get node parts)) (fields_count (get r fields))) "a record is built from every one of its fields, and only those") (insist (str.eq (get (get node type) base) (get r name)) "a record claims to be some other type")) (and_then (insist (names_eq (get node effects) (effects_of (get node parts))) "a record performs what its fields perform") (fields_fit w (NoNames) (NoTys) (get node parts) (get r fields)))))))
+
+  (fn local_proj ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok inner) (match (find_record (get (get w prog) records) (get (get inner type) base)) ((None) (refuse "that type has no fields")) ((Some r) (match (field_at (get r fields) (first_int (get node ints))) ((None) (refuse "that record has no field of that index")) ((Some f) (match (declared (get w prog) (get f ref)) ((Err e) (Err e)) ((Ok want) (and_then (insist (ty_eq (get node type) (ty_plus want (get (get inner type) labels))) "a field read answers the field, with the record's labels") (insist (names_eq (get node effects) (get inner effects)) "a field read performs what is under it")))))))))))
+
+  ; Replacing fields: the record, and one value for each field named.
+  (fn local_upd ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (get node parts)
+      ((NoCores) (refuse "an update has a record to replace fields in"))
+      ((Cores base_part values) (match (find_record (get (get w prog) records) (get (get base_part type) base)) ((None) (refuse "that type has no fields to replace")) ((Some r) (and_then (and_then (insist (= (ints_count (get node ints)) (cores_count values)) "an update gives one value for each field it names") (insist (str.eq (get (get node type) base) (get (get base_part type) base)) "an update answers the record it was given")) (and_then (insist (names_eq (get node effects) (names_union (get base_part effects) (effects_of values))) "an update performs what its parts perform") (replacements w r (get node ints) values))))))))
+
+  (fn replacements ((w Where) (r RecordDecl) (is Ints) (values Cores)) (Result Unit Fault)
+    (uses Alloc)
+    (match is
+      ((NoInts) (accept))
+      ((Ints i rest) (match values ((NoCores) (refuse "an update names more fields than it gives values")) ((Cores v more) (match (field_at (get r fields) i) ((None) (refuse "that record has no field of that index")) ((Some f) (match (declared (get w prog) (get f ref)) ((Err e) (Err e)) ((Ok want) (and_then (insist (ty_fits (get v type) want) "the value put in a field does not fit it") (replacements w r rest more)))))))))))
+
+  ; --- a primitive -----------------------------------------------------------
+  (fn local_prim ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (primitive (first_name (get node strs)))
+      ((None) (refuse "no primitive of that name"))
+      ((Some b) (and_then (and_then (insist (= (cores_count (get node parts)) (wants_count (get b params))) "a primitive is given a different number of arguments than it takes") (and_then (insist (or (not (get b sink)) (names_empty (carried (get node parts)))) "a sink is given data that carries a label") (insist (names_eq (get node effects) (names_union (get b effects) (effects_of (get node parts)))) "a primitive performs what it declares and its arguments do"))) (match (number_of b (get node parts)) ((Err e) (Err e)) ((Ok kind) (and_then (arguments_wanted b kind (get node parts) (get b params)) (match (answered b kind) ((Err e) (Err e)) ((Ok answer) (insist (ty_eq (get node type) (with answer (labels (names_union (get answer labels) (names_union (passed_on b (get node parts)) (get b ret_labels)))))) "a primitive claims an answer it does not give"))))))))))
+
+  ; A sink keeps nothing; every other primitive passes on what its arguments carry.
+  (fn passed_on ((b Builtin) (cs Cores)) Names
+    (uses Alloc)
+    (if (get b sink) (NoNames) (carried cs)))
+
+  ; Every label the arguments carry.
+  (fn carried ((cs Cores)) Names
+    (uses Alloc)
+    (match cs
+      ((NoCores) (NoNames))
+      ((Cores h rest) (names_union (get (get h type) labels) (carried rest)))))
+
+  ; Which number format a format-polymorphic primitive is being used at: whatever the
+  ; arguments at those positions are, and they must agree, because there is no implicit
+  ; widening. A decimal literal does not decide it -- it takes the format named for it.
+  (fn number_of ((b Builtin) (args Cores)) (Result Str Fault)
+    (uses Alloc)
+    (match (seen_formats (get b params) args)
+      ((NoNames) (Ok "Int"))
+      ((Names kind rest) (match rest ((Names other more) (Err (fault "kernel" "a primitive mixes number formats"))) ((NoNames) (if (not (allowed_format b kind)) (Err (fault "kernel" "a primitive is used at a format it does not take")) (if (and (get b fixed) (not (is_fixed_width kind))) (Err (fault "kernel" "a primitive needs a fixed width")) (Ok kind))))))))
+
+  (fn seen_formats ((ws Wants) (args Cores)) Names
+    (uses Alloc)
+    (match ws
+      ((NoWants) (NoNames))
+      ((Wants want more) (match args ((NoCores) (NoNames)) ((Cores arg rest) (if (and (stands_for_a_number want) (not (str.eq (get (get arg type) base) "Real"))) (names_plus (seen_formats more rest) (get (get arg type) base)) (seen_formats more rest)))))))
+
+  (fn stands_for_a_number ((want Want)) Bool
+    (match want
+      ((WantType name) false)
+      ((WantInt) true)
+      ((WantNumber) true)
+      ((WantSource) true)))
+
+  ; A `WantInt` position takes the integers; the others take the floating formats too.
+  (fn allowed_format ((b Builtin) (kind Str)) Bool
+    (if (wants_floats (get b params))
+      (or (is_integer kind) (is_float kind))
+      (is_integer kind)))
+
+  (fn wants_floats ((ws Wants)) Bool
+    (match ws
+      ((NoWants) false)
+      ((Wants want more) (or (match want ((WantType name) false) ((WantInt) false) ((WantNumber) true) ((WantSource) true)) (wants_floats more)))))
+
+  (fn is_integer ((kind Str)) Bool (or (str.eq kind "Int") (is_fixed_width kind)))
+
+  (fn is_fixed_width ((kind Str)) Bool
+    (or (or (or (str.eq kind "I8") (str.eq kind "I16")) (or (str.eq kind "I32") (str.eq kind "I64")))
+      (or (or (str.eq kind "U8") (str.eq kind "U16"))
+        (or (str.eq kind "U32") (str.eq kind "U64")))))
+
+  (fn is_float ((kind Str)) Bool
+    (or (or (str.eq kind "F16") (str.eq kind "BF16")) (str.eq kind "F32")))
+
+  (fn arguments_wanted ((b Builtin) (kind Str) (args Cores) (ws Wants)) (Result Unit Fault)
+    (uses Alloc)
+    (match ws
+      ((NoWants) (accept))
+      ((Wants want more) (match args ((NoCores) (refuse "a primitive is given fewer arguments than it takes")) ((Cores arg rest) (and_then (insist (fits_want want kind (get (get arg type) base)) "an argument of a primitive is of the wrong type") (arguments_wanted b kind rest more)))))))
+
+  (fn fits_want ((want Want) (kind Str) (got Str)) Bool
+    (match want
+      ((WantType name) (str.eq got name))
+      ((WantInt) (str.eq got kind))
+      ((WantNumber) (str.eq got kind))
+      ((WantSource) (or (str.eq got kind) (str.eq got "Real")))))
+
+  (fn answered ((b Builtin) (kind Str)) (Result Ty Fault)
+    (match (get b ret)
+      ((RetBase name) (Ok (plain name)))
+      ((RetNumber) (Ok (plain kind)))
+      ((RetOptionOfNumber) (Ok (make Ty (base "Option") (labels (NoNames)) (args (Tys (plain kind) (NoTys))) (dims (NoDims)))))
+      ((RetWritten t) (Ok t))))
+
+  (fn plain ((name Str)) Ty
+    (make Ty (base name) (labels (NoNames)) (args (NoTys)) (dims (NoDims))))
+
+  ; --- work placed elsewhere -------------------------------------------------
+  ; `inline` and `thread` share memory, so a value crossing needs no agreed form; a core,
+  ; a process or a node may not, so everything crossing to one has to have one (SPEC 7.2).
+  (fn separate_memory ((spot Str)) Bool (or (str.eq spot "process") (str.eq spot "node")))
+
+  (fn placed ((w Where) (spot Str) (carried Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (insist (names_has (get w places) spot) "work is placed somewhere this target does not have")
+      (insist (or (not (separate_memory spot)) (transferable w carried (NoNames) (transfer_budget w)))
+        "work placed in memory of its own carries something with no wire form")))
+
+  ; Separate memory copies a value, so every part of it needs an agreed form. A type
+  ; already being looked at is taken as transferable: that is the recursion closing, not
+  ; a new obligation.
+  ;
+  ; This walk follows *declarations*, not the structure of a value, so nothing about it
+  ; gets smaller on its own and the termination checker cannot see an end to it. It is
+  ; given a budget instead, counted from the number of types the module declares, which
+  ; bounds how many distinct ones the walk can meet. Running out answers **no**, which is
+  ; the safe answer: a kernel that refuses too much loses a program, where one that
+  ; accepts too much loses the point.
+  (fn transferable ((w Where) (t Ty) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (if (str.eq (get t base) "Array")
+        ; An array is only as transferable as what it holds: it is the one primitive
+        ; whose crossing is not settled by its own name.
+        (match (get t args)
+          ((NoTys) false)
+          ((Tys element more) (transferable w element seen (- budget 1))))
+        (if (or (names_has seen (get t base)) (is_primitive (get t base)))
+          true
+          (match (find_newtype (get (get w prog) newtypes) (get t base))
+            ((Some d) (wraps_transferable w d (names_plus seen (get t base)) (- budget 1)))
+            ((None) (match (find_enum (get (get w prog) enums) (get t base)) ((Some e) (and (all_transferable w (get t args) (names_plus seen (get t base)) (- budget 1)) (variants_transferable w (get e params) (get t args) (get e variants) (names_plus seen (get t base)) (- budget 1)))) ((None) (match (find_record (get (get w prog) records) (get t base)) ((None) false) ((Some r) (and (get r has_schema) (fields_transferable w (get r fields) (names_plus seen (get t base)) (- budget 1)))))))))))))
+
+  ; How much budget the walk starts with: enough for every declared type, several times
+  ; over, since reaching a type costs a few calls.
+  (fn transfer_budget ((w Where)) Int
+    (ensures (<= 0 result))
+    (+ 8 (* 8 (names_count (get (get w prog) types)))))
+
+  (fn wraps_transferable ((w Where) (d NewtypeDecl) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match (declared (get w prog) (get d inner))
+        ((Err e) false)
+        ((Ok inner) (transferable w inner seen (- budget 1))))))
+
+  (fn all_transferable ((w Where) (ts Tys) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match ts
+        ((NoTys) true)
+        ((Tys h rest) (and (transferable w h seen (- budget 1)) (all_transferable w rest seen (- budget 1)))))))
+
+  (fn variants_transferable ((w Where) (params Names) (args Tys) (vs VariantDecls) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match vs
+        ((NoVariantDecls) true)
+        ((VariantDecls v rest) (and (variant_fields_transferable w params args (get v fields) seen (- budget 1)) (variants_transferable w params args rest seen (- budget 1)))))))
+
+  (fn variant_fields_transferable ((w Where) (params Names) (args Tys) (fs FieldDecls) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match fs
+        ((NoFieldDecls) true)
+        ((FieldDecls f rest) (and (field_transferable w (instantiate (get w prog) (get f ref) params args) seen (- budget 1)) (variant_fields_transferable w params args rest seen (- budget 1)))))))
+
+  (fn fields_transferable ((w Where) (fs FieldDecls) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match fs
+        ((NoFieldDecls) true)
+        ((FieldDecls f rest) (and (field_transferable w (declared (get w prog) (get f ref)) seen (- budget 1)) (fields_transferable w rest seen (- budget 1)))))))
+
+  (fn field_transferable ((w Where) (r (Result Ty Fault)) (seen Names) (budget Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      false
+      (match r ((Err e) false) ((Ok t) (transferable w t seen (- budget 1))))))
+
+  ; --- branches that run at once ---------------------------------------------
+  ; A branch that performs anything but building a value makes the answer depend on the
+  ; order the branches happened to run in, so the function has to declare `Nondet`.
+  (fn local_fork ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (last_core (get node parts))
+      ((None) (refuse "a fork has branches and a body"))
+      ((Some body) (and_then (and_then (insist (= (cores_count (get node parts)) (+ 1 (names_count (get node strs)))) "a fork gives one branch per placement, and a body") (branches_stand w (get node strs) (all_but_last (get node parts)))) (and_then (insist (ty_eq (get node type) (get body type)) "a fork answers with its body") (insist (names_eq (get node effects) (effects_of (get node parts))) "a fork performs what its branches and body perform"))))))
+
+  (fn branches_stand ((w Where) (spots Names) (branches Cores)) (Result Unit Fault)
+    (uses Alloc)
+    (match spots
+      ((NoNames) (accept))
+      ((Names spot more) (match branches ((NoCores) (refuse "a fork names more placements than it has branches")) ((Cores branch rest) (and_then (and_then (placed w spot (get branch type)) (insist (or (names_within (get branch effects) (order_blind)) (names_has (get w declares) "Nondet")) "a branch performs something whose order can be noticed, and the function does not declare Nondet")) (branches_stand w more rest)))))))
+
+  ; Building a value is the one effect whose order cannot be noticed.
+  (fn order_blind () Names (Names "Alloc" (NoNames)))
+
+  ; --- work with a deadline --------------------------------------------------
+  ; Each task's work and the scope's body must be able to carry a failure, because a task
+  ; that misses its deadline is a failure the body has to see.
+  (fn local_supervise ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (last_core (get node parts))
+      ((None) (refuse "a scope has tasks and a body"))
+      ((Some body) (and_then (and_then (insist (= (cores_count (get node parts)) (+ 1 (* 2 (tasks_count (get node tasks))))) "a scope gives work and a deadline for each task, and a body") (tasks_stand w (get node tasks) (all_but_last (get node parts)) (drop_cores (all_but_last (get node parts)) (tasks_count (get node tasks))))) (and_then (carries_a_failure (get body type)) (and_then (insist (ty_eq (get node type) (get body type)) "a scope answers with its body") (insist (names_eq (get node effects) (names_plus (effects_of (get node parts)) "Clock")) "a scope performs what its tasks and body perform, and waits")))))))
+
+  (fn tasks_stand ((w Where) (ts Tasks) (works Cores) (deadlines Cores)) (Result Unit Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTasks) (accept))
+      ((Tasks t more) (match works ((NoCores) (refuse "a scope names more tasks than it has work for")) ((Cores work rest) (match deadlines ((NoCores) (refuse "a task has no deadline")) ((Cores waits later) (and_then (and_then (placed w (get t placement) (get work type)) (insist (str.eq (get (get waits type) base) "Duration") "a deadline is not a Duration")) (and_then (carries_a_failure (get work type)) (tasks_stand w more rest later))))))))))
+
+  (fn carries_a_failure ((t Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (match (fallible t) ((Err e) (Err e)) ((Ok carried) (accept))))
+
+  ; What a `(Result T Fault)` carries, with the labels of the whole riding along.
+  (fn fallible ((t Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (if (not (str.eq (get t base) "Result"))
+      (Err (fault "kernel" "this cannot carry a failure"))
+      (match (get t args)
+        ((NoTys) (Err (fault "kernel" "this cannot carry a failure")))
+        ((Tys ok rest) (match rest ((NoTys) (Err (fault "kernel" "this cannot carry a failure"))) ((Tys bad beyond) (if (not (str.eq (get bad base) "Fault")) (Err (fault "kernel" "this cannot carry a failure")) (Ok (ty_plus ok (get t labels))))))))))
+
+  ; --- channels --------------------------------------------------------------
+  (fn local_send ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok value) (match (find_channel (get (get w prog) channels) (first_name (get node strs))) ((None) (refuse "no channel of that name")) ((Some c) (and_then (and_then (insist (names_within (all_labels (get value type)) (get c allows)) "a channel is sent data carrying a label its receiver does not accept") (insist (str.eq (get (get value type) base) (get c payload)) "a channel is sent something other than what it carries")) (and_then (insist (ty_eq (get node type) (plain "Unit")) "a send answers nothing") (insist (names_eq (get node effects) (names_plus (get value effects) "Ipc")) "a send performs what its value performs, and talks"))))))))
+
+  ; Nothing may be waiting, so a receive answers an Option.
+  (fn local_recv ((w Where) (node Core)) (Result Unit Fault)
+    (match (find_channel (get (get w prog) channels) (first_name (get node strs)))
+      ((None) (refuse "no channel of that name"))
+      ((Some c) (and_then (insist (= 0 (cores_count (get node parts))) "a receive takes nothing") (and_then (insist (ty_eq (get node type) (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base (get c payload)) (labels (get c allows)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims)))) "a receive claims something other than an Option of what the channel carries") (insist (names_eq (get node effects) (Names "Ipc" (NoNames))) "a receive talks, and does nothing else"))))))
+
+  ; Every label anywhere in a type, however deep: a channel accepts or refuses all of them.
+  (fn all_labels ((t Ty)) Names
+    (uses Alloc)
+    (names_union (get t labels) (all_labels_of (get t args))))
+
+  (fn all_labels_of ((ts Tys)) Names
+    (uses Alloc)
+    (match ts
+      ((NoTys) (NoNames))
+      ((Tys h rest) (names_union (all_labels h) (all_labels_of rest)))))
+
+  ; --- a model ---------------------------------------------------------------
+  ; What a model answers carries `ModelOutput`, so it cannot be mistaken for a
+  ; measurement, and it carries what the model was trained on, so the training data's
+  ; labels travel with what was inferred from it.
+  (fn local_run ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (one_part node)
+      ((Err e) (Err e))
+      ((Ok given) (match (find_model (get (get w prog) models) (first_name (get node strs))) ((None) (refuse "no model of that name")) ((Some m) (model_stands w node given m))))))
+
+  (fn model_stands ((w Where) (node Core) (given Core) (m ModelDecl)) (Result Unit Fault)
+    (uses Alloc)
+    (match (declared (get w prog) (get m input))
+      ((Err e) (Err e))
+      ((Ok wanted) (match (declared (get w prog) (get m output)) ((Err e) (Err e)) ((Ok answers) (and_then (insist (ty_fits (get given type) (ty_plus wanted (get (get given type) labels))) "a model is given something other than its input") (and_then (insist (ty_eq (get node type) (ty_plus answers (names_union (get (get given type) labels) (names_plus (get m trained_on) "ModelOutput")))) "a model claims an answer it does not give") (insist (names_eq (get node effects) (names_plus (get given effects) (device_effect (get m device)))) "a model performs what its input performs, and runs"))))))))
+
+  (fn device_effect ((device Str)) Str
+    (if (str.eq device "gpu") "Gpu" (if (str.eq device "npu") "Npu" "Alloc")))
+
+  ; --- tensors ---------------------------------------------------------------
+  ; Elementwise work needs one shape; a product lines its axes up by name, so two axes of
+  ; the same length cannot be silently swapped.
+  (fn local_tensor ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (two_parts node "a tensor operation takes two tensors")
+      ((Err e) (Err e))
+      ((Ok pair) (and_then (and_then (insist (and (is_shaped (get (get pair first) type)) (is_shaped (get (get pair second) type))) "a tensor operation is given something that is not a shaped tensor") (insist (tys_eq (get (get (get pair first) type) args) (get (get (get pair second) type) args)) "a tensor operation needs one element format on both sides")) (match (shape_of (first_name (get node strs)) (get (get pair first) type) (get (get pair second) type)) ((Err e) (Err e)) ((Ok dims) (and_then (insist (ty_eq (get node type) (make Ty (base "Tensor") (labels (names_union (get (get (get pair first) type) labels) (get (get (get pair second) type) labels))) (args (get (get (get pair first) type) args)) (dims dims))) "a tensor operation claims a shape it does not give") (insist (names_eq (get node effects) (names_plus (effects_of (get node parts)) "Alloc")) "a tensor operation performs what its sides perform, and builds"))))))))
+
+  (fn is_shaped ((t Ty)) Bool
+    (and (str.eq (get t base) "Tensor")
+      (match (get t dims) ((NoDims) false) ((Dims a n rest) true))))
+
+  ; `tensor.add` keeps the shape; `tensor.matmul` drops the axis it contracts, and that
+  ; axis has to be the same one by name and by size on both sides.
+  (fn shape_of ((name Str) (left Ty) (right Ty)) (Result Dims Fault)
+    (uses Alloc)
+    (if (str.eq name "tensor.add")
+      (if (dims_eq (get left dims) (get right dims))
+        (Ok (get left dims))
+        (Err (fault "kernel" "elementwise work needs the same shape on both sides")))
+      (if (not (str.eq name "tensor.matmul"))
+        (Err (fault "kernel" "no tensor operation of that name"))
+        (if (or (< (dims_count (get left dims)) 2) (< (dims_count (get right dims)) 2))
+          (Err (fault "kernel" "a matrix product needs two axes on each side"))
+          (match (last_dim (get left dims))
+            ((None) (Err (fault "kernel" "a matrix product needs two axes on each side")))
+            ((Some contracted) (if (not (dims_eq (one_dim contracted) (first_dim (get right dims)))) (Err (fault "kernel" "a matrix product contracts two axes that are not the same axis")) (Ok (dims_join (all_but_last_dim (get left dims)) (rest_of_dims (get right dims)))))))))))
+
+  ; --- foreign code ----------------------------------------------------------
+  ; Nothing is known of code outside the language, so what it answers carries
+  ; `Unverified` and stays that way until something checks it.
+  (fn local_outside ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (find_foreign (get (get w prog) foreigns) (first_name (get node strs)))
+      ((None) (refuse "no foreign declaration of that name"))
+      ((Some d) (match (declared (get w prog) (get d ret)) ((Err e) (Err e)) ((Ok answers) (and_then (and_then (insist (= (cores_count (get node parts)) (fields_count (get d params))) "foreign code is given a different number of arguments than it takes") (fields_fit w (NoNames) (NoTys) (get node parts) (get d params))) (and_then (insist (ty_eq (get node type) (ty_plus answers (names_plus (carried (get node parts)) "Unverified"))) "foreign code claims an answer it does not give") (insist (names_eq (get node effects) (names_plus (names_union (get d effects) (effects_of (get node parts))) "Foreign")) "foreign code performs what it declares and its arguments do"))))))))
+
+  ; --- a structured log line -------------------------------------------------
+  ; A label on a logged field has to have a redaction policy, or the line could put
+  ; protected data in a log where nothing would take it out again.
+  (fn local_logfields ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (and_then (insist (= (names_count (get node strs)) (cores_count (get node parts))) "a log line names a different number of fields than it gives values") (insist (names_within (logged_labels (get node parts)) (get (get w prog) redacted)) "a log field carries a label with no redaction policy"))
+      (and_then (insist (ty_eq (get node type) (plain "Unit")) "a log line answers nothing")
+        (insist (names_eq (get node effects) (names_plus (effects_of (get node parts)) "Log"))
+          "a log line performs what its fields perform, and logs"))))
+
+  (fn logged_labels ((cs Cores)) Names
+    (uses Alloc)
+    (match cs
+      ((NoCores) (NoNames))
+      ((Cores h rest) (names_union (all_labels (get h type)) (logged_labels rest)))))
+
+  ; --- walking lists of premises, shapes and tasks ---------------------------
+  (fn last_core ((cs Cores)) (Option Core)
+    (match cs
+      ((NoCores) (None))
+      ((Cores h rest) (match rest ((NoCores) (Some h)) ((Cores a b) (last_core rest))))))
+
+  (fn all_but_last ((cs Cores)) Cores
+    (uses Alloc)
+    (match cs
+      ((NoCores) (NoCores))
+      ((Cores h rest) (match rest ((NoCores) (NoCores)) ((Cores a b) (Cores h (all_but_last rest)))))))
+
+  (fn drop_cores ((cs Cores) (n Int)) Cores
+    (match cs
+      ((NoCores) (NoCores))
+      ((Cores h rest) (if (<= n 0) cs (drop_cores rest (- n 1))))))
+
+  (fn take_cores ((cs Cores) (n Int)) Cores
+    (uses Alloc)
+    (match cs
+      ((NoCores) (NoCores))
+      ((Cores h rest) (if (<= n 0) (NoCores) (Cores h (take_cores rest (- n 1)))))))
+
+  (fn dims_count ((ds Dims)) Int
+    (match ds ((NoDims) 0) ((Dims a n rest) (+ 1 (dims_count rest)))))
+
+  (fn last_dim ((ds Dims)) (Option Axis)
+    (uses Alloc)
+    (match ds
+      ((NoDims) (None))
+      ((Dims a n rest) (match rest ((NoDims) (Some (make Axis (axis a) (size n)))) ((Dims b m more) (last_dim rest))))))
+
+  (fn one_dim ((x Axis)) Dims (Dims (get x axis) (get x size) (NoDims)))
+
+  (fn first_dim ((ds Dims)) Dims
+    (match ds ((NoDims) (NoDims)) ((Dims a n rest) (Dims a n (NoDims)))))
+
+  (fn rest_of_dims ((ds Dims)) Dims (match ds ((NoDims) (NoDims)) ((Dims a n rest) rest)))
+
+  (fn all_but_last_dim ((ds Dims)) Dims
+    (uses Alloc)
+    (match ds
+      ((NoDims) (NoDims))
+      ((Dims a n rest) (match rest ((NoDims) (NoDims)) ((Dims b m more) (Dims a n (all_but_last_dim rest)))))))
+
+  (fn dims_join ((p Dims) (q Dims)) Dims
+    (uses Alloc)
+    (match p ((NoDims) q) ((Dims a n rest) (Dims a n (dims_join rest q)))))
+
+  (fn tasks_count ((ts Tasks)) Int
+    (match ts ((NoTasks) 0) ((Tasks h rest) (+ 1 (tasks_count rest)))))
+
+  ; --- arrays ----------------------------------------------------------------
+  ; The array operations have a rule of their own because what each answers is said in
+  ; terms of what the array holds, which the `prim` rule cannot say: its table maps a
+  ; name to a type, not to a function of one. Reading is total, so none of these carries
+  ; an obligation.
+  (fn local_array ((w Where) (node Core)) (Result Unit Fault)
+    (uses Alloc)
+    (match (array_op (first_name (get node strs)))
+      ((None) (refuse "no array operation of that name"))
+      ((Some op) (and_then (and_then (insist (= (cores_count (get node parts)) (get op arity)) "an array operation is given a different number of arguments than it takes") (insist (names_eq (get node effects) (names_union (get op effects) (effects_of (get node parts)))) "an array operation performs what it declares and its arguments do")) (array_answers w node op)))))
+
+  ; How many arguments each takes, and what it performs. Building one is building a value
+  ; whose size is not known in advance; reading one builds nothing.
+  (record ArrayOp (name Str) (arity Int) (effects Names))
+
+  (fn array_op ((name Str)) (Option ArrayOp)
+    (if (str.eq name "array.len")
+      (Some (make ArrayOp (name name) (arity 1) (effects (NoNames))))
+      (if (str.eq name "array.at")
+        (Some (make ArrayOp (name name) (arity 2) (effects (NoNames))))
+        (if (str.eq name "array.empty")
+          (Some (make ArrayOp (name name) (arity 0) (effects (Names "Alloc" (NoNames)))))
+          (if (str.eq name "array.push")
+            (Some (make ArrayOp (name name) (arity 2) (effects (Names "Alloc" (NoNames)))))
+            (None))))))
+
+  (fn array_answers ((w Where) (node Core) (op ArrayOp)) (Result Unit Fault)
+    (uses Alloc)
+    (if (str.eq (get op name) "array.empty")
+      (insist (is_an_array (get node type))
+        "an empty array is claimed to be something other than an array")
+      (match (get node parts)
+        ((NoCores) (refuse "an array operation is given no array"))
+        ((Cores holder rest) (match (element_of (get holder type)) ((None) (refuse "an array operation is given something that is not an array")) ((Some element) (array_claim w node op holder rest element)))))))
+
+  (fn array_claim ((w Where) (node Core) (op ArrayOp) (holder Core) (rest Cores) (element Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (if (str.eq (get op name) "array.len")
+      (insist (ty_eq (get node type) (make Ty (base "Count") (labels (get (get holder type) labels)) (args (NoTys)) (dims (NoDims))))
+        "the length of an array is a Count carrying the array's labels")
+      (match rest
+        ((NoCores) (refuse "an array operation is given too few arguments"))
+        ((Cores second more) (if (str.eq (get op name) "array.at") (and_then (insist (str.eq (get (get second type) base) "Count") "an index into an array is not a Count") (insist (ty_eq (get node type) (make Ty (base "Option") (labels (get (get holder type) labels)) (args (Tys (ty_plus element (get (get holder type) labels)) (NoTys))) (dims (NoDims)))) "an element of an array is not what the array holds")) (and_then (insist (ty_fits (get second type) element) "the value pushed onto an array is not what it holds") (insist (ty_eq (get node type) (make Ty (base "Array") (labels (names_union (get (get holder type) labels) (get (get second type) labels))) (args (Tys element (NoTys))) (dims (NoDims)))) "pushing onto an array answers something other than that array")))))))
+
+  ; Which element is where is information about the array, so what comes out
+  ; of one carries what the array carried.
+  (fn is_an_array ((t Ty)) Bool
+    (and (str.eq (get t base) "Array")
+      (match (get t args) ((NoTys) false) ((Tys a rest) true))))
+
+  (fn element_of ((t Ty)) (Option Ty)
+    (if (not (is_an_array t))
+      (None)
+      (match (get t args) ((NoTys) (None)) ((Tys a rest) (Some a)))))
+
+  (fn effects_of ((cs Cores)) Names
+    (uses Alloc)
+    (match cs
+      ((NoCores) (NoNames))
+      ((Cores h rest) (names_union (get h effects) (effects_of rest))))))

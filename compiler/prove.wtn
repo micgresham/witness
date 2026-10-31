@@ -1,0 +1,232 @@
+; The prover's search, in Witness, checked by the kernel's own rules.
+;
+; The Phase 0 prover (witness/logic.py) decides whether a goal follows from assumptions
+; over linear integer arithmetic with boolean structure, and says why. A Phase 2 checker
+; that proves contracts needs the same procedure in the language it is written in. This
+; is that: Fourier-Motzkin elimination with integer tightening, one case at a time.
+;
+; What makes it safe to write is that none of it has to be trusted. It builds the same
+; `Reasons` that kernel/arith.wtn replays -- a clash on one atom, or the steps that reach
+; a constant `k <= 0` with `k > 0` -- and `verdict` hands every proof it finds to the
+; kernel's `follows` before saying "proved". A bug in this search can lose a proof; it
+; cannot make the kernel accept a false one, which is the arrangement the Python prover
+; and certificate.py already have.
+;
+; The cases come from the kernel's `all_cases`, in the order the specification fixes, not
+; from here, so a reason is given per position and the two cannot disagree about which
+; case it is for.
+;
+;   witness run compiler/prove.wtn --grant Alloc,Console
+(module prove
+  (use "wtn:fde3d7cf6a4237c8814c0b98b18896cb5d21afaf4445e2d46bf6880a41ab1159" as all_cases)
+
+  (use "wtn:1b26795970cc7fa7b92a2a3ccf2e6b67514d52bd7c8ef8d40dbe1bada6584d07" as follows)
+
+  (use "wtn:5e4837f7b5a56eeec704ddf8e31b16e02e2327da6c69d6d6b3fe9d722e82d21e" as with_negated_goal)
+
+  (use "wtn:ae28ec8b6f77ef889c579be8348a96401708eee20e4561f3a09c29717854c0c4" as fact)
+
+  (use "wtn:b29c341365b5255d181d559b10b408777b05745378191e3350c3bac62c59975a" as fact_count)
+
+  (use "wtn:7159df122e5778fba625fd05ce58503e6ccd6047f32263e041791becf7db1156" as append_fact)
+
+  (use "wtn:b2367b0307d553f1a58c795ca8a8703c0e73e0a32420595c1f29a107d076165b" as combined)
+
+  (use "wtn:d871e3ca6a6d7916664161d13cc50c28d6225ebfc7e99ba64918f38c7c36fd39" as tightened)
+
+  (use "wtn:514116b8342fa032de25af4db40f7102e1f7b2ea94c00f40812d177e96d6527e" as coeff_of)
+
+  (use "wtn:e9806d9294716a248a8392bf7547fe2479f386fc8fd942b268d6e46f6fffabdd" as holds)
+
+  (use "wtn:d1488c224f99a44fc205df274eddadf78076cd6f7c028045f64f388f47163c05" as contradicts)
+
+  (use "wtn:682e258008067b31ff0c4eeef981eccd1dbfa7f198e5976d1efeb0d59d44a85e" as or_else)
+
+  ; --- the work in hand --------------------------------------------------------------
+  ; Constraints are only appended, never replaced, so an index always means the same one
+  ; and a step can name what it was built from. `count` is how many there are.
+  (enum Idxs (NoIdxs) (Idxs (head Int) (rest Idxs)))
+
+  (record Work (facts Facts) (steps Steps) (count Int))
+
+  (record Round (work Work) (live Idxs))
+
+  (record Pushed (work Work) (index Int))
+
+  (fn idx_count ((is Idxs)) Int (match is ((NoIdxs) 0) ((Idxs i more) (+ 1 (idx_count more)))))
+
+  (fn idx_append ((is Idxs) (x Int)) Idxs
+    (uses Alloc)
+    (match is ((NoIdxs) (Idxs x (NoIdxs))) ((Idxs i more) (Idxs i (idx_append more x)))))
+
+  (fn step_append ((ss Steps) (s Step)) Steps
+    (uses Alloc)
+    (match ss ((NoSteps) (Steps s (NoSteps))) ((Steps h more) (Steps h (step_append more s)))))
+
+  (fn push ((w Work) (s Step) (x Lin)) Work
+    (uses Alloc)
+    (make Work (facts (append_fact (get w facts) x)) (steps (step_append (get w steps) s)) (count (+ (get w count) 1))))
+
+  ; --- dividing a constraint down ------------------------------------------------------
+  ; A budget, which cannot be negative whatever it was computed from.
+  (fn budget ((n Int)) Int
+    (ensures (<= 0 result))
+    (if (< n 0) 0 n))
+
+  (fn abs_of ((k Int)) Int (if (< k 0) (- 0 k) k))
+
+  ; Euclid. `left` falls at every step; the remainder shrinks on its own but nothing about
+  ; an `Int` says so to the checker, and a + b + 2 steps is more than it ever takes.
+  (fn gcd_of ((a Int) (b Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (or (<= left 0) (= b 0)) a (gcd_of b (- a (* b (or_else (num.div a b) 0))) (- left 1))))
+
+  (fn divisor ((ts Terms) (g Int)) Int
+    (match ts
+      ((NoTerms) g)
+      ((Terms a c rest) (divisor rest (gcd_of g (abs_of c) (budget (+ g (+ (abs_of c) 2))))))))
+
+  ; Divide by the greatest common divisor of the coefficients and round the bound inwards,
+  ; if there is anything to divide by. The step carries the divisor, so the kernel checks
+  ; one division and never computes a gcd.
+  (fn tighten_at ((w Work) (i Int)) Pushed
+    (uses Alloc)
+    (match (fact (get w facts) i)
+      ((None) (make Pushed (work w) (index i)))
+      ((Some x) (if (<= (divisor (get x terms) 0) 1)
+        (make Pushed (work w) (index i))
+        (match (tightened x (divisor (get x terms) 0))
+          ((Err f) (make Pushed (work w) (index i)))
+          ((Ok y) (make Pushed (work (push w (Tighten i (divisor (get x terms) 0)) y)) (index (get w count)))))))))
+
+  (fn tighten_all ((w Work) (i Int) (n Int) (left Int)) Round
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= n i))
+      (make Round (work w) (live (NoIdxs)))
+      (let p (tighten_at w i)
+        (let r (tighten_all (get p work) (+ i 1) n (- left 1))
+          (make Round (work (get r work)) (live (Idxs (get p index) (get r live))))))))
+
+  ; --- choosing what to eliminate -------------------------------------------------------
+  (fn coeff_at ((w Work) (i Int) (a Str)) Int
+    (match (fact (get w facts) i) ((None) 0) ((Some x) (coeff_of (get x terms) a))))
+
+  (fn contradiction_in ((w Work) (live Idxs)) (Option Int)
+    (match live
+      ((NoIdxs) (None))
+      ((Idxs i more) (if (contradicts (get w facts) i) (Some i) (contradiction_in w more)))))
+
+  (fn terms_atoms ((ts Terms) (seen Atoms)) Atoms
+    (uses Alloc)
+    (match ts
+      ((NoTerms) seen)
+      ((Terms a c rest) (terms_atoms rest (if (holds seen a) seen (Atoms a seen))))))
+
+  (fn live_atoms ((w Work) (live Idxs) (seen Atoms)) Atoms
+    (uses Alloc)
+    (match live
+      ((NoIdxs) seen)
+      ((Idxs i more) (live_atoms w more (match (fact (get w facts) i) ((None) seen) ((Some x) (terms_atoms (get x terms) seen)))))))
+
+  (fn atom_count ((as Atoms)) Int (match as ((NoAtoms) 0) ((Atoms a more) (+ 1 (atom_count more)))))
+
+  ; How many constraints bound the atom above (+1), below (-1), or not at all (0).
+  (fn sign_of ((k Int)) Int (if (< 0 k) 1 (if (< k 0) (- 0 1) 0)))
+
+  (fn count_kind ((w Work) (live Idxs) (a Str) (kind Int)) Int
+    (match live
+      ((NoIdxs) 0)
+      ((Idxs i more) (+ (if (= (sign_of (coeff_at w i a)) kind) 1 0) (count_kind w more a kind)))))
+
+  ; Fewest new constraints first: up * down - up - down.
+  (fn cost ((w Work) (live Idxs) (a Str)) Int
+    (- (- (* (count_kind w live a 1) (count_kind w live a (- 0 1))) (count_kind w live a 1)) (count_kind w live a (- 0 1))))
+
+  (fn cheapest ((w Work) (live Idxs) (as Atoms) (best Str) (best_cost Int)) Str
+    (match as
+      ((NoAtoms) best)
+      ((Atoms a more) (if (< (cost w live a) best_cost) (cheapest w live more a (cost w live a)) (cheapest w live more best best_cost)))))
+
+  (fn pick ((w Work) (live Idxs) (a Str) (kind Int)) Idxs
+    (uses Alloc)
+    (match live
+      ((NoIdxs) (NoIdxs))
+      ((Idxs i more) (if (= (sign_of (coeff_at w i a)) kind) (Idxs i (pick w more a kind)) (pick w more a kind)))))
+
+  ; --- eliminating it ---------------------------------------------------------------------
+  ; Positive multiples of an upper and a lower bound, chosen so that the atom cancels.
+  (fn against ((w Work) (u Int) (lowers Idxs) (a Str) (rest Idxs)) Round
+    (uses Alloc)
+    (match lowers
+      ((NoIdxs) (make Round (work w) (live rest)))
+      ((Idxs l more) (match (combined (get w facts) u l (- 0 (coeff_at w l a)) (coeff_at w u a))
+        ((Err f) (against w u more a rest))
+        ((Ok y) (let p (tighten_at (push w (Combine u l (- 0 (coeff_at w l a)) (coeff_at w u a)) y) (get w count))
+          (against (get p work) u more a (idx_append rest (get p index)))))))))
+
+  (fn across ((w Work) (uppers Idxs) (lowers Idxs) (a Str) (rest Idxs)) Round
+    (uses Alloc)
+    (match uppers
+      ((NoIdxs) (make Round (work w) (live rest)))
+      ((Idxs u more) (let r (against w u lowers a rest)
+        (across (get r work) more lowers a (get r live))))))
+
+  ; One atom per round, so the rounds are at most the atoms there were.
+  (fn eliminate ((w Work) (live Idxs) (left Int)) (Option Reason)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (contradiction_in w live)
+      ((Some i) (Some (Refutation (get w steps) i)))
+      ((None) (if (<= left 0)
+        (None)
+        (match (live_atoms w live (NoAtoms))
+          ((NoAtoms) (None))
+          ((Atoms first more) (eliminate_atom w live left (cheapest w live more first (cost w live first)))))))))
+
+  (fn eliminate_atom ((w Work) (live Idxs) (left Int) (a Str)) (Option Reason)
+    (uses Alloc)
+    (requires (<= 1 left))
+    (if (< 2048 (+ (idx_count (pick w live a 0)) (* (idx_count (pick w live a 1)) (idx_count (pick w live a (- 0 1))))))
+      (None)
+      (let r (across w (pick w live a 1) (pick w live a (- 0 1)) a (pick w live a 0))
+        (eliminate (get r work) (get r live) (- left 1)))))
+
+  ; --- one case, and all of them ----------------------------------------------------------
+  (fn clash_in ((yes Atoms) (no Atoms)) (Option Str)
+    (match yes
+      ((NoAtoms) (None))
+      ((Atoms a more) (if (holds no a) (Some a) (clash_in more no)))))
+
+  (fn rule_out ((c Cube)) (Option Reason)
+    (uses Alloc)
+    (match (clash_in (get c yes) (get c no))
+      ((Some a) (Some (Clash a)))
+      ((None) (let r (tighten_all (make Work (facts (get c held)) (steps (NoSteps)) (count (fact_count (get c held)))) 0 (fact_count (get c held)) (budget (+ 1 (fact_count (get c held)))))
+        (eliminate (get r work) (get r live) (budget (+ 2 (atom_count (live_atoms (get r work) (get r live) (NoAtoms))))))))))
+
+  (fn reasons_for ((cs Cubes)) (Option Reasons)
+    (uses Alloc)
+    (match cs
+      ((NoCubes) (Some (NoReasons)))
+      ((Cubes c rest) (match (rule_out c)
+        ((None) (None))
+        ((Some r) (match (reasons_for rest) ((None) (None)) ((Some more) (Some (Reasons r more)))))))))
+
+  ; Does the goal follow from the assumptions, and why. None means "not proved".
+  (fn prove ((assumptions Formulas) (goal Formula)) (Option Reasons)
+    (uses Alloc)
+    (reasons_for (all_cases (with_negated_goal assumptions goal) false)))
+
+  ; "proved" only when the kernel's replay agrees.
+  (fn verdict ((assumptions Formulas) (goal Formula)) Str
+    (uses Alloc)
+    (match (prove assumptions goal)
+      ((None) "unproved")
+      ((Some rs) (match (follows assumptions goal rs)
+        ((Ok u) "proved")
+        ((Err f) (concat "invalid: " (get f why)))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (verdict (Formulas (Le (make Lin (const 0) (terms (Terms "x" 1 (NoTerms))))) (NoFormulas)) (Le (make Lin (const 1) (terms (Terms "x" 1 (NoTerms)))))))))

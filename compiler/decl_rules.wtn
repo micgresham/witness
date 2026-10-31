@@ -1,0 +1,302 @@
+; The rules a module's declarations answer to, apart from any body.
+;
+; compiler/env.wtn collects what each declaration says and refuses a name declared twice;
+; compiler/expr.wtn checks what a body does. Four rules of the Python checker belong to
+; neither, because they are about a declaration against the *other* declarations, and
+; reading a signature is the wrong place to find out that an enum has no variants or that
+; version 2 of a wire schema cannot read version 1:
+;
+;   empty-enum           an enum with no variants has no value, so nothing could be built
+;   channel-payload      what crosses a channel is a record with a declared wire schema
+;   schema-version       a schema's versions are positive and each is declared once
+;   schema-incompatible  a version may add an optional field or drop one that was already
+;                        optional, and may never change a field's type -- wire data
+;                        outlives the code that wrote it
+;
+; It reads the tree and nothing else, and it imports no environment: a record's schema is
+; the clause `env.wtn` steps over, so keeping it here leaves the environment as it was
+; and every module that depends on it by hash untouched. Types are compared as *written*,
+; which agrees with the Python checker's comparison of resolved types for every module
+; here and would disagree only on two spellings of one type, which a module has no way to
+; introduce but a type alias, and the language has none.
+;
+;   witness run compiler/decl_rules.wtn --grant Alloc,Console
+(module decl_rules
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:3ccc019849f52a427a90896e8778a2f85f07d75050b5f00c470cda6e28989b3c" as shown_tree)
+
+  ; --- reading the parts of a form -------------------------------------------
+  (fn word_of ((t Tree)) Str
+    (uses Alloc)
+    (match (leaf_text t) ((None) "") ((Some b) (match (bytes.decode b) ((Ok s) s) ((Err f) "")))))
+
+  (fn head_is ((t Tree) (word Str)) Bool
+    (uses Alloc)
+    (match (node_items t) ((None) false) ((Some items) (match items ((NoTrees) false) ((Trees h more) (is_word h word))))))
+
+  (fn after_head ((t Tree)) Trees
+    (match (node_items t) ((None) (NoTrees)) ((Some items) (match items ((NoTrees) items) ((Trees h more) more)))))
+
+  (fn module_items ((t Tree)) Trees
+    (match t
+      ((Leaf text quoted) (NoTrees))
+      ((Node items) (match items ((NoTrees) (NoTrees)) ((Trees keyword rest) (match rest ((NoTrees) (NoTrees)) ((Trees name more) more)))))))
+
+  (fn is_digit ((b Int)) Bool (and (<= 48 b) (<= b 57)))
+
+  (fn digit_at ((b Bytes) (at Int)) Int
+    (match (bytes.at b (Octets at)) ((None) 0) ((Some d) (int.of d))))
+
+  ; A whole number written in digits, or 0 for anything else. `left` falls at every step,
+  ; because nothing about an index into bytes gets smaller on its own.
+  (fn digits ((b Bytes) (at Int) (acc Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      0
+      (if (<= (unwrap (bytes.len b)) at)
+        acc
+        (if (is_digit (digit_at b at))
+          (digits b (+ at 1) (+ (* acc 10) (- (digit_at b at) 48)) (- left 1))
+          0))))
+
+  (fn version_of ((v Tree)) Int
+    (match (leaf_text v)
+      ((None) 0)
+      ((Some b) (if (<= (unwrap (bytes.len b)) 0) 0 (digits b 0 0 (+ 1 (unwrap (bytes.len b))))))))
+
+  ; --- records, with the wire schema the environment leaves out --------------
+  ; `(record Name [(schema S N)] (field Type)...)`. No schema is `schema ""`; a version
+  ; that is not a whole number is 0, which the rule below refuses like any other
+  ; non-positive one.
+  (record Rec (name Str) (wire Str) (version Int) (fields Trees))
+
+  (enum Recs (NoRecs) (Recs (head Rec) (rest Recs)))
+
+  (fn unschemed ((name Str) (fields Trees)) Rec
+    (make Rec (name name) (wire "") (version 0) (fields fields)))
+
+  (fn rec_of ((after Trees)) Rec
+    (uses Alloc)
+    (match after
+      ((NoTrees) (unschemed "" (NoTrees)))
+      ((Trees n more) (schema_clause (word_of n) more))))
+
+  (fn schema_clause ((name Str) (more Trees)) Rec
+    (uses Alloc)
+    (match more
+      ((NoTrees) (unschemed name more))
+      ((Trees h rest) (if (head_is h "schema") (schema_parts name (after_head h) rest) (unschemed name more)))))
+
+  (fn schema_parts ((name Str) (parts Trees) (rest Trees)) Rec
+    (uses Alloc)
+    (match parts
+      ((NoTrees) (unschemed name rest))
+      ((Trees s more) (match more
+        ((NoTrees) (make Rec (name name) (wire (word_of s)) (version 0) (fields rest)))
+        ((Trees v none) (make Rec (name name) (wire (word_of s)) (version (version_of v)) (fields rest)))))))
+
+  (fn records_of ((items Trees)) Recs
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoRecs))
+      ((Trees h more) (if (head_is h "record") (Recs (rec_of (after_head h)) (records_of more)) (records_of more)))))
+
+  (fn find_rec ((rs Recs) (which Str)) (Option Rec)
+    (uses Alloc)
+    (match rs
+      ((NoRecs) (None))
+      ((Recs r more) (if (str.eq (get r name) which) (Some r) (find_rec more which)))))
+
+  ; --- fields ----------------------------------------------------------------
+  (fn field_name ((f Tree)) Str
+    (uses Alloc)
+    (match (node_items f) ((None) "") ((Some items) (match items ((NoTrees) "") ((Trees n more) (word_of n))))))
+
+  ; The type as written, or "" for a field that has none.
+  (fn field_type ((f Tree)) Str
+    (uses Alloc)
+    (match (node_items f)
+      ((None) "")
+      ((Some items) (match items ((NoTrees) "") ((Trees n more) (match more ((NoTrees) "") ((Trees t none) (shown_tree t))))))))
+
+  (fn is_optional ((f Tree)) Bool
+    (uses Alloc)
+    (match (node_items f)
+      ((None) false)
+      ((Some items) (match items ((NoTrees) false) ((Trees n more) (match more ((NoTrees) false) ((Trees t none) (head_is t "Option"))))))))
+
+  (fn has_field ((fs Trees) (which Str)) Bool
+    (uses Alloc)
+    (match fs ((NoTrees) false) ((Trees f more) (or (str.eq (field_name f) which) (has_field more which)))))
+
+  (fn field_in ((fs Trees) (which Str)) (Option Tree)
+    (uses Alloc)
+    (match fs ((NoTrees) (None)) ((Trees f more) (if (str.eq (field_name f) which) (Some f) (field_in more which)))))
+
+  ; --- the version before this one -------------------------------------------
+  ; The record of the same schema with the greatest version below this one. Every version
+  ; is compared with its predecessor, so a gap (1, then 3) is read as 3 against 1.
+  (fn earlier ((rs Recs) (r Rec) (best (Option Rec))) (Option Rec)
+    (uses Alloc)
+    (match rs
+      ((NoRecs) best)
+      ((Recs o more) (if (and (and (str.eq (get o wire) (get r wire)) (< (get o version) (get r version))) (< 0 (get o version)))
+        (earlier more r (better o best))
+        (earlier more r best)))))
+
+  (fn better ((o Rec) (best (Option Rec))) (Option Rec)
+    (match best
+      ((None) (Some o))
+      ((Some b) (if (< (get b version) (get o version)) (Some o) best))))
+
+  ; --- the findings ----------------------------------------------------------
+  (fn finding ((rule Str) (why Str)) Str
+    (uses Alloc)
+    (concat rule (concat ": " (concat why "\n"))))
+
+  (fn number_text ((n Int)) Str (uses Alloc) (num.to_str n))
+
+  (fn decl_findings ((all Recs) (h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "enum")
+      (enum_finding (after_head h))
+      (if (head_is h "channel")
+        (channel_finding all (after_head h))
+        (if (head_is h "record") (record_findings all (rec_of (after_head h))) ""))))
+
+  (fn enum_finding ((after Trees)) Str
+    (uses Alloc)
+    (match after
+      ((NoTrees) "")
+      ((Trees n variants) (match variants
+        ((NoTrees) (finding "empty-enum" (concat "enum has no variants: " (shown_tree n))))
+        ((Trees v more) "")))))
+
+  ; `Fault` is declared by the prelude every module has, with a schema.
+  (fn channel_finding ((all Recs) (after Trees)) Str
+    (uses Alloc)
+    (match after
+      ((NoTrees) "")
+      ((Trees n more) (match more
+        ((NoTrees) "")
+        ((Trees payload rest) (payload_finding all (word_of n) (word_of payload)))))))
+
+  (fn payload_finding ((all Recs) (chan Str) (payload Str)) Str
+    (uses Alloc)
+    (if (str.eq payload "Fault")
+      ""
+      (match (find_rec all payload)
+        ((None) (finding "channel-payload" (concat "channel " (concat chan (concat " carries " (concat payload ", which is not a record declared here"))))))
+        ((Some r) (if (str.eq (get r wire) "")
+          (finding "channel-payload" (concat payload (concat " has no wire schema, so the two ends of channel " (concat chan " cannot agree on it"))))
+          "")))))
+
+  (fn record_findings ((all Recs) (r Rec)) Str
+    (uses Alloc)
+    (if (str.eq (get r wire) "")
+      ""
+      (if (< (get r version) 1)
+        (finding "schema-version" (concat "a version of schema " (concat (get r wire) " is not a positive whole number")))
+        (concat (duplicate_version all r) (history all r)))))
+
+  ; Counted over every record, so each of two declarations of one version reports once
+  ; and a version declared once reports nothing: it is the *later* one that is the
+  ; second, and the earlier is found by position.
+  (fn same_version ((rs Recs) (r Rec)) Int
+    (uses Alloc)
+    (match rs
+      ((NoRecs) 0)
+      ((Recs o more) (+ (if (and (str.eq (get o wire) (get r wire)) (= (get o version) (get r version))) 1 0) (same_version more r)))))
+
+  (fn duplicate_version ((all Recs) (r Rec)) Str
+    (uses Alloc)
+    (if (< 1 (same_version all r))
+      (finding "schema-version" (concat "schema " (concat (get r wire) (concat " already has a version " (concat (number_text (get r version)) (concat ": " (get r name)))))))
+      ""))
+
+  (fn history ((all Recs) (r Rec)) Str
+    (uses Alloc)
+    (match (earlier all r (None))
+      ((None) "")
+      ((Some old) (concat (changed_or_dropped (get old fields) (get r fields) r) (added (get old fields) (get r fields) r)))))
+
+  (fn step_text ((r Rec)) Str
+    (uses Alloc)
+    (concat "version " (concat (number_text (get r version)) (concat " of schema " (get r wire)))))
+
+  ; Fields the older version had: still there with the same type, or gone and optional.
+  (fn changed_or_dropped ((old Trees) (new Trees) (r Rec)) Str
+    (uses Alloc)
+    (match old
+      ((NoTrees) "")
+      ((Trees f more) (concat (carried f new r) (changed_or_dropped more new r)))))
+
+  (fn carried ((f Tree) (new Trees) (r Rec)) Str
+    (uses Alloc)
+    (match (field_in new (field_name f))
+      ((None) (if (is_optional f) "" (finding "schema-incompatible" (concat (step_text r) (concat " drops " (concat (field_name f) ", which the version before requires"))))))
+      ((Some g) (if (str.eq (field_type f) (field_type g))
+        ""
+        (finding "schema-incompatible" (concat (step_text r) (concat " changes the type of " (concat (field_name f) (concat " from " (concat (field_type f) (concat " to " (field_type g))))))))))))
+
+  ; Fields only the newer version has must be optional, so older data can still be read.
+  (fn added ((old Trees) (new Trees) (r Rec)) Str
+    (uses Alloc)
+    (match new
+      ((NoTrees) "")
+      ((Trees g more) (concat (if (or (has_field old (field_name g)) (is_optional g)) "" (finding "schema-incompatible" (concat (step_text r) (concat " adds " (concat (field_name g) ", which the version before does not write"))))) (added old more r)))))
+
+  (fn findings_of ((all Recs) (items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees h more) (concat (decl_findings all h) (findings_of all more)))))
+
+  ; One line per finding, "rule: why", in the order the declarations come.
+  (fn report_source ((src Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (concat "not a form: " (get f why)))
+      ((Ok tree) (findings_of (records_of (module_items tree)) (module_items tree)))))
+
+  ; --- what it says about itself ---------------------------------------------
+  (test "an enum with no variants is refused" (str.eq "empty-enum: enum has no variants: Nothing\n" (report_source "(module m (enum Nothing))")))
+
+  (test "an enum with a variant is fine" (str.eq "" (report_source "(module m (enum Yes (Yes)))")))
+
+  (test "a channel's payload needs a wire schema" (str.eq "channel-payload: R has no wire schema, so the two ends of channel C cannot agree on it\n" (report_source "(module m (record R (a Str)) (channel C R))")))
+
+  (test "a channel's payload must be a record" (str.eq "channel-payload: channel C carries Q, which is not a record declared here\n" (report_source "(module m (channel C Q))")))
+
+  (test "a schema'd payload is fine" (str.eq "" (report_source "(module m (record R (schema S 1) (a Str)) (channel C R))")))
+
+  (test "version 0 is not a version" (str.eq "schema-version: a version of schema S is not a positive whole number\n" (report_source "(module m (record R (schema S 0) (a Str)))")))
+
+  (test "a version is declared once" (str.eq "schema-version: schema S already has a version 1: R\nschema-version: schema S already has a version 1: Q\n" (report_source "(module m (record R (schema S 1) (a Str)) (record Q (schema S 1) (a Str)))")))
+
+  (test "a new field must be optional" (str.eq "schema-incompatible: version 2 of schema S adds b, which the version before does not write\n" (report_source "(module m (record A (schema S 1) (a Str)) (record B (schema S 2) (a Str) (b Str)))")))
+
+  (test "an optional new field is compatible" (str.eq "" (report_source "(module m (record A (schema S 1) (a Str)) (record B (schema S 2) (a Str) (b (Option Str))))")))
+
+  (test "dropping a required field is refused" (str.eq "schema-incompatible: version 2 of schema S drops b, which the version before requires\n" (report_source "(module m (record A (schema S 1) (a Str) (b Str)) (record B (schema S 2) (a Str)))")))
+
+  (test "dropping an optional field is compatible" (str.eq "" (report_source "(module m (record A (schema S 1) (a Str) (b (Option Str))) (record B (schema S 2) (a Str)))")))
+
+  (test "a field keeps its type" (str.eq "schema-incompatible: version 2 of schema S changes the type of a from Str to Int\n" (report_source "(module m (record A (schema S 1) (a Str)) (record B (schema S 2) (a Int)))")))
+
+  (test "a version is read against the greatest one below it" (str.eq "" (report_source "(module m (record C (schema S 3) (a Str) (b (Option Str))) (record A (schema S 1) (a Str)) (record B (schema S 2) (a Str) (b (Option Str))))")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (report_source "(module m (enum Nothing))"))))

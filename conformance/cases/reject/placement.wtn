@@ -1,0 +1,8 @@
+(module m
+  (record R (a Str))
+
+  (fn work ((r R)) (Result R Fault) (Ok r))
+
+  (fn f ((r R) (d Duration)) (Result R Fault)
+    (uses Clock)
+    (scope ((one (work r) (deadline d) (on-fail fail) (on node))) (Ok one))))

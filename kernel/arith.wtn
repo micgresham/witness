@@ -1,0 +1,452 @@
+; The arithmetic half of the kernel, in Witness.
+;
+; This is the Phase 1 kernel's first module written in the language it checks, run under
+; the Phase 0 interpreter (docs/EVIDENCE.md 2). It is a transcription of
+; witness/certificate.py, which is its model, and it is deliberately not a port of
+; witness/logic.py: none of the prover's search appears here. A bug in that search can
+; lose a proof; it cannot make this accept a false one.
+;
+; It rests on three facts, each true of the integers and each checked below:
+;
+;   1. if A <= 0 and B <= 0 and ka, kb > 0, then ka*A + kb*B <= 0;
+;   2. if sum(ai*xi) + c <= 0 and g > 1 divides every ai, then sum(ai/g*xi) is an integer
+;      no greater than -c/g, so sum(ai/g*xi) + ceil(c/g) <= 0;
+;   3. a constraint k <= 0 with k > 0 holds of nothing.
+;
+; And on one fact about the normal form: every assignment satisfying a formula satisfies
+; one of its cases, so ruling out every case rules out the formula. The cases are built
+; here, in the order the specification fixes, rather than taken from the prover.
+;
+; It has no entry point and performs nothing but Alloc, so there is no way for it to be
+; told what to conclude. `witness/witnessed.py` writes an obligation into a copy of this
+; module and runs it; tests/test_witness_kernel.py does that for every obligation the
+; corpus discharges, and checks the answer against certificate.py.
+;
+;   witness check kernel/arith.wtn
+;   witness evidence kernel/arith.wtn
+(module arith
+  ; --- terms -----------------------------------------------------------------
+  ; `const + sum(coeff * atom)`. Each atom appears once, with a coefficient that is not
+  ; zero. The language has no ordering on `Str`, so the terms are in no particular order
+  ; and equality is by content rather than by shape: `lin_eq` looks each term up.
+  (enum Terms (NoTerms) (Terms (atom Str) (coeff Int) (rest Terms)))
+
+  (record Lin (const Int) (terms Terms))
+
+  (fn num ((n Int)) Lin (make Lin (const n) (terms (NoTerms))))
+
+  (fn atom_term ((a Str)) Lin (make Lin (const 0) (terms (Terms a 1 (NoTerms)))))
+
+  ; Adding a coefficient to the term for `a`, dropping it where it cancels to zero.
+  (fn put ((ts Terms) (a Str) (k Int)) Terms
+    (uses Alloc)
+    (match ts
+      ((NoTerms) (if (= k 0) (NoTerms) (Terms a k (NoTerms))))
+      ((Terms b c rest) (if (str.eq a b) (if (= (+ c k) 0) rest (Terms b (+ c k) rest)) (Terms b c (put rest a k))))))
+
+  (fn plus_terms ((into Terms) (from Terms)) Terms
+    (uses Alloc)
+    (match from ((NoTerms) into) ((Terms a k rest) (plus_terms (put into a k) rest))))
+
+  (fn add ((x Lin) (y Lin)) Lin
+    (uses Alloc)
+    (make Lin
+      (const (+ (get x const) (get y const)))
+      (terms (plus_terms (get x terms) (get y terms)))))
+
+  (fn scale_terms ((ts Terms) (k Int)) Terms
+    (uses Alloc)
+    (match ts
+      ((NoTerms) (NoTerms))
+      ((Terms a c rest) (if (= (* c k) 0) (scale_terms rest k) (Terms a (* c k) (scale_terms rest k))))))
+
+  (fn scale ((x Lin) (k Int)) Lin
+    (uses Alloc)
+    (make Lin (const (* (get x const) k)) (terms (scale_terms (get x terms) k))))
+
+  (fn is_const ((x Lin)) Bool
+    (match (get x terms) ((NoTerms) true) ((Terms a c rest) false)))
+
+  (fn coeff_of ((ts Terms) (a Str)) Int
+    (match ts ((NoTerms) 0) ((Terms b c rest) (if (str.eq a b) c (coeff_of rest a)))))
+
+  (fn term_count ((ts Terms)) Int
+    (match ts ((NoTerms) 0) ((Terms a c rest) (+ 1 (term_count rest)))))
+
+  ; Every term of `p` has the same coefficient in `q`. With equal counts and no atom
+  ; twice in either, that is equality whatever order the two were built in.
+  (fn terms_within ((p Terms) (q Terms)) Bool
+    (match p
+      ((NoTerms) true)
+      ((Terms a c rest) (and (= c (coeff_of q a)) (terms_within rest q)))))
+
+  (fn terms_eq ((p Terms) (q Terms)) Bool
+    (and (= (term_count p) (term_count q)) (terms_within p q)))
+
+  (fn lin_eq ((x Lin) (y Lin)) Bool
+    (and (= (get x const) (get y const)) (terms_eq (get x terms) (get y terms))))
+
+  ; --- what the steps say ----------------------------------------------------
+  ; A step names constraints and the numbers to use on them. It never carries a
+  ; constraint, so there is nothing in it to take on trust.
+  (enum Step
+    (Tighten (of Int) (by Int))
+    (Combine (left Int) (right Int) (by_left Int) (by_right Int)))
+
+  (enum Steps (NoSteps) (Steps (head Step) (rest Steps)))
+
+  (enum Reason (Clash (atom Str)) (Refutation (steps Steps) (contradiction Int)))
+
+  (enum Reasons (NoReasons) (Reasons (head Reason) (rest Reasons)))
+
+  ; --- constraints in hand ---------------------------------------------------
+  ; The constraints of one case, numbered from zero in the order they were established.
+  ; A step only ever appends, so an index always means the same constraint.
+  (enum Facts (NoFacts) (Facts (head Lin) (rest Facts)))
+
+  (fn fact_count ((f Facts)) Int
+    (match f ((NoFacts) 0) ((Facts h rest) (+ 1 (fact_count rest)))))
+
+  (fn fact ((f Facts) (i Int)) (Option Lin)
+    (match f ((NoFacts) (None)) ((Facts h rest) (if (= i 0) (Some h) (fact rest (- i 1))))))
+
+  (fn append_fact ((f Facts) (x Lin)) Facts
+    (uses Alloc)
+    (match f
+      ((NoFacts) (Facts x (NoFacts)))
+      ((Facts h rest) (Facts h (append_fact rest x)))))
+
+  ; --- the three facts, each checked -----------------------------------------
+  (fn divides_terms ((ts Terms) (g Int)) Bool
+    (match ts
+      ((NoTerms) true)
+      ((Terms a c rest) (and (= c (* g (or_else (num.div c g) 0))) (divides_terms rest g)))))
+
+  ; ceil(c/g), written with the floor division the language has: -((-c) div g).
+  (fn ceil_div ((c Int) (g Int)) Int
+    (requires (< 0 g))
+    (- 0 (or_else (num.div (- 0 c) g) 0)))
+
+  (fn divide_terms ((ts Terms) (g Int)) Terms
+    (uses Alloc)
+    (requires (< 0 g))
+    (match ts
+      ((NoTerms) (NoTerms))
+      ((Terms a c rest) (Terms a (or_else (num.div c g) 0) (divide_terms rest g)))))
+
+  ; Fact 2: dividing through by a common divisor lets the bound be rounded inwards.
+  ; `g` is carried by the step, so finding it was the prover's work and checking it is
+  ; one division; a divisor that is not the greatest only makes the step weaker.
+  (fn tightened ((x Lin) (g Int)) (Result Lin Fault)
+    (uses Alloc)
+    (if (is_const x)
+      (Err (fault "tighten" "a constant has no coefficient to divide"))
+      (if (not (divides_terms (get x terms) g))
+        (Err (fault "tighten" "the divisor does not divide every coefficient"))
+        (if (<= g 1)
+          (Err (fault "tighten" "a constraint can only be divided by more than one"))
+          (Ok (make Lin (const (ceil_div (get x const) g)) (terms (divide_terms (get x terms) g))))))))
+
+  ; Fact 1: a positive combination of two constraints is a constraint.
+  (fn combined ((f Facts) (left Int) (right Int) (by_left Int) (by_right Int)) (Result Lin Fault)
+    (uses Alloc)
+    (if (or (<= by_left 0) (<= by_right 0))
+      (Err (fault "combine" "a combination must use positive multiples of each side"))
+      (match (fact f left)
+        ((None) (Err (fault "combine" "a step names a constraint that does not exist yet")))
+        ((Some a) (match (fact f right) ((None) (Err (fault "combine" "a step names a constraint that does not exist yet"))) ((Some b) (Ok (add (scale a by_left) (scale b by_right)))))))))
+
+  (fn step_result ((f Facts) (s Step)) (Result Lin Fault)
+    (uses Alloc)
+    (match s
+      ((Tighten of by) (match (fact f of) ((None) (Err (fault "step" "a step names a constraint that does not exist yet"))) ((Some x) (tightened x by))))
+      ((Combine left right by_left by_right) (combined f left right by_left by_right))))
+
+  (fn replay ((f Facts) (ss Steps)) (Result Facts Fault)
+    (uses Alloc)
+    (match ss
+      ((NoSteps) (Ok f))
+      ((Steps s rest) (match (context (step_result f s) "replay" "a step does not hold") ((Err e) (Err e)) ((Ok x) (replay (append_fact f x) rest))))))
+
+  ; Fact 3: `k <= 0` with k > 0 holds of nothing, so the case is ruled out.
+  (fn contradicts ((f Facts) (i Int)) Bool
+    (match (fact f i) ((None) false) ((Some x) (and (is_const x) (< 0 (get x const))))))
+
+  ; --- formulas --------------------------------------------------------------
+  ; Boolean structure over `lin <= 0` and `lin = 0`, with uninterpreted atoms for
+  ; everything the arithmetic cannot see into.
+  (enum Formula
+    (Atom (name Str))
+    (Le (lin Lin))
+    (Eq (lin Lin))
+    (Not (part Formula))
+    (And (parts Formulas))
+    (Or (parts Formulas)))
+
+  (enum Formulas (NoFormulas) (Formulas (head Formula) (rest Formulas)))
+
+  ; --- the normal form -------------------------------------------------------
+  (enum Atoms (NoAtoms) (Atoms (head Str) (rest Atoms)))
+
+  ; One case: the atoms held true, the atoms held false, and the constraints `<= 0`.
+  (record Cube (yes Atoms) (no Atoms) (held Facts))
+
+  (enum Cubes (NoCubes) (Cubes (head Cube) (rest Cubes)))
+
+  (fn holds ((as Atoms) (a Str)) Bool
+    (match as ((NoAtoms) false) ((Atoms h rest) (or (str.eq a h) (holds rest a)))))
+
+  (fn join_atoms ((p Atoms) (q Atoms)) Atoms
+    (uses Alloc)
+    (match p ((NoAtoms) q) ((Atoms h rest) (Atoms h (join_atoms rest q)))))
+
+  (fn join_facts ((p Facts) (q Facts)) Facts
+    (uses Alloc)
+    (match p ((NoFacts) q) ((Facts h rest) (Facts h (join_facts rest q)))))
+
+  (fn both ((a Cube) (b Cube)) Cube
+    (uses Alloc)
+    (make Cube
+      (yes (join_atoms (get a yes) (get b yes)))
+      (no (join_atoms (get a no) (get b no)))
+      (held (join_facts (get a held) (get b held)))))
+
+  (fn empty_cube () Cube (make Cube (yes (NoAtoms)) (no (NoAtoms)) (held (NoFacts))))
+
+  (fn one_cube ((c Cube)) Cubes (Cubes c (NoCubes)))
+
+  (fn join_cubes ((p Cubes) (q Cubes)) Cubes
+    (uses Alloc)
+    (match p ((NoCubes) q) ((Cubes h rest) (Cubes h (join_cubes rest q)))))
+
+  ; Every pairing of a case from the left with one from the right, the left moving
+  ; slowest. The order is part of the evidence format: a reason is given per position.
+  (fn pair_cubes ((p Cubes) (q Cubes)) Cubes
+    (uses Alloc)
+    (match p
+      ((NoCubes) (NoCubes))
+      ((Cubes a rest) (join_cubes (spread a q) (pair_cubes rest q)))))
+
+  (fn spread ((a Cube) (q Cubes)) Cubes
+    (uses Alloc)
+    (match q ((NoCubes) (NoCubes)) ((Cubes b rest) (Cubes (both a b) (spread a rest)))))
+
+  ; A constraint already decided is either every case or none of them.
+  (fn bound_cubes ((x Lin)) Cubes
+    (if (is_const x)
+      (if (<= (get x const) 0) (one_cube (empty_cube)) (NoCubes))
+      (one_cube (make Cube (yes (NoAtoms)) (no (NoAtoms)) (held (Facts x (NoFacts)))))))
+
+  ; Every case the formula allows, in the order the specification fixes: negations
+  ; pushed down to the literals, parts taken left to right, and a conjunction's cases the
+  ; product of its parts' with the leftmost part moving slowest. The kernel builds these
+  ; itself; it does not take them from the prover.
+  (fn cases ((f Formula) (negated Bool)) Cubes
+    (uses Alloc)
+    (match f
+      ((Atom name) (one_cube (if negated (make Cube (yes (NoAtoms)) (no (Atoms name (NoAtoms))) (held (NoFacts))) (make Cube (yes (Atoms name (NoAtoms))) (no (NoAtoms)) (held (NoFacts))))))
+      ((Le lin) (if negated (bound_cubes (add (scale lin -1) (num 1))) (bound_cubes lin)))
+      ; not (l <= 0) is l >= 1, which over the integers is -l + 1 <= 0.
+      ((Eq lin) (if negated (join_cubes (bound_cubes (add lin (num 1))) (bound_cubes (add (scale lin -1) (num 1)))) (pair_cubes (bound_cubes lin) (bound_cubes (scale lin -1)))))
+      ; l = 0 is two constraints; its negation is two alternatives.
+      ((Not part) (cases part (not negated)))
+      ; Negation swaps the connective (De Morgan) but is carried on down unchanged.
+      ((And parts) (if negated (any_cases parts negated) (all_cases parts negated)))
+      ((Or parts) (if negated (all_cases parts negated) (any_cases parts negated)))))
+
+  ; A conjunction: the product of its parts' cases.
+  (fn all_cases ((ps Formulas) (negated Bool)) Cubes
+    (uses Alloc)
+    (match ps
+      ((NoFormulas) (one_cube (empty_cube)))
+      ((Formulas h rest) (pair_cubes (cases h negated) (all_cases rest negated)))))
+
+  ; A disjunction: every case of every part.
+  (fn any_cases ((ps Formulas) (negated Bool)) Cubes
+    (uses Alloc)
+    (match ps
+      ((NoFormulas) (NoCubes))
+      ((Formulas h rest) (join_cubes (cases h negated) (any_cases rest negated)))))
+
+  ; --- ruling out a case -----------------------------------------------------
+  ; A case is ruled out by a clash -- one atom held both ways, which needs no arithmetic
+  ; -- or by replaying the steps and finding a constraint that holds of nothing.
+  (fn rules_out ((c Cube) (r Reason)) (Result Unit Fault)
+    (uses Alloc)
+    (match r
+      ((Clash a) (if (and (holds (get c yes) a) (holds (get c no) a)) (Ok unit) (Err (fault "clash" "that atom is not held both ways in this case"))))
+      ((Refutation steps contradiction) (match (context (replay (get c held) steps) "case" "a step does not hold") ((Err e) (Err e)) ((Ok f) (if (contradicts f contradiction) (Ok unit) (Err (fault "case" "the constraint named is not a contradiction"))))))))
+
+  ; One reason per case, in order, and no case left over either way.
+  (fn all_ruled_out ((cs Cubes) (rs Reasons)) (Result Unit Fault)
+    (uses Alloc)
+    (match cs
+      ((NoCubes) (match rs ((NoReasons) (Ok unit)) ((Reasons r more) (Err (fault "proof" "more reasons given than cases to rule out")))))
+      ((Cubes c rest) (match rs ((NoReasons) (Err (fault "proof" "a case was left with no reason"))) ((Reasons r more) (match (context (rules_out c r) "proof" "a case is not ruled out") ((Err e) (Err e)) ((Ok u) (all_ruled_out rest more))))))))
+
+  ; The goal follows from the assumptions when their conjunction with its negation has
+  ; no case left standing.
+  (fn follows ((assumptions Formulas) (goal Formula) (rs Reasons)) (Result Unit Fault)
+    (uses Alloc)
+    (all_ruled_out (all_cases (with_negated_goal assumptions goal) false) rs))
+
+  (fn with_negated_goal ((assumptions Formulas) (goal Formula)) Formulas
+    (uses Alloc)
+    (match assumptions
+      ((NoFormulas) (Formulas (Not goal) (NoFormulas)))
+      ((Formulas h rest) (Formulas h (with_negated_goal rest goal)))))
+
+  ; --- helpers the prelude does not carry ------------------------------------
+  (fn (or_else T) ((o (Option T)) (fallback T)) T (match o ((None) fallback) ((Some v) v)))
+
+  ; --- an obligation, hypothesis by hypothesis -------------------------------
+  ; A hypothesis is either something the term itself says -- a type's range, a
+  ; refinement, which branch is running -- or something proved from the hypotheses
+  ; *before* it. The first kind belongs to the syntactic derivation, which kernel/core.wtn
+  ; judges; the second is checked here, in the order it was learned, so nothing is ever
+  ; used before it is established.
+  (enum Why (Given) (Proved (reasons Reasons)) (ByProduct (step Product)))
+
+  ; The one thing this kernel knows about multiplication: if every factor lies between
+  ; constants, the product lies between the extremes of their four products. The two
+  ; factors and the atom standing for their product come from elaboration, which the
+  ; obligation states; everything else here is arithmetic the kernel redoes.
+  (record Product
+    (atom Str)
+    (a Lin)
+    (b Lin)
+    (a_low Formula)
+    (a_high Formula)
+    (b_low Formula)
+    (b_high Formula)
+    (upper Bool))
+
+  (record Hypothesis (formula Formula) (why Why))
+
+  (enum Hypotheses (NoHypotheses) (Hypotheses (head Hypothesis) (rest Hypotheses)))
+
+  ; What elaboration says is a product of what. The lemma may only be aimed at an atom
+  ; this names.
+  (record ProductOf (atom Str) (a Lin) (b Lin))
+
+  (enum ProductsOf (NoProductsOf) (ProductsOf (head ProductOf) (rest ProductsOf)))
+
+  (record Obligation
+    (assumptions Hypotheses)
+    (goal Formula)
+    (why Why)
+    (products ProductsOf))
+
+  (fn verify ((o Obligation)) (Result Unit Fault)
+    (uses Alloc)
+    (replay_hypotheses o (get o assumptions) (NoFormulas)))
+
+  (fn replay_hypotheses ((o Obligation) (hs Hypotheses) (known Formulas)) (Result Unit Fault)
+    (uses Alloc)
+    (match hs
+      ((NoHypotheses) (establishes o known (get o goal) (get o why)))
+      ((Hypotheses h rest) (and_then (establishes o known (get h formula) (get h why)) (replay_hypotheses o rest (formulas_append known (get h formula)))))))
+
+  (fn establishes ((o Obligation) (known Formulas) (goal Formula) (why Why)) (Result Unit Fault)
+    (uses Alloc)
+    (match why
+      ((Given) (accept))
+      ((Proved reasons) (follows known goal reasons))
+      ((ByProduct step) (by_product o known goal step))))
+
+  (fn formulas_append ((fs Formulas) (f Formula)) Formulas
+    (uses Alloc)
+    (match fs
+      ((NoFormulas) (Formulas f (NoFormulas)))
+      ((Formulas h rest) (Formulas h (formulas_append rest f)))))
+
+  ; --- the product lemma, checked at every use -------------------------------
+  ; Four things, and the lemma adds nothing beyond interval arithmetic: the obligation
+  ; itself calls that atom the product of those two terms; each of the four bounds is a
+  ; hypothesis already established at this point; each bounds its factor by a *constant*;
+  ; and the conclusion is exactly the interval the four corners give, no tighter.
+  (fn by_product ((o Obligation) (known Formulas) (goal Formula) (step Product)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (and_then (insist (names_a_product (get o products) step) "nothing says that atom is the product of those two terms") (insist (and (and (formulas_has known (get step a_low)) (formulas_has known (get step a_high))) (and (formulas_has known (get step b_low)) (formulas_has known (get step b_high)))) "a bound the product lemma rests on is not established yet"))
+      (match (corner_bounds step)
+        ((Err e) (Err e))
+        ((Ok corners) (insist (formula_eq goal (interval_claim step corners)) "the product lemma does not give that conclusion")))))
+
+  (fn names_a_product ((ps ProductsOf) (step Product)) Bool
+    (match ps
+      ((NoProductsOf) false)
+      ((ProductsOf h rest) (or (and (str.eq (get h atom) (get step atom)) (and (lin_eq (get h a) (get step a)) (lin_eq (get h b) (get step b)))) (names_a_product rest step)))))
+
+  (record Corners (least Int) (most Int))
+
+  (fn corner_bounds ((step Product)) (Result Corners Fault)
+    (uses Alloc)
+    (match (pins (get step a_low) (get step a) true)
+      ((Err e) (Err e))
+      ((Ok a_least) (match (pins (get step a_high) (get step a) false) ((Err e) (Err e)) ((Ok a_most) (match (pins (get step b_low) (get step b) true) ((Err e) (Err e)) ((Ok b_least) (match (pins (get step b_high) (get step b) false) ((Err e) (Err e)) ((Ok b_most) (Ok (four_products a_least a_most b_least b_most)))))))))))
+
+  (fn four_products ((a_least Int) (a_most Int) (b_least Int) (b_most Int)) Corners
+    (make Corners
+      (least (smallest (* a_least b_least) (* a_least b_most) (* a_most b_least) (* a_most b_most)))
+      (most (largest (* a_least b_least) (* a_least b_most) (* a_most b_least) (* a_most b_most)))))
+
+  (fn smallest ((p Int) (q Int) (r Int) (s Int)) Int (lower (lower p q) (lower r s)))
+
+  (fn largest ((p Int) (q Int) (r Int) (s Int)) Int (higher (higher p q) (higher r s)))
+
+  (fn lower ((p Int) (q Int)) Int (if (< p q) p q))
+
+  (fn higher ((p Int) (q Int)) Int (if (< p q) q p))
+
+  ; Read the constant off `k <= term` or `term <= k`, and refuse anything else.
+  ; `k <= term` is held as `k - term <= 0`, so the constant is the bound itself;
+  ; `term <= k` is held as `term - k <= 0`, so the bound is the constant negated.
+  (fn pins ((bound Formula) (term Lin) (below Bool)) (Result Int Fault)
+    (uses Alloc)
+    (match bound
+      ((Atom name) (Err (fault "product" "a factor's bound must be a constraint")))
+      ((Eq lin) (Err (fault "product" "a factor's bound must be a constraint")))
+      ((Not part) (Err (fault "product" "a factor's bound must be a constraint")))
+      ((And parts) (Err (fault "product" "a factor's bound must be a constraint")))
+      ((Or parts) (Err (fault "product" "a factor's bound must be a constraint")))
+      ((Le lin) (if (not (lin_eq lin (expected_bound term below (get lin const)))) (Err (fault "product" "a factor's bound is not a constant bound on that factor")) (Ok (if below (get lin const) (- 0 (get lin const))))))))
+
+  (fn expected_bound ((term Lin) (below Bool) (constant Int)) Lin
+    (uses Alloc)
+    (if below (add (scale term (- 0 1)) (num constant)) (add term (num constant))))
+
+  ; The upper end is `atom <= most`, held as `atom - most <= 0`; the lower end is
+  ; `least <= atom`, held as `least - atom <= 0`.
+  (fn interval_claim ((step Product) (corners Corners)) Formula
+    (uses Alloc)
+    (if (get step upper)
+      (Le (add (atom_term (get step atom)) (num (- 0 (get corners most)))))
+      (Le (add (scale (atom_term (get step atom)) (- 0 1)) (num (get corners least))))))
+
+  ; --- comparing formulas ----------------------------------------------------
+  (fn formulas_has ((fs Formulas) (f Formula)) Bool
+    (match fs
+      ((NoFormulas) false)
+      ((Formulas h rest) (or (formula_eq h f) (formulas_has rest f)))))
+
+  (fn formula_eq ((x Formula) (y Formula)) Bool
+    (match x
+      ((Atom name) (match y ((Atom other) (str.eq name other)) ((Le l) false) ((Eq l) false) ((Not p) false) ((And ps) false) ((Or ps) false)))
+      ((Le lin) (match y ((Atom other) false) ((Le other) (lin_eq lin other)) ((Eq l) false) ((Not p) false) ((And ps) false) ((Or ps) false)))
+      ((Eq lin) (match y ((Atom other) false) ((Le l) false) ((Eq other) (lin_eq lin other)) ((Not p) false) ((And ps) false) ((Or ps) false)))
+      ((Not part) (match y ((Atom other) false) ((Le l) false) ((Eq l) false) ((Not other) (formula_eq part other)) ((And ps) false) ((Or ps) false)))
+      ((And parts) (match y ((Atom other) false) ((Le l) false) ((Eq l) false) ((Not p) false) ((And others) (formulas_eq parts others)) ((Or ps) false)))
+      ((Or parts) (match y ((Atom other) false) ((Le l) false) ((Eq l) false) ((Not p) false) ((And ps) false) ((Or others) (formulas_eq parts others))))))
+
+  (fn formulas_eq ((p Formulas) (q Formulas)) Bool
+    (match p
+      ((NoFormulas) (match q ((NoFormulas) true) ((Formulas b more) false)))
+      ((Formulas a rest) (match q ((NoFormulas) false) ((Formulas b more) (and (formula_eq a b) (formulas_eq rest more)))))))
+
+  (fn accept () (Result Unit Fault) (Ok unit))
+
+  (fn and_then ((first (Result Unit Fault)) (second (Result Unit Fault))) (Result Unit Fault)
+    (match first ((Err e) (Err e)) ((Ok u) second)))
+
+  (fn insist ((holds Bool) (why Str)) (Result Unit Fault)
+    (if holds (accept) (Err (fault "product" why)))))

@@ -1,0 +1,4 @@
+(module m
+  (enum Provider (Azure) (Ollama))
+
+  (fn endpoint ((p Provider)) Str (match p ((Azure) "azure") ((Ollama) "ollama"))))

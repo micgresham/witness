@@ -1,0 +1,386 @@
+; The declaration half of the kernel, in Witness.
+;
+; A function body is a term, so it has a derivation and kernel/core.wtn judges it. A
+; declaration is not a term: what has to hold of it is a set of conditions, each
+; decidable, each one of the specification's rules read positively. This checks them
+; itself rather than being told the answer.
+;
+; It is a transcription of `judge_module` in witness/kernel.py, which is its model, and it
+; shares no code with it (docs/EVIDENCE.md 4). A module imports nothing, so this is a
+; module of its own rather than more of kernel/core.wtn: the two are run separately and
+; each stays a thing a person can read in one sitting.
+;
+; It has no entry point and performs nothing but Alloc, so nothing can tell it what to
+; conclude. witness/declared.py writes a module's declarations into a copy of it and runs
+; it.
+;
+;   witness check kernel/decls.wtn
+;   witness evidence kernel/decls.wtn
+(module decls
+  ; --- names -----------------------------------------------------------------
+  ; A set of names, or an ordered list of them where position matters. The language has
+  ; no ordering on `Str`, so these are lists; `within` compares them as sets.
+  (enum Names (NoNames) (Names (head Str) (rest Names)))
+
+  (fn names_has ((ns Names) (a Str)) Bool
+    (match ns ((NoNames) false) ((Names h rest) (or (str.eq a h) (names_has rest a)))))
+
+  (fn names_within ((p Names) (q Names)) Bool
+    (match p ((NoNames) true) ((Names h rest) (and (names_has q h) (names_within rest q)))))
+
+  (fn names_count ((ns Names)) Int
+    (ensures (<= 0 result))
+    (match ns ((NoNames) 0) ((Names h rest) (+ 1 (names_count rest)))))
+
+  (fn names_empty ((ns Names)) Bool (match ns ((NoNames) true) ((Names h rest) false)))
+
+  ; --- types, as a declaration writes them -----------------------------------
+  (record Ty (base Str) (labels Names) (args Tys))
+
+  (enum Tys (NoTys) (Tys (head Ty) (rest Tys)))
+
+  (fn ty_eq ((x Ty) (y Ty)) Bool
+    (and (str.eq (get x base) (get y base)) (tys_eq (get x args) (get y args))))
+
+  (fn tys_eq ((p Tys) (q Tys)) Bool
+    (match p
+      ((NoTys) (match q ((NoTys) true) ((Tys b more) false)))
+      ((Tys a rest) (match q ((NoTys) false) ((Tys b more) (and (ty_eq a b) (tys_eq rest more)))))))
+
+  ; --- the declarations ------------------------------------------------------
+  (record FieldDecl (name Str) (ref Ty))
+
+  (enum FieldDecls (NoFieldDecls) (FieldDecls (head FieldDecl) (rest FieldDecls)))
+
+  (fn fields_count ((fs FieldDecls)) Int
+    (ensures (<= 0 result))
+    (match fs ((NoFieldDecls) 0) ((FieldDecls h rest) (+ 1 (fields_count rest)))))
+
+  (fn find_field ((fs FieldDecls) (name Str)) (Option FieldDecl)
+    (match fs
+      ((NoFieldDecls) (None))
+      ((FieldDecls h rest) (if (str.eq name (get h name)) (Some h) (find_field rest name)))))
+
+  (record VariantDecl (name Str) (fields FieldDecls))
+
+  (enum VariantDecls (NoVariantDecls) (VariantDecls (head VariantDecl) (rest VariantDecls)))
+
+  (record EnumDecl (name Str) (params Names) (variants VariantDecls))
+
+  (enum EnumDecls (NoEnumDecls) (EnumDecls (head EnumDecl) (rest EnumDecls)))
+
+  ; `schema` is the wire schema this record is a version of, or the empty string where it
+  ; is not on the wire at all.
+  (record RecordDecl
+    (name Str)
+    (fields FieldDecls)
+    (wire Str)
+    (at_version Int)
+    (is_patch Bool)
+    (patched Str))
+
+  (enum RecordDecls (NoRecordDecls) (RecordDecls (head RecordDecl) (rest RecordDecls)))
+
+  (record NewtypeDecl (name Str) (inner Ty))
+
+  (enum NewtypeDecls (NoNewtypeDecls) (NewtypeDecls (head NewtypeDecl) (rest NewtypeDecls)))
+
+  (record ChannelDecl (name Str) (payload Str))
+
+  (enum ChannelDecls (NoChannelDecls) (ChannelDecls (head ChannelDecl) (rest ChannelDecls)))
+
+  (record ModelDecl (name Str) (input Ty) (output Ty) (weights Str))
+
+  (enum ModelDecls (NoModelDecls) (ModelDecls (head ModelDecl) (rest ModelDecls)))
+
+  (record RedactDecl (on_label Str) (policy Str))
+
+  (enum RedactDecls (NoRedactDecls) (RedactDecls (head RedactDecl) (rest RedactDecls)))
+
+  ; `kind` is "test" or "property"; a property's inputs have to be ones an implementation
+  ; can make up values for.
+  (record TestDecl (name Str) (kind Str) (params FieldDecls))
+
+  (enum TestDecls (NoTestDecls) (TestDecls (head TestDecl) (rest TestDecls)))
+
+  ; `is_foreign` says the declaration is of code outside the language, which performs
+  ; `Foreign` whatever else it declares.
+  (record Signature
+    (name Str)
+    (params FieldDecls)
+    (ret Ty)
+    (type_params Names)
+    (effects Names)
+    (is_foreign Bool))
+
+  (enum Signatures (NoSignatures) (Signatures (head Signature) (rest Signatures)))
+
+  (record Module
+    (enums EnumDecls)
+    (records RecordDecls)
+    (newtypes NewtypeDecls)
+    (channels ChannelDecls)
+    (models ModelDecls)
+    (redactions RedactDecls)
+    (tests TestDecls)
+    (signatures Signatures)
+    (types Names))
+
+  ; --- what the language itself says -----------------------------------------
+  ; `Tensor` and `Array` take a type argument; every other primitive is nullary.
+  (fn is_primitive ((name Str)) Bool
+    (or (str.eq name "Array")
+      (or (or (or (str.eq name "Int") (str.eq name "Bool")) (or (str.eq name "Str") (str.eq name "Unit")))
+        (or (or (or (str.eq name "Bytes") (str.eq name "Tensor")) (or (str.eq name "I8") (str.eq name "I16")))
+          (or (or (or (str.eq name "I32") (str.eq name "I64")) (or (str.eq name "U8") (str.eq name "U16")))
+            (or (or (or (str.eq name "U32") (str.eq name "U64")) (or (str.eq name "F16") (str.eq name "BF16")))
+              (str.eq name "F32")))))))
+
+  ; The closed set of effects (SPEC 5).
+  (fn effects () Names
+    (Names "Alloc"
+      (Names "Clock"
+        (Names "Console"
+          (Names "Env"
+            (Names "Foreign"
+              (Names "Gpu"
+                (Names "Ipc"
+                  (Names "Log"
+                    (Names "Net" (Names "Nondet" (Names "Npu" (Names "Store" (NoNames))))))))))))))
+
+  ; What each target provides (SPEC 7.1). A target that is not one of these provides
+  ; nothing, so every effect is refused: refusing too much loses a program, where
+  ; providing too much would let one run where it cannot.
+  (fn provided ((profile Str)) Names
+    (if (str.eq profile "host")
+      (effects)
+      (if (str.eq profile "embedded")
+        (Names "Alloc"
+          (Names "Clock" (Names "Ipc" (Names "Log" (Names "Store" (NoNames))))))
+        (if (str.eq profile "mcu")
+          (Names "Clock" (Names "Log" (NoNames)))
+          (if (str.eq profile "esp32")
+            (Names "Alloc" (Names "Clock" (Names "Log" (Names "Net" (NoNames)))))
+            (NoNames))))))
+
+  ; The redaction policies the language knows (SPEC 4.4).
+  (fn policies () Names
+    (Names "digest" (Names "hidden" (Names "keep" (Names "length" (NoNames))))))
+
+  ; The types an implementation can make up values of, for a property's inputs.
+  (fn can_be_generated ((name Str)) Bool
+    (or (or (str.eq name "Bool") (str.eq name "Str"))
+      (or (str.eq name "Int") (is_fixed_width name))))
+
+  (fn is_fixed_width ((name Str)) Bool
+    (or (or (or (str.eq name "I8") (str.eq name "I16")) (or (str.eq name "I32") (str.eq name "I64")))
+      (or (or (str.eq name "U8") (str.eq name "U16"))
+        (or (str.eq name "U32") (str.eq name "U64")))))
+
+  ; --- helpers ---------------------------------------------------------------
+  (fn refuse ((why Str)) (Result Unit Fault) (Err (fault "kernel" why)))
+
+  (fn accept () (Result Unit Fault) (Ok unit))
+
+  (fn and_then ((first (Result Unit Fault)) (second (Result Unit Fault))) (Result Unit Fault)
+    (match first ((Err e) (Err e)) ((Ok u) second)))
+
+  (fn insist ((holds Bool) (why Str)) (Result Unit Fault) (if holds (accept) (refuse why)))
+
+  (fn known ((m Module) (name Str)) Bool
+    (or (is_primitive name) (names_has (get m types) name)))
+
+  (fn find_record ((ds RecordDecls) (name Str)) (Option RecordDecl)
+    (match ds
+      ((NoRecordDecls) (None))
+      ((RecordDecls h rest) (if (str.eq name (get h name)) (Some h) (find_record rest name)))))
+
+  (fn find_newtype ((ds NewtypeDecls) (name Str)) (Option NewtypeDecl)
+    (match ds
+      ((NoNewtypeDecls) (None))
+      ((NewtypeDecls h rest) (if (str.eq name (get h name)) (Some h) (find_newtype rest name)))))
+
+  ; --- a type reference is of a type that exists -----------------------------
+  (fn ty_known ((m Module) (params Names) (t Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (insist (or (names_has params (get t base)) (known m (get t base))) "a declaration names a type that does not exist")
+      (tys_known m params (get t args))))
+
+  (fn tys_known ((m Module) (params Names) (ts Tys)) (Result Unit Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTys) (accept))
+      ((Tys h rest) (and_then (ty_known m params h) (tys_known m params rest)))))
+
+  (fn fields_known ((m Module) (params Names) (fs FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match fs
+      ((NoFieldDecls) (accept))
+      ((FieldDecls f rest) (and_then (ty_known m params (get f ref)) (fields_known m params rest)))))
+
+  ; --- the conditions, one declaration at a time -----------------------------
+  ; Every declaration of the module, and then the conditions that are about more than one
+  ; of them at a time.
+  (fn judge_module ((m Module) (profile Str)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (and_then (and_then (enums_stand m (get m enums)) (records_stand m (get m records))) (and_then (newtypes_stand m (get m newtypes)) (channels_stand m (get m channels))))
+      (and_then (and_then (models_stand m (get m models)) (redactions_stand (get m redactions)))
+        (and_then (tests_stand m (get m tests))
+          (and_then (signatures_stand m (get m signatures) (provided profile))
+            (schemas_stand m (get m records)))))))
+
+  ; An enum with no variants has no values, so nothing could ever be made of it.
+  (fn enums_stand ((m Module) (ds EnumDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoEnumDecls) (accept))
+      ((EnumDecls d rest) (and_then (and_then (insist (match (get d variants) ((NoVariantDecls) false) ((VariantDecls v more) true)) "an enum has no variants, so nothing could ever be made of it") (variants_stand m (get d params) (get d variants))) (enums_stand m rest)))))
+
+  (fn variants_stand ((m Module) (params Names) (vs VariantDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match vs
+      ((NoVariantDecls) (accept))
+      ((VariantDecls v rest) (and_then (fields_known m params (get v fields)) (variants_stand m params rest)))))
+
+  ; A version on the wire is counted from one, and a patch patches a record that is not
+  ; itself a patch.
+  (fn records_stand ((m Module) (ds RecordDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoRecordDecls) (accept))
+      ((RecordDecls d rest) (and_then (and_then (fields_known m (NoNames) (get d fields)) (and_then (insist (or (str.eq (get d wire) "") (< 0 (get d at_version))) "a version of a wire schema is not a positive whole number") (patch_stands m d))) (records_stand m rest)))))
+
+  (fn patch_stands ((m Module) (d RecordDecl)) (Result Unit Fault)
+    (if (not (get d is_patch))
+      (accept)
+      (match (find_record (get m records) (get d patched))
+        ((None) (refuse "a patch patches something that is not a record"))
+        ((Some target) (insist (not (get target is_patch)) "a patch patches a patch")))))
+
+  ; A label belongs where a value is used, not in the type it was cut from, so a newtype
+  ; may not wrap something already labelled.
+  (fn newtypes_stand ((m Module) (ds NewtypeDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoNewtypeDecls) (accept))
+      ((NewtypeDecls d rest) (and_then (and_then (ty_known m (NoNames) (get d inner)) (insist (names_empty (get (get d inner) labels)) "a newtype wraps something labelled; a label belongs where it is used")) (newtypes_stand m rest)))))
+
+  ; Nothing without an agreed wire form may be sent, so a channel carries a record that
+  ; is a version of a wire schema.
+  (fn channels_stand ((m Module) (ds ChannelDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoChannelDecls) (accept))
+      ((ChannelDecls d rest) (and_then (match (find_record (get m records) (get d payload)) ((None) (refuse "a channel carries something that is not a record")) ((Some r) (insist (not (str.eq (get r wire) "")) "a channel carries a record with no wire schema"))) (channels_stand m rest)))))
+
+  ; A model's weights are named by hash, so what ran can be said exactly; and its input
+  ; and output are things a model can have.
+  (fn models_stand ((m Module) (ds ModelDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoModelDecls) (accept))
+      ((ModelDecls d rest) (and_then (and_then (and_then (ty_known m (NoNames) (get d input)) (ty_known m (NoNames) (get d output))) (and_then (and_then (insist (model_shape m (get d input)) "a model's input is not a tensor, Str or Bytes") (insist (model_shape m (get d output)) "a model's output is not a tensor, Str or Bytes")) (insist (names_has (hash_prefixes) (get d weights)) "a model does not name its weights by hash"))) (models_stand m rest)))))
+
+  (fn model_shape ((m Module) (t Ty)) Bool
+    (or (or (str.eq (get t base) "Tensor") (str.eq (get t base) "Str"))
+      (str.eq (get t base) "Bytes")))
+
+  ; A weights hash is written `wtn:...`; the serialiser gives the prefix it found, and
+  ; this is where the only accepted prefix is named.
+  (fn hash_prefixes () Names (Names "wtn:" (NoNames)))
+
+  (fn redactions_stand ((ds RedactDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoRedactDecls) (accept))
+      ((RedactDecls d rest) (and_then (insist (names_has (policies) (get d policy)) "a redaction names a policy the language does not have") (redactions_stand rest)))))
+
+  ; A property holds for inputs an implementation makes up, so every input has to be of a
+  ; type it can make values of -- following newtypes to what they are built on.
+  (fn tests_stand ((m Module) (ds TestDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoTestDecls) (accept))
+      ((TestDecls d rest) (and_then (inputs_generatable m (get d params)) (tests_stand m rest)))))
+
+  (fn inputs_generatable ((m Module) (fs FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match fs
+      ((NoFieldDecls) (accept))
+      ((FieldDecls f rest) (and_then (insist (can_be_generated (underlying m (get (get f ref) base) (newtype_budget m))) "a property takes an input of a type no implementation can make up values for") (inputs_generatable m rest)))))
+
+  ; What a type is built on, following newtypes to the end. The chain is bounded by how
+  ; many newtypes the module declares, and running out answers the name unchanged, which
+  ; is a name nothing can be generated for.
+  (fn underlying ((m Module) (name Str) (budget Int)) Str
+    (uses Alloc)
+    (requires (<= 0 budget))
+    (if (<= budget 0)
+      name
+      (match (find_newtype (get m newtypes) name)
+        ((None) name)
+        ((Some d) (underlying m (get (get d inner) base) (- budget 1))))))
+
+  (fn newtype_budget ((m Module)) Int
+    (ensures (<= 0 result))
+    (names_count (get m types)))
+
+  ; Every effect named is an effect, and one the target provides. Foreign code performs
+  ; `Foreign` whatever else it declares.
+  (fn signatures_stand ((m Module) (ds Signatures) (allowed Names)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoSignatures) (accept))
+      ((Signatures d rest) (and_then (and_then (and_then (fields_known m (get d type_params) (get d params)) (ty_known m (get d type_params) (get d ret))) (and_then (insist (names_within (declared_effects d) (effects)) "a signature names something that is no effect") (insist (names_within (declared_effects d) allowed) "a signature uses an effect this target does not provide"))) (signatures_stand m rest allowed)))))
+
+  (fn declared_effects ((d Signature)) Names
+    (if (get d is_foreign) (Names "Foreign" (get d effects)) (get d effects)))
+
+  ; --- schemas, version by version -------------------------------------------
+  ; Each version of a wire schema must read, and be read by, the one before it: no field
+  ; changes type, an added field is optional, and a dropped field was optional. Anything
+  ; else and a reader of one version meets a writer of the other and cannot go on.
+  (fn schemas_stand ((m Module) (ds RecordDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match ds
+      ((NoRecordDecls) (accept))
+      ((RecordDecls d rest) (and_then (if (or (str.eq (get d wire) "") (get d is_patch)) (accept) (match (version_before m (get d wire) (get d at_version)) ((None) (accept)) ((Some older) (succeeds older d)))) (schemas_stand m rest)))))
+
+  ; The version of this schema immediately below `version`, if the module declares one.
+  (fn version_before ((m Module) (wire Str) (version Int)) (Option RecordDecl)
+    (uses Alloc)
+    (nearest_below (get m records) wire version (None)))
+
+  (fn nearest_below ((ds RecordDecls) (wire Str) (version Int) (best (Option RecordDecl))) (Option RecordDecl)
+    (uses Alloc)
+    (match ds
+      ((NoRecordDecls) best)
+      ((RecordDecls d rest) (nearest_below rest wire version (if (and (and (str.eq (get d wire) wire) (not (get d is_patch))) (< (get d at_version) version)) (later_of best d) best)))))
+
+  (fn later_of ((best (Option RecordDecl)) (d RecordDecl)) (Option RecordDecl)
+    (match best
+      ((None) (Some d))
+      ((Some b) (if (< (get b at_version) (get d at_version)) (Some d) (Some b)))))
+
+  (fn succeeds ((older RecordDecl) (newer RecordDecl)) (Result Unit Fault)
+    (uses Alloc)
+    (and_then (and_then (fields_keep_their_types (get older fields) (get newer fields)) (added_are_optional (get older fields) (get newer fields)))
+      (dropped_were_optional (get older fields) (get newer fields))))
+
+  (fn fields_keep_their_types ((before FieldDecls) (after FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match before
+      ((NoFieldDecls) (accept))
+      ((FieldDecls f rest) (and_then (match (find_field after (get f name)) ((None) (accept)) ((Some g) (insist (ty_eq (get f ref) (get g ref)) "a version of a wire schema changes the type of a field"))) (fields_keep_their_types rest after)))))
+
+  (fn added_are_optional ((before FieldDecls) (after FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match after
+      ((NoFieldDecls) (accept))
+      ((FieldDecls g rest) (and_then (match (find_field before (get g name)) ((Some f) (accept)) ((None) (insist (str.eq (get (get g ref) base) "Option") "a version of a wire schema adds a field the one before it does not write"))) (added_are_optional before rest)))))
+
+  (fn dropped_were_optional ((before FieldDecls) (after FieldDecls)) (Result Unit Fault)
+    (uses Alloc)
+    (match before
+      ((NoFieldDecls) (accept))
+      ((FieldDecls f rest) (and_then (match (find_field after (get f name)) ((Some g) (accept)) ((None) (insist (str.eq (get (get f ref) base) "Option") "a version of a wire schema drops a field the one before it requires"))) (dropped_were_optional rest after))))))

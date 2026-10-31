@@ -1,0 +1,6 @@
+(module m
+  (fn add ((a U8) (b U8)) U8
+    (requires (<= (+ (int.of a) (int.of b)) 255))
+    (+ a b))
+
+  (fn wrapped ((a U8) (b U8)) U8 (wrap.add a b)))

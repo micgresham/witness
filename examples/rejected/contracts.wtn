@@ -1,0 +1,16 @@
+; Rejected: a contract that is not established, and a recursion that never ends.
+(module broken
+  (fn half_of ((n Int)) Int
+    (requires (<= 2 n))
+    (- n 1))
+
+  ; Nothing is known about `x` here, so `half_of`'s requires is not established.
+  (fn careless ((x Int)) Int (half_of x))
+
+  ; The body returns `n`, which says nothing about being positive.
+  (fn promises ((n Int)) Int
+    (ensures (< 0 result))
+    n)
+
+  ; `n` grows, so nothing gets smaller and the recursion has no end.
+  (fn forever ((n Int)) Int (forever (+ n 1))))

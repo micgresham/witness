@@ -1,0 +1,4 @@
+(module m
+  (fn g ((a Int)) Int a)
+
+  (fn f () Int (g 1 2)))

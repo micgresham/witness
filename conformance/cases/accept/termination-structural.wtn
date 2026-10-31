@@ -1,0 +1,4 @@
+(module m
+  (enum Chain (End) (Link (head Int) (rest Chain)))
+
+  (fn total ((c Chain)) Int (match c ((End) 0) ((Link head rest) (+ head (total rest))))))

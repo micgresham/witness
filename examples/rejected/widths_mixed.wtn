@@ -1,0 +1,4 @@
+(module mix
+  (fn widen ((a U8) (b U16)) U16 (+ a b))
+
+  (fn wrapped ((a Int) (b Int)) Int (wrap.add a b)))

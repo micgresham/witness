@@ -1,0 +1,12 @@
+; Units are types: minutes and seconds never mix without an explicit conversion.
+(module units
+  (newtype Minutes Int)
+
+  (newtype Seconds Int)
+
+  (fn to_seconds ((m Minutes)) Seconds (Seconds (* (unwrap m) 60)))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (let budget (to_seconds (Minutes 30))
+      (print (concat "budget_s = " (num.to_str (unwrap budget)))))))

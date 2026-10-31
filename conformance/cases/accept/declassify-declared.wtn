@@ -1,0 +1,4 @@
+(module m
+  (fn release ((s (label Secret Str))) Str
+    (declassifies Secret)
+    (declassify Secret s)))

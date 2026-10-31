@@ -1,0 +1,195 @@
+; RV64IM machine code: the instructions the RISC-V backend needs, as bytes.
+;
+; Every instruction is one little-endian 32-bit word, as on AArch64, but the fields are
+; scattered differently: a register is five bits, and an immediate is cut into pieces that
+; depend on which of six formats the instruction has. There are no flags; a comparison
+; leaves a 0 or a 1 in a register, and a branch compares two registers itself. A register
+; is its number (x0 is zero, x1 the return address, x2 the stack pointer, x10 to x17 the
+; arguments).
+;
+; The evidence is tests/test_riscv.py: capstone reads every encoding back.
+;
+;   witness test compiler/riscv.wtn
+(module riscv
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((n U32)) U8 (u8.of (bit.and n (u32.of 255))))
+
+  ; A 32-bit word, least significant byte first, kept in an I64 so the top bit is a number.
+  (fn word ((w I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (byte (part w (u32.of 0))))
+      (bytes.concat (bytes.of (byte (part w (u32.of 8))))
+        (bytes.concat (bytes.of (byte (part w (u32.of 16))))
+          (bytes.of (byte (part w (u32.of 24))))))))
+
+  (fn part ((w I64) (shift U32)) U32
+    (let low (bit.and (bit.shr w (int.of shift)) (i64.of 255))
+      (if (and (<= (i64.of 0) low) (<= low (i64.of 255))) (u32.of low) (u32.of 0))))
+
+  (fn plus ((a I64) (b I64)) I64 (wrap.add a b))
+
+  (fn at ((n I64) (by U32)) I64 (bit.shl n (int.of by)))
+
+  ; The low bits of n selected by a mask of the form 2^k - 1.
+  (fn bits ((n I64) (mask I64)) I64
+    (let low (bit.and n mask)
+      (if (and (<= (i64.of 0) low) (<= low mask)) low (i64.of 0))))
+
+  (fn reg ((r U32) (by U32)) I64 (at (i64.of (bit.and r (u32.of 31))) by))
+
+  (fn field ((n I64) (from U32) (mask I64) (by U32)) I64
+    (at (bits (bit.shr n (int.of from)) mask) by))
+
+  ; --- the six formats ---------------------------------------------------------------------------
+  (fn rtype ((f7 I64) (f3 I64) (d U32) (n U32) (m U32) (op I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (at f7 (u32.of 25)) (reg m (u32.of 20))) (plus (plus (reg n (u32.of 15)) (at f3 (u32.of 12))) (plus (reg d (u32.of 7)) op)))))
+
+  (fn itype ((imm I64) (f3 I64) (d U32) (n U32) (op I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (at (bits imm (i64.of 4095)) (u32.of 20)) (reg n (u32.of 15))) (plus (at f3 (u32.of 12)) (plus (reg d (u32.of 7)) op)))))
+
+  (fn stype ((imm I64) (f3 I64) (m U32) (n U32) (op I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (field imm (u32.of 5) (i64.of 127) (u32.of 25)) (reg m (u32.of 20))) (plus (reg n (u32.of 15)) (plus (at f3 (u32.of 12)) (plus (field imm (u32.of 0) (i64.of 31) (u32.of 7)) op))))))
+
+  ; A branch's distance is in bytes and even; bit 0 is not stored.
+  (fn btype ((off I64) (f3 I64) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (field off (u32.of 12) (i64.of 1) (u32.of 31)) (field off (u32.of 5) (i64.of 63) (u32.of 25)))
+      (plus (plus (reg m (u32.of 20)) (reg n (u32.of 15)))
+        (plus (at f3 (u32.of 12)) (plus (field off (u32.of 1) (i64.of 15) (u32.of 8)) (plus (field off (u32.of 11) (i64.of 1) (u32.of 7)) (i64.of 99))))))))
+
+  (fn jtype ((off I64) (d U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (field off (u32.of 20) (i64.of 1) (u32.of 31)) (field off (u32.of 1) (i64.of 1023) (u32.of 21)))
+      (plus (plus (field off (u32.of 11) (i64.of 1) (u32.of 20)) (field off (u32.of 12) (i64.of 255) (u32.of 12)))
+        (plus (reg d (u32.of 7)) (i64.of 111))))))
+
+  (fn utype ((imm I64) (d U32) (op I64)) Bytes
+    (uses Alloc)
+    (word (plus (at (bits imm (i64.of 1048575)) (u32.of 12)) (plus (reg d (u32.of 7)) op))))
+
+  ; --- arithmetic ----------------------------------------------------------------------------------
+  (fn alu ((f7 I64) (f3 I64) (d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (rtype f7 f3 d n m (i64.of 51)))
+
+  (fn add_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 0) d n m))
+  (fn sub_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 32) (i64.of 0) d n m))
+  (fn sll_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 1) d n m))
+  (fn slt_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 2) d n m))
+  (fn sltu_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 3) d n m))
+  (fn xor_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 4) d n m))
+  (fn srl_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 5) d n m))
+  (fn sra_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 32) (i64.of 5) d n m))
+  (fn or_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 6) d n m))
+  (fn and_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) (i64.of 7) d n m))
+  (fn mul_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) (i64.of 0) d n m))
+  (fn div_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) (i64.of 4) d n m))
+  (fn divu_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) (i64.of 5) d n m))
+  (fn rem_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) (i64.of 6) d n m))
+  (fn remu_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) (i64.of 7) d n m))
+
+  ; with a twelve-bit signed immediate
+  (fn addi ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (itype imm (i64.of 0) d n (i64.of 19)))
+  (fn sltiu ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (itype imm (i64.of 3) d n (i64.of 19)))
+  (fn xori ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (itype imm (i64.of 4) d n (i64.of 19)))
+  (fn ori ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (itype imm (i64.of 6) d n (i64.of 19)))
+
+  ; shifts by a constant of six bits
+  (fn slli ((d U32) (n U32) (by U32)) Bytes (uses Alloc) (itype (i64.of by) (i64.of 1) d n (i64.of 19)))
+  (fn srli ((d U32) (n U32) (by U32)) Bytes (uses Alloc) (itype (i64.of by) (i64.of 5) d n (i64.of 19)))
+  (fn srai ((d U32) (n U32) (by U32)) Bytes (uses Alloc) (itype (plus (i64.of 1024) (i64.of by)) (i64.of 5) d n (i64.of 19)))
+
+  ; addiw and lui, for a constant of thirty-two bits
+  (fn addiw ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (itype imm (i64.of 0) d n (i64.of 27)))
+  (fn lui ((d U32) (imm I64)) Bytes (uses Alloc) (utype imm d (i64.of 55)))
+  (fn auipc ((d U32) (imm I64)) Bytes (uses Alloc) (utype imm d (i64.of 23)))
+
+  (fn mov_rr ((d U32) (s U32)) Bytes (uses Alloc) (addi d s (i64.of 0)))
+
+  ; --- constants -----------------------------------------------------------------------------------------
+  ; Twelve bits signed is one addi; thirty-two is lui and addiw; anything else is built eleven
+  ; bits at a time from the top, which cannot go wrong on the sign.
+  (fn mov_imm ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (if (and (<= (i64.of -2048) n) (<= n (i64.of 2047)))
+      (addi d (u32.of 0) n)
+      (if (and (<= (i64.of -2147483648) n) (<= n (i64.of 2147483647)))
+        (mov_imm32 d n)
+        (mov_imm64 d n))))
+
+  (fn upper ((n I64)) I64 (bit.sar (wrap.add n (i64.of 2048)) 12))
+
+  (fn mov_imm32 ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (lui d (upper n)) (addiw d d (wrap.sub n (bit.shl (upper n) 12)))))
+
+  (fn piece ((d U32) (n I64) (from U32)) Bytes
+    (uses Alloc)
+    (bytes.concat (slli d d (u32.of 11)) (ori d d (bits (bit.shr n (int.of from)) (i64.of 2047)))))
+
+  (fn mov_imm64 ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (addi d (u32.of 0) (bits (bit.shr n 55) (i64.of 511)))
+      (bytes.concat (piece d n (u32.of 44))
+        (bytes.concat (piece d n (u32.of 33))
+          (bytes.concat (piece d n (u32.of 22))
+            (bytes.concat (piece d n (u32.of 11)) (piece d n (u32.of 0))))))))
+
+  ; --- memory --------------------------------------------------------------------------------------------
+  (fn ld ((d U32) (n U32) (off I64)) Bytes (uses Alloc) (itype off (i64.of 3) d n (i64.of 3)))
+  (fn lbu ((d U32) (n U32) (off I64)) Bytes (uses Alloc) (itype off (i64.of 4) d n (i64.of 3)))
+  (fn sd ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (stype off (i64.of 3) s n (i64.of 35)))
+  (fn sb ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (stype off (i64.of 0) s n (i64.of 35)))
+
+  ; --- control -------------------------------------------------------------------------------------------
+  (fn insn_size () U32 (u32.of 4))
+
+  ; beq, bne, blt, bge, bltu, bgeu: the function-three field is the condition
+  (fn beq ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 0) n m))
+  (fn bne ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 1) n m))
+  (fn blt ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 4) n m))
+  (fn bge ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 5) n m))
+  (fn bltu ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 6) n m))
+  (fn bgeu ((n U32) (m U32) (off I64)) Bytes (uses Alloc) (btype off (i64.of 7) n m))
+
+  ; The branch that is taken exactly when the one with function three `f3` is not.
+  (fn branch_not ((f3 U32) (n U32) (m U32) (off I64)) Bytes
+    (uses Alloc)
+    (btype off (i64.of (bit.xor f3 (u32.of 1))) n m))
+
+  (fn jal ((d U32) (off I64)) Bytes (uses Alloc) (jtype off d))
+
+  (fn jalr ((d U32) (n U32) (off I64)) Bytes (uses Alloc) (itype off (i64.of 0) d n (i64.of 103)))
+
+  ; A call to somewhere `delta` bytes from this instruction, within two gigabytes: auipc ra
+  ; for the upper twenty bits and jalr ra for the rest.
+  (fn call ((delta I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (auipc (u32.of 1) (upper delta))
+      (jalr (u32.of 1) (u32.of 1) (wrap.sub delta (bit.shl (upper delta) 12)))))
+
+  (fn ret () Bytes (uses Alloc) (jalr (u32.of 0) (u32.of 1) (i64.of 0)))
+
+  (fn ecall () Bytes (uses Alloc) (word (i64.of 115)))
+  (fn ebreak () Bytes (uses Alloc) (word (i64.of 1048691)))
+
+  ; Saving the return address and the frame pointer (x8) on the machine stack, and back.
+  (fn push_frame () Bytes
+    (uses Alloc)
+    (bytes.concat (addi (u32.of 2) (u32.of 2) (i64.of -16))
+      (bytes.concat (sd (u32.of 1) (u32.of 2) (i64.of 8)) (sd (u32.of 8) (u32.of 2) (i64.of 0)))))
+
+  (fn pop_frame () Bytes
+    (uses Alloc)
+    (bytes.concat (ld (u32.of 8) (u32.of 2) (i64.of 0))
+      (bytes.concat (ld (u32.of 1) (u32.of 2) (i64.of 8)) (addi (u32.of 2) (u32.of 2) (i64.of 16)))))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/riscv.wtn is exercised by tests/test_riscv.py")))

@@ -1,0 +1,2 @@
+(module m
+  (newtype Tagged (label Secret Str)))

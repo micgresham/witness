@@ -1,0 +1,39 @@
+; One task model, four distances. The code does not change when work moves further away;
+; what changes is what the target provides and what may cross.
+;   core    another core, this memory  -- nothing is copied, values never change
+;   node    another machine            -- what crosses needs a wire form
+(module fleet
+  (record Reading (schema Reading 1) (site Str) (value I32))
+
+  (channel Readings Reading (accepts tenant:acme))
+
+  (fn read ((site Str) (raw I32)) (Result Reading Fault)
+    (if (<= (i32.of 0) raw)
+      (Ok (make Reading (site site) (value raw)))
+      (Err (fault "read" "the sensor answered nonsense"))))
+
+  ; Two cores, one address space: both halves see the same immutable values.
+  (fn combine ((a I32) (b I32)) I32
+    (requires (and (and (<= 0 (int.of a)) (<= (int.of a) 1000)) (and (<= 0 (int.of b)) (<= (int.of b) 1000))))
+    (bounds (depth 2) (alloc 0))
+    (par ((low (+ a (i32.of 0))) (high (+ b (i32.of 0)))) (+ low high)))
+
+  ; Another machine. Reading has a schema, so it can be shipped there and back; the
+  ; deadline and the restart policy cross the boundary with the task.
+  (fn collect ((site Str) (raw I32) (budget Duration)) (Result Reading Fault)
+    (uses Clock)
+    (bounds (depth 1) (alloc 0))
+    (scope ((probe (read site raw) (deadline budget) (on-fail restart 2) (on node)))
+      (Ok probe)))
+
+  ; Publishing is checked at the sender: the channel accepts tenant:acme and nothing more.
+  (fn publish ((r (label tenant:acme Reading))) Unit
+    (uses Ipc)
+    (send Readings r))
+
+  (fn report ((site Str) (raw I32)) Str
+    (uses Clock Ipc Alloc)
+    (declassifies tenant:acme)
+    (match (collect site raw (duration.of_ms (i64.of 500)))
+      ((Ok r) (seq (publish r) (match (recv Readings) ((None) "sent, nothing back") ((Some back) (declassify tenant:acme (concat (get back site) (concat " " (num.to_str (get back value)))))))))
+      ((Err f) (concat "no reading: " (get f why))))))

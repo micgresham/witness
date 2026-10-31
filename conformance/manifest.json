@@ -1,0 +1,662 @@
+{
+  "witness": "0.0.1",
+  "cases": [
+    {
+      "file": "accept/arrays.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/bitwise.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/bounds-proved.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": [],
+      "profile": "mcu"
+    },
+    {
+      "file": "accept/bounds-branching.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/bytes-read.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/channel.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/contract-proved.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/declassify-declared.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/effects-declared.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/errors-with-context.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/exhaustive-match.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/floats.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/foreign.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/generic-function.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/label-parameter.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/labels-propagate.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/literals.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/model.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/parallel.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/records-and-patches.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/redaction-policy.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/refinement.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/supervised-task.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/tensors.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/termination-numeric.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/termination-structural.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/tests.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/text-and-bytes.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/time.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/units.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "accept/widths-checked.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "file": "reject/arity.wtn",
+      "outcome": "reject",
+      "errors": [
+        "arity"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/channel-payload.wtn",
+      "outcome": "reject",
+      "errors": [
+        "channel-payload"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/contract-impure.wtn",
+      "outcome": "reject",
+      "errors": [
+        "contract-impure"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/discarded-value.wtn",
+      "outcome": "reject",
+      "errors": [
+        "discarded-value"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/duplicate-arm.wtn",
+      "outcome": "reject",
+      "errors": [
+        "duplicate-arm"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/duplicate-binding.wtn",
+      "outcome": "reject",
+      "errors": [
+        "duplicate-binding"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/duplicate-definition.wtn",
+      "outcome": "reject",
+      "errors": [
+        "duplicate-definition"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/effect-under-label.wtn",
+      "outcome": "reject",
+      "errors": [
+        "effect-under-label",
+        "effect-under-label"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/empty-enum.wtn",
+      "outcome": "reject",
+      "errors": [
+        "empty-enum"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/field-order.wtn",
+      "outcome": "reject",
+      "errors": [
+        "field-order"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/label-flow.wtn",
+      "outcome": "reject",
+      "errors": [
+        "label-flow"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/labelled-newtype.wtn",
+      "outcome": "reject",
+      "errors": [
+        "labelled-newtype"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/main-params.wtn",
+      "outcome": "reject",
+      "errors": [
+        "main-params"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/match-non-enum.wtn",
+      "outcome": "reject",
+      "errors": [
+        "match-non-enum"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/missing-field.wtn",
+      "outcome": "reject",
+      "errors": [
+        "missing-field"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/naming.wtn",
+      "outcome": "reject",
+      "errors": [
+        "naming"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/no-termination-proof.wtn",
+      "outcome": "reject",
+      "errors": [
+        "no-termination-proof"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/no-wildcard.wtn",
+      "outcome": "reject",
+      "errors": [
+        "no-wildcard",
+        "non-exhaustive"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/non-exhaustive.wtn",
+      "outcome": "reject",
+      "errors": [
+        "non-exhaustive"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/nondeterministic-par.wtn",
+      "outcome": "reject",
+      "errors": [
+        "nondeterministic-par"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/not-a-patch.wtn",
+      "outcome": "reject",
+      "errors": [
+        "not-a-patch"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/not-a-record.wtn",
+      "outcome": "reject",
+      "errors": [
+        "not-a-record"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/not-a-value.wtn",
+      "outcome": "reject",
+      "errors": [
+        "not-a-value"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/overflow.wtn",
+      "outcome": "reject",
+      "errors": [
+        "overflow"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/pattern-arity.wtn",
+      "outcome": "reject",
+      "errors": [
+        "pattern-arity"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/placement.wtn",
+      "outcome": "reject",
+      "errors": [
+        "placement"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/profile-effect.wtn",
+      "outcome": "reject",
+      "errors": [
+        "profile-effect"
+      ],
+      "warnings": [],
+      "profile": "mcu"
+    },
+    {
+      "file": "reject/profile-type.wtn",
+      "outcome": "reject",
+      "errors": [
+        "profile-type"
+      ],
+      "warnings": [],
+      "profile": "mcu"
+    },
+    {
+      "file": "reject/redaction.wtn",
+      "outcome": "reject",
+      "errors": [
+        "redaction"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/resource-bound.wtn",
+      "outcome": "reject",
+      "errors": [
+        "resource-bound"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/branching-recursion/resource-bound.wtn",
+      "outcome": "reject",
+      "errors": [
+        "resource-bound"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/result-outside-ensures.wtn",
+      "outcome": "reject",
+      "errors": [
+        "result-outside-ensures"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/schema-incompatible.wtn",
+      "outcome": "reject",
+      "errors": [
+        "schema-incompatible"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/schema-version.wtn",
+      "outcome": "reject",
+      "errors": [
+        "schema-version"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/shadowing.wtn",
+      "outcome": "reject",
+      "errors": [
+        "shadowing"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/shape.wtn",
+      "outcome": "reject",
+      "errors": [
+        "shape"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/syntax.wtn",
+      "outcome": "reject",
+      "errors": [
+        "syntax"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/task-shape.wtn",
+      "outcome": "reject",
+      "errors": [
+        "task-shape"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/test-shape.wtn",
+      "outcome": "reject",
+      "errors": [
+        "test-shape"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/type-arity.wtn",
+      "outcome": "reject",
+      "errors": [
+        "type-arity"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/type-mismatch.wtn",
+      "outcome": "reject",
+      "errors": [
+        "type-mismatch"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/undeclared-declassify.wtn",
+      "outcome": "reject",
+      "errors": [
+        "undeclared-declassify"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/undeclared-effect.wtn",
+      "outcome": "reject",
+      "errors": [
+        "undeclared-effect"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/undeclared-redaction.wtn",
+      "outcome": "reject",
+      "errors": [
+        "undeclared-redaction"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unknown-effect.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unknown-effect"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unknown-field.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unknown-field"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unknown-name.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unknown-name"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unknown-type.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unknown-type"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unknown-variant.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unknown-variant",
+        "non-exhaustive"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unproven-postcondition.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unproven-postcondition"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unpinned-import.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unpinned-import"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unproven-precondition.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unproven-precondition"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unresolved-import.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unresolved-import"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "reject/unwrap-non-newtype.wtn",
+      "outcome": "reject",
+      "errors": [
+        "unwrap-non-newtype"
+      ],
+      "warnings": []
+    },
+    {
+      "file": "warn/needless-declassify.wtn",
+      "outcome": "warn",
+      "errors": [],
+      "warnings": [
+        "needless-declassify"
+      ]
+    },
+    {
+      "file": "warn/unused-declassify.wtn",
+      "outcome": "warn",
+      "errors": [],
+      "warnings": [
+        "unused-declassify"
+      ]
+    },
+    {
+      "file": "warn/unused-effect.wtn",
+      "outcome": "warn",
+      "errors": [],
+      "warnings": [
+        "unused-effect"
+      ]
+    },
+    {
+      "file": "warn/recursion/unused-effect.wtn",
+      "outcome": "warn",
+      "errors": [],
+      "warnings": [
+        "unused-effect",
+        "unused-effect"
+      ]
+    }
+  ]
+}

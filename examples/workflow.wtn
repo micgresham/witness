@@ -1,0 +1,34 @@
+; A durable workflow. Every effect it performs can be journalled, and replaying the
+; journal resumes the run instead of doing the work twice:
+;   witness run examples/workflow.wtn --grant Store,Clock,Log --record /tmp/j.json
+;   witness run examples/workflow.wtn --grant Store,Clock,Log --replay /tmp/j.json
+(module workflow
+  (record Invoice (schema Invoice 1) (tenant Str) (cents I32))
+
+  (fn charge ((inv Invoice)) (Result Str Fault)
+    (uses Store Alloc)
+    (let key (concat "charged:" (get inv tenant))
+      (match (store.get key)
+        ; Already done in an earlier run: the journal or the store says so, and the work
+        ; is not repeated.
+        ((Some when) (Ok (concat "already charged at " when)))
+        ((None) (if (< (i32.of 0) (get inv cents)) (Ok "charged") (Err (fault "charge" "nothing to charge")))))))
+
+  (fn record_time ((inv Invoice) (now Instant)) Unit
+    (uses Store Alloc)
+    (store.put (concat "charged:" (get inv tenant)) (num.to_str (unwrap now))))
+
+  (fn run_once ((inv Invoice) (budget Duration)) (Result Str Fault)
+    (uses Clock Store Log Alloc)
+    (scope ((outcome (charge inv) (deadline budget) (on-fail restart 2)))
+      (seq
+        (record_time inv (clock.now))
+        (log.fields (tenant (get inv tenant)) (outcome outcome))
+        (Ok outcome))))
+
+  (fn main () Unit
+    (uses Clock Store Log Alloc Console)
+    (let inv (make Invoice (tenant "acme") (cents (i32.of 2500)))
+      (match (run_once inv (duration.of_ms (i64.of 500)))
+        ((Ok what) (print what))
+        ((Err f) (print (concat "failed: " (get f why))))))))

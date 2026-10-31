@@ -1,0 +1,2 @@
+(module m
+  (fn forever ((n Int)) Int (forever (+ n 1))))

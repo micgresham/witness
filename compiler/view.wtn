@@ -1,0 +1,515 @@
+; The third piece of the Witness compiler, in Witness: the audit view's writer.
+;
+; The audit view is the human-facing projection of a module, and it is the one artefact a
+; reviewer actually reads. witness/view.py writes it today from the checked syntax tree;
+; this writes it from the tree compiler/parse.wtn builds, which is the shape Phase 2 will
+; have to work from. So the question it settles is whether the projection can be written
+; over s-expressions at all, before there is a resolver to turn them into anything richer.
+;
+; It renders expressions and types, which is the whole of what sits inside a definition.
+; Declarations -- the `fn` line, `enum`, `record`, the clauses -- are a layer above, and
+; they need a reader for signatures that `fn_shape` only starts. The section "what is not
+; here", further down, says exactly which forms are left out and why.
+;
+; Two things decide the shape of every function here.
+;
+; The first is that a form is recognised by its head word and its arity, and nothing else:
+; there is no resolver yet, so `(get r x)` is a field read because it says `get` and has
+; two arguments. A form whose head is a keyword but whose shape is wrong is not guessed
+; at -- it falls through to the call shape, which shows every item and drops nothing.
+;
+; The second is termination. The descent here is structural -- an item is a part of the
+; list it is in, which is a part of the node it came from -- and that is a measure the
+; checker accepts without a budget. But it only accepts it for an argument a `(match ...)`
+; took out of a parameter, so a function in the cycle may never hand another one a
+; parameter unchanged. That is why every form's handler takes the *argument list* and
+; peels it itself, rather than taking the pieces already peeled, and why the two places
+; that would have to pass a list straight through -- the call shape and the list shape --
+; are written out where the list was taken apart instead of in a function of their own.
+;
+;   witness run compiler/view.wtn --grant Alloc,Console
+(module view
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:bd1a77044c0d3e518148df62da5228dfc9826268a0e4a2136a54247423e0c966" as text_of)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:7167847e8cee57f9c1c10d76cd9f09c0b6b9cedc0fff6a1af1c927ecc819bddd"
+    as
+    trees_count)
+
+  (use "wtn:8c57814642c131658114d9a70dab4a9270c8c3fcb676090accb17aff2fa39aab"
+    as
+    trees_empty)
+
+  ; --- the page ------------------------------------------------------------
+  ; One step of indentation is four spaces. `depth` counts steps rather than columns so
+  ; that nothing ever has to divide, and the walk down to zero is numeric: the guard is
+  ; what tells the prover `depth` is still above zero where it recurses.
+  (fn spaces ((depth Int)) Str
+    (uses Alloc)
+    (if (<= depth 0) "" (concat "    " (spaces (- depth 1)))))
+
+  ; A match arm, and the `then` and `else` of an `if`, are labels inside their own form
+  ; rather than steps of their own, so they sit half a step in. Reading the view back
+  ; works by indentation, and a label at the enclosing level would close the form.
+  (fn half ((pad Str)) Str
+    (uses Alloc)
+    (concat pad "  "))
+
+  (fn opened ((pad Str) (name Str) (bracket Str)) Str
+    (uses Alloc)
+    (concat pad (concat name bracket)))
+
+  (fn closed ((pad Str) (bracket Str)) Str
+    (uses Alloc)
+    (concat "\n" (concat pad bracket)))
+
+  ; A part of a form that is not the shape that part has to be: an arm without a body, a
+  ; field without a value, a field name that is a list rather than a name. The two
+  ; dispatchers check a form's own arity before they hand it on, so no *form* arrives
+  ; here; what does arrive is a form of the right length whose insides are wrong, and
+  ; there is nothing to render for it. Saying so on the page is the point -- a reviewer
+  ; is told that the tree does not hold what the view would need, rather than being shown
+  ; a page with a piece quietly missing from it.
+  (fn misshapen () Str "<misshapen form>")
+
+  ; --- leaves --------------------------------------------------------------
+  ; A leaf carries its token's bytes and whether they were quoted, so a string literal is
+  ; written back with its quotes, as witness/view.py writes it.
+  (fn leaf_line ((text Bytes) (quoted Bool)) Str
+    (uses Alloc)
+    (if quoted
+      (concat "\"" (concat (text_of text) "\""))
+      (let shown (text_of text) (if (str.eq shown "unit") "()" shown))))
+
+  ; The text of a leaf used as a name: a callee, a field, a label, a binder. A name is
+  ; never a list, so a list here is a form that is not an expression at all.
+  (fn head_name ((t Tree)) Str
+    (uses Alloc)
+    (match t ((Leaf text quoted) (text_of text)) ((Node items) (misshapen))))
+
+  (fn is_leaf ((t Tree)) Bool (match t ((Leaf text quoted) true) ((Node items) false)))
+
+  ; The operators the view writes between their arguments rather than in front of them.
+  ; `=` reads `==`, because an `=` on its own is what the view puts between a signature
+  ; and the body under it.
+  (fn is_infix ((name Str)) Bool
+    (or (or (or (str.eq name "+") (str.eq name "-")) (or (str.eq name "*") (str.eq name "=")))
+      (or (or (str.eq name "<") (str.eq name "<="))
+        (or (str.eq name "and") (str.eq name "or")))))
+
+  (fn infix_text ((name Str)) Str (if (str.eq name "=") "==" name))
+
+  ; --- which forms need more than a line -----------------------------------
+  ; Length is not what decides: a call stays on one line however long it is, and breaks
+  ; only when something inside it is a form that has lines of its own. Those are the five
+  ; forms whose parts the view labels -- a binding, an arm, a step, a branch, a task --
+  ; because a label needs a line to sit on.
+  (fn simple ((t Tree)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) true)
+      ((Node items) (if (breaks items) false (simple_items items)))))
+
+  (fn breaks ((ts Trees)) Bool
+    (uses Alloc)
+    (match ts
+      ((NoTrees) false)
+      ((Trees h more) (or (or (is_word h "let") (is_word h "match")) (or (is_word h "seq") (or (is_word h "par") (is_word h "scope")))))))
+
+  (fn simple_items ((ts Trees)) Bool
+    (uses Alloc)
+    (match ts ((NoTrees) true) ((Trees h more) (and (simple h) (simple_items more)))))
+
+  ; --- one line ------------------------------------------------------------
+  (fn one_line ((t Tree)) Str
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (leaf_line text quoted))
+      ((Node items) (one_line_node items))))
+
+  ; The dispatch, and the reason it is one function rather than a dispatcher calling a
+  ; chooser: the handler for a shape is given `more`, which the `match` above took out of
+  ; `items`, and that is what makes the descent measurable. A function in between would
+  ; have to hand `more` on unchanged, and the checker refuses that -- correctly, since a
+  ; cycle in which one step makes nothing smaller does not have to end.
+  ;
+  ; The last branch is the one general rule underneath all of it. A callee is a name, so
+  ; a form whose head is a list is not a call at all, and the view shows it as the list
+  ; it is -- `[a, b, c]` -- rather than guessing at what was meant. That is also what
+  ; `par` and `scope` fall back to, since a branch list and a task list are lists.
+  (fn one_line_node ((items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "[]")
+      ((Trees h more) (if (is_leaf h) (if (and (is_word h "get") (= 2 (trees_count more))) (one_line_get more) (if (and (is_word h "declassify") (= 2 (trees_count more))) (one_line_declassify more) (if (and (is_word h "if") (= 3 (trees_count more))) (one_line_if more) (if (and (is_word h "make") (<= 1 (trees_count more))) (one_line_make more) (if (and (is_word h "with") (<= 2 (trees_count more))) (one_line_with more) (if (and (is_word h "update") (= 2 (trees_count more))) (one_line_update more) (if (and (is_word h "log.fields") (<= 1 (trees_count more))) (concat "log { " (concat (one_line_inits more) " }")) (if (and (is_word h "infer") (= 2 (trees_count more))) (one_line_infer more) (if (and (is_word h "send") (= 2 (trees_count more))) (one_line_send more) (if (and (is_word h "recv") (= 1 (trees_count more))) (concat "recv " (first_name more)) (if (and (is_infix (head_name h)) (= 2 (trees_count more))) (one_line_infix (infix_text (head_name h)) more) (concat (head_name h) (concat "(" (concat (one_line_args more) ")")))))))))))))) (if (trees_empty more) (concat "[" (concat (one_line h) "]")) (concat "[" (concat (one_line h) (concat ", " (concat (one_line_args more) "]")))))))))
+
+  (fn one_line_args ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (one_line h) (concat (one_line h) (concat ", " (one_line_args more)))))))
+
+  ; `(get r x)` reads `r.x`, the one form the view writes with nothing around it, because
+  ; a field read is how a record is read everywhere else too.
+  (fn one_line_get ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees f rest) (concat (one_line r) (concat "." (head_name f))))))))
+
+  ; The label is in the brackets, so what was released is on the page next to where.
+  (fn one_line_declassify ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees l more) (match more ((NoTrees) (misshapen)) ((Trees v rest) (concat "declassify[" (concat (head_name l) (concat "](" (concat (one_line v) ")")))))))))
+
+  (fn one_line_if ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees c more) (match more ((NoTrees) (misshapen)) ((Trees a rest) (match rest ((NoTrees) (misshapen)) ((Trees b over) (concat "if " (concat (one_line c) (concat " then " (concat (one_line a) (concat " else " (one_line b)))))))))))))
+
+  ; `(make R (f v) ...)` reads `R { f: v }`. The field names are written out because a
+  ; record has no positional form to fall back on.
+  (fn one_line_make ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (concat (head_name r) (concat " { " (concat (one_line_inits more) " }"))))))
+
+  (fn one_line_with ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (concat (one_line r) (concat " with { " (concat (one_line_inits more) " }"))))))
+
+  (fn one_line_update ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees p rest) (concat (one_line r) (concat " updated by " (one_line p))))))))
+
+  (fn one_line_infer ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees m more) (match more ((NoTrees) (misshapen)) ((Trees x rest) (concat "infer " (concat (head_name m) (concat "(" (concat (one_line x) ")")))))))))
+
+  (fn one_line_send ((args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees c more) (match more ((NoTrees) (misshapen)) ((Trees v rest) (concat "send " (concat (head_name c) (concat " <- " (one_line v)))))))))
+
+  (fn one_line_infix ((op Str) (args Trees)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees a more) (match more ((NoTrees) (misshapen)) ((Trees b rest) (concat "(" (concat (one_line a) (concat " " (concat op (concat " " (concat (one_line b) ")")))))))))))
+
+  (fn one_line_inits ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (init_line h) (concat (init_line h) (concat ", " (one_line_inits more)))))))
+
+  ; `(f v)`: a field name and what goes in it, in a `make`, a `with` or a log line.
+  (fn init_line ((t Tree)) Str
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (leaf_line text quoted))
+      ((Node parts) (match parts ((NoTrees) (misshapen)) ((Trees f more) (match more ((NoTrees) (misshapen)) ((Trees v rest) (concat (head_name f) (concat ": " (one_line v))))))))))
+
+  (fn first_name ((ts Trees)) Str
+    (uses Alloc)
+    (match ts ((NoTrees) (misshapen)) ((Trees h more) (head_name h))))
+
+  ; --- several lines -------------------------------------------------------
+  ; A form that fits a line is written on one, wherever it appears; everything else is
+  ; broken open at the indent it was asked for. A leaf always fits, so the leaf arm below
+  ; is never taken -- it is there because the `match` has to name both variants.
+  (fn rendered ((t Tree) (depth Int)) Str
+    (uses Alloc)
+    (if (simple t)
+      (concat (spaces depth) (one_line t))
+      (match t
+        ((Leaf text quoted) (concat (spaces depth) (leaf_line text quoted)))
+        ((Node items) (rendered_node items depth)))))
+
+  (fn rendered_node ((items Trees) (depth Int)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "[]")
+      ((Trees h more) (let pad (spaces depth) (if (is_leaf h) (if (and (is_word h "let") (= 3 (trees_count more))) (rendered_let more depth) (if (and (is_word h "seq") (<= 1 (trees_count more))) (rendered_seq more depth) (if (and (is_word h "match") (<= 1 (trees_count more))) (rendered_match more depth) (if (and (is_word h "if") (= 3 (trees_count more))) (rendered_if more depth) (if (and (is_word h "get") (= 2 (trees_count more))) (rendered_get more depth) (if (and (is_word h "declassify") (= 2 (trees_count more))) (rendered_declassify more depth) (if (and (is_word h "make") (<= 1 (trees_count more))) (rendered_make more depth) (if (and (is_word h "with") (<= 2 (trees_count more))) (rendered_with more depth) (concat (opened pad (head_name h) "(") (concat (rendered_args more depth) (closed pad ")"))))))))))) (if (trees_empty more) (concat (opened pad "" "[") (concat (concat "\n" (rendered h (+ depth 1))) (closed pad "]"))) (concat (opened pad "" "[") (concat (concat "\n" (rendered h (+ depth 1))) (concat "," (concat (rendered_args more depth) (closed pad "]")))))))))))
+
+  ; One argument to a line, a step further in, and a comma after all but the last. The
+  ; comma lands on the last line of whatever the argument rendered to, so an argument
+  ; that is itself several lines still reads as one item of the list.
+  (fn rendered_args ((ts Trees) (depth Int)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (concat "\n" (rendered h (+ depth 1))) (concat "\n" (concat (rendered h (+ depth 1)) (concat "," (rendered_args more depth))))))))
+
+  ; The steps of a `seq` are at the depth of the `seq` itself: nothing nests, because
+  ; nothing is subordinate -- they happen one after another.
+  (fn rendered_seq ((ts Trees) (depth Int)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (rendered h depth) (concat (rendered h depth) (concat "\n" (rendered_seq more depth)))))))
+
+  ; The body of a `let` is indented under it, so where a binding's scope ends is on the
+  ; page. Without that, `(seq (let x v b) c)` and `(let x v (seq b c))` would read the
+  ; same, and a reviewer could not tell which one they were approving.
+  (fn rendered_let ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees nm more) (match more ((NoTrees) (misshapen)) ((Trees val rest) (match rest ((NoTrees) (misshapen)) ((Trees body over) (let pad (spaces depth) (concat (if (simple val) (concat pad (concat "let " (concat (head_name nm) (concat " = " (one_line val))))) (concat pad (concat "let " (concat (head_name nm) (concat " =" (concat "\n" (rendered val (+ depth 2)))))))) (concat "\n" (rendered body (+ depth 1))))))))))))
+
+  (fn rendered_match ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees s arms) (let pad (spaces depth) (concat (if (simple s) (concat pad (concat "match " (one_line s))) (concat pad (concat "match" (concat "\n" (rendered s (+ depth 1)))))) (rendered_arms arms depth))))))
+
+  (fn rendered_arms ((ts Trees) (depth Int)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (concat (rendered_arm h depth) (rendered_arms more depth)))))
+
+  ; `((Variant a b) body)`: the pattern names the variant and one binder per field. The
+  ; arm sits half a step in, and its body a whole step, so an arm that needs lines of its
+  ; own cannot be mistaken for the next arm.
+  (fn rendered_arm ((arm Tree) (depth Int)) Str
+    (uses Alloc)
+    (let pad (half (spaces depth))
+      (match arm
+        ((Leaf text quoted) (concat "\n" (concat pad (misshapen))))
+        ((Node parts) (match parts ((NoTrees) (concat "\n" (concat pad (misshapen)))) ((Trees p more) (match more ((NoTrees) (concat "\n" (concat pad (misshapen)))) ((Trees body rest) (if (simple body) (concat "\n" (concat pad (concat (pattern_of p) (concat " => " (one_line body))))) (concat "\n" (concat pad (concat (pattern_of p) (concat " =>" (concat "\n" (rendered body (+ depth 1))))))))))))))))
+
+  (fn pattern_of ((p Tree)) Str
+    (uses Alloc)
+    (match p
+      ((Leaf text quoted) (text_of text))
+      ((Node parts) (match parts ((NoTrees) (misshapen)) ((Trees v binds) (if (trees_empty binds) (head_name v) (concat (head_name v) (concat "(" (concat (names_of binds) ")")))))))))
+
+  (fn names_of ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (head_name h) (concat (head_name h) (concat ", " (names_of more)))))))
+
+  (fn rendered_if ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees c more) (match more ((NoTrees) (misshapen)) ((Trees a rest) (match rest ((NoTrees) (misshapen)) ((Trees b over) (let pad (spaces depth) (concat (if (simple c) (concat pad (concat "if " (one_line c))) (concat pad (concat "if" (concat "\n" (rendered c (+ depth 1)))))) (concat (concat "\n" (concat (half pad) "then")) (concat (concat "\n" (rendered a (+ depth 1))) (concat (concat "\n" (concat (half pad) "else")) (concat "\n" (rendered b (+ depth 1)))))))))))))))
+
+  ; A field read of something that needed lines: the record is broken open in brackets
+  ; and the field follows the bracket that closed it.
+  (fn rendered_get ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees f rest) (let pad (spaces depth) (concat (opened pad "" "(") (concat (concat "\n" (rendered r (+ depth 1))) (concat (closed pad ").") (head_name f))))))))))
+
+  (fn rendered_declassify ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees l more) (match more ((NoTrees) (misshapen)) ((Trees v rest) (let pad (spaces depth) (concat (opened pad (concat "declassify[" (concat (head_name l) "]")) "(") (concat (concat "\n" (rendered v (+ depth 1))) (closed pad ")")))))))))
+
+  (fn rendered_make ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (let pad (spaces depth) (concat (opened pad (head_name r) " {") (concat (rendered_inits more depth) (closed pad "}")))))))
+
+  (fn rendered_with ((args Trees) (depth Int)) Str
+    (uses Alloc)
+    (match args
+      ((NoTrees) (misshapen))
+      ((Trees r more) (let pad (spaces depth) (concat (opened pad "" "(") (concat (concat "\n" (rendered r (+ depth 1))) (concat (closed pad ") with {") (concat (rendered_inits more depth) (closed pad "}")))))))))
+
+  (fn rendered_inits ((ts Trees) (depth Int)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (concat (init_rendered h depth) (rendered_inits more depth)))))
+
+  ; Every field of a broken-open record carries a comma, the last one included: a field
+  ; list is read back by its commas, and a missing one at the end would mean the list had
+  ; ended somewhere a reviewer cannot see.
+  (fn init_rendered ((t Tree) (depth Int)) Str
+    (uses Alloc)
+    (let pad (spaces (+ depth 1))
+      (match t
+        ((Leaf text quoted) (concat "\n" (concat pad (misshapen))))
+        ((Node parts) (match parts ((NoTrees) (concat "\n" (concat pad (misshapen)))) ((Trees f more) (match more ((NoTrees) (concat "\n" (concat pad (misshapen)))) ((Trees v rest) (if (simple v) (concat "\n" (concat pad (concat (head_name f) (concat ": " (concat (one_line v) ","))))) (concat "\n" (concat pad (concat (head_name f) (concat ":" (concat "\n" (concat (rendered v (+ depth 2)) ",")))))))))))))))
+
+  ; --- types ---------------------------------------------------------------
+  ; A type is written in brackets rather than in parentheses, so that a type and a call
+  ; can never be mistaken for one another on the page: `Option[Int]` is a type and
+  ; `option(Int)` would be a call.
+  (fn type_rendered ((t Tree)) Str
+    (uses Alloc)
+    (match t ((Leaf text quoted) (text_of text)) ((Node items) (type_node items))))
+
+  (fn type_node ((items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "[]")
+      ((Trees h more) (if (is_leaf h) (if (and (is_word h "label") (<= 2 (trees_count more))) (concat (type_last more) (labels_of more)) (if (and (is_word h "tensor") (<= 2 (trees_count more))) (concat "Tensor[" (concat (type_first more) (concat "; " (concat (axes_of (after_first more)) "]")))) (if (trees_empty more) (head_name h) (concat (head_name h) (concat "[" (concat (type_args more) "]")))))) (if (trees_empty more) (concat "[" (concat (type_rendered h) "]")) (concat "[" (concat (type_rendered h) (concat ", " (concat (type_args more) "]")))))))))
+
+  (fn type_args ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (type_rendered h) (concat (type_rendered h) (concat ", " (type_args more)))))))
+
+  ; `(label Secret Str)` reads `Str @Secret`: the labels follow the type that carries
+  ; them, so the base type is read first and what it is tagged with after. In the written
+  ; form the labels come first, which is why they are read off in two passes -- the last
+  ; item is the type, and everything before it is a label.
+  ;
+  ; They stay in the order they were written. witness/view.py sorts them, which it can do
+  ; because Python compares strings; the only ordering Stage 0 has on text is a walk over
+  ; its bytes with a budget, and that is a lot of machinery for a cosmetic difference on
+  ; the rare type that carries two labels.
+  (fn type_last ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (misshapen))
+      ((Trees h more) (if (trees_empty more) (type_rendered h) (type_last more)))))
+
+  (fn labels_of ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) "" (concat (concat " @" (head_name h)) (labels_of more))))))
+
+  (fn type_first ((ts Trees)) Str
+    (uses Alloc)
+    (match ts ((NoTrees) (misshapen)) ((Trees h more) (type_rendered h))))
+
+  (fn after_first ((ts Trees)) Trees (match ts ((NoTrees) (NoTrees)) ((Trees h more) more)))
+
+  ; An axis is a name and how many of it there are, and both are part of the type: a
+  ; shape mistake is a type error, so the shape has to be on the page.
+  (fn axes_of ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (axis_of h) (concat (axis_of h) (concat ", " (axes_of more)))))))
+
+  (fn axis_of ((t Tree)) Str
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (text_of text))
+      ((Node parts) (match parts ((NoTrees) (misshapen)) ((Trees nm more) (match more ((NoTrees) (misshapen)) ((Trees size rest) (concat (head_name nm) (concat "=" (head_name size))))))))))
+
+  ; --- what is not here ----------------------------------------------------
+  ; Four things witness/view.py writes and this does not, each for a stated reason.
+  ;
+  ; Declarations. The `fn` line with its parameters and effects, `enum`, `record`,
+  ; `newtype`, `use`, the clauses: a declaration is not an expression, and reading one
+  ; out of a tree is the job `fn_shape` in compiler/parse.wtn begins. That reader comes
+  ; first; this renders what sits inside the result.
+  ;
+  ; `par` and `scope`. A branch carries a placement and a task a deadline and a failure
+  ; policy, so each is a shape of its own with its own missing-piece reports -- a
+  ; declaration reader again rather than an expression renderer. Both still count as
+  ; forms that need lines, as they do there, and their branch lists fall to the general
+  ; rule for a form whose head is a list, so nothing either of them holds is dropped.
+  ;
+  ; The order of labels on a type. `type_last` above says why they stay as written.
+  ;
+  ; --- driven from source --------------------------------------------------
+  (fn tree_of ((src Str)) (Result Tree Fault)
+    (uses Alloc)
+    (parse (tokens_of (str.encode src))))
+
+  ; `witness view` writes a definition's body two steps in, under the `=` that separates
+  ; it from the signature, which is why the indent is a parameter here rather than zero.
+  (fn view_expr ((src Str) (depth Int)) Str
+    (uses Alloc)
+    (match (tree_of src)
+      ((Ok t) (rendered t depth))
+      ((Err f) (concat "rejected: " (get f why)))))
+
+  (fn view_body ((src Str)) Str
+    (uses Alloc)
+    (view_expr src 0))
+
+  (fn view_type ((src Str)) Str
+    (uses Alloc)
+    (match (tree_of src)
+      ((Ok t) (type_rendered t))
+      ((Err f) (concat "rejected: " (get f why)))))
+
+  ; --- what the writer says about itself -----------------------------------
+  (test "a call reads as a call" (str.eq "f(a, b)" (view_body "(f a b)")))
+
+  (test "an operator reads between its arguments" (str.eq "(a + b)" (view_body "(+ a b)")))
+
+  (test "equality reads as == , because a lone = separates a signature from its body" (str.eq "(a == b)" (view_body "(= a b)")))
+
+  (test "a field read reads as a field read" (str.eq "r.x" (view_body "(get r x)")))
+
+  (test "field reads chain" (str.eq "f.cause.op" (view_body "(get (get f cause) op)")))
+
+  (test "unwrap is spelled like the call it is" (str.eq "unwrap(p)" (view_body "(unwrap p)")))
+
+  (test "a release says which label, next to where" (str.eq "declassify[Secret](raw)" (view_body "(declassify Secret raw)")))
+
+  (test "a record is built with its field names written out" (str.eq "Site { code: c, minutes: m }" (view_body "(make Site (code c) (minutes m))")))
+
+  (test "a change to a record says what it keeps by not mentioning it" (str.eq "s with { interval: m }" (view_body "(with s (interval m))")))
+
+  (test "a short if stays on one line" (str.eq "if c then a else b" (view_body "(if c a b)")))
+
+  (test "unit reads as ()" (str.eq "()" (view_body "unit")))
+
+  (test "a match breaks, and each arm is a line" (str.eq "match x\n  None => 0\n  Some(v) => v" (view_body "(match x ((None) 0) ((Some v) v))")))
+
+  (test "a let indents its body, so where the binding ends is on the page" (str.eq "let x = 1\n    x" (view_body "(let x 1 x)")))
+
+  (test "the steps of a seq are at the depth of the seq" (str.eq "print(a)\nprint(b)" (view_body "(seq (print a) (print b))")))
+
+  (test "a call breaks only when something inside it has lines of its own" (str.eq "f(\n    match x\n      None => 0\n)" (view_body "(f (match x ((None) 0)))")))
+
+  (test "a type carries its arguments in brackets" (str.eq "Option[Int]" (view_type "(Option Int)")))
+
+  (test "a type's arguments nest" (str.eq "Result[Option[Int], Fault]" (view_type "(Result (Option Int) Fault)")))
+
+  (test "a label follows the type it is on" (str.eq "Str @Secret" (view_type "(label Secret Str)")))
+
+  (test "a label inside a type argument is written where it is" (str.eq "Option[Str @Secret]" (view_type "(Option (label Secret Str))")))
+
+  (test "a tensor's axes are part of its type" (str.eq "Tensor[F32; sample=4, feature=768]" (view_type "(tensor F32 (sample 4) (feature 768))")))
+
+  ; A form whose head is a keyword but whose shape is wrong is not guessed at: it reads
+  ; as the call it looks like, so every item it holds is still on the page.
+  (test "a form the view has no shape for keeps all of its items" (str.eq "get(r)" (view_body "(get r)")))
+
+  (test "a form whose head is a list is shown as the list it is" (str.eq "[a(b), c]" (view_body "((a b) c)")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (view_type "(Result (Option (label Secret Str)) Fault)"))
+      (print (view_body "(+ a (* b c))"))
+      (print (view_body "(get (unwrap p) code)"))
+      (print (view_body "(match r ((Ok v) (print v)) ((Err f) (print (get f why))))"))
+      (print (view_body "(let total (+ a b) (if (< 0 total) (Some total) (None)))")))))

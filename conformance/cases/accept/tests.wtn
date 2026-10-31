@@ -1,0 +1,10 @@
+(module m
+  (fn double ((n Int)) Int (* n 2))
+
+  (test "two doubles to four" (= 4 (double 2)))
+
+  (property "doubling grows" ((n Int))
+    (requires (< 0 n))
+    (< n (double n)))
+
+  (snapshot "shown" (num.to_str (double 21)) "42"))

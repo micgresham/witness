@@ -1,0 +1,5 @@
+(module m
+  (fn dec ((n Int)) Int
+    (requires (<= 1 n))
+    (ensures (<= 0 result))
+    (- n 1)))

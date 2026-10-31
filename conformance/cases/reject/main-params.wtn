@@ -1,0 +1,2 @@
+(module m
+  (fn main ((n Int)) Int n))

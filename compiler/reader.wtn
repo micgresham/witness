@@ -1,0 +1,156 @@
+; The first piece of the Witness compiler, in Witness: turning source into tokens.
+;
+; This exists to settle a question rather than to be finished. Phase 2 needs a reader
+; written in Witness, and until `bytes.at`, `bytes.slice` and `bytes.of` were added there
+; was no way to look inside a `Str` or a `Bytes` at all -- so no reader could be written,
+; and every item of Phase 2 was blocked behind that. This is the proof that it no longer
+; is: a tokeniser for the surface syntax of SPEC 2, checked and run by Phase 0.
+;
+; It works in bytes, not in text. `Str` is always valid UTF-8 and stays opaque; the one
+; place a sequence of bytes becomes text is `bytes.decode`, which can refuse. A token
+; therefore carries its bytes, and whoever wants text asks for it once.
+;
+;   witness run compiler/reader.wtn --grant Alloc,Console
+(module reader
+  ; --- tokens ----------------------------------------------------------------
+  (enum Token (Open) (Close) (Word (text Bytes)) (Text (text Bytes)) (Number (text Bytes)))
+
+  (enum Tokens (NoTokens) (Tokens (head Token) (rest Tokens)))
+
+  (fn tokens_count ((ts Tokens)) Int
+    (ensures (<= 0 result))
+    (match ts ((NoTokens) 0) ((Tokens h rest) (+ 1 (tokens_count rest)))))
+
+  ; Built up in reverse and turned round once at the end, so adding a token is a step
+  ; and not a walk.
+  ; No `Alloc`: a variant is fixed-size, so turning a list round builds nothing whose
+  ; size its type does not already fix.
+  (fn reversed ((ts Tokens) (onto Tokens)) Tokens
+    (match ts ((NoTokens) onto) ((Tokens h rest) (reversed rest (Tokens h onto)))))
+
+  ; --- what a byte is --------------------------------------------------------
+  (fn byte_at ((src Bytes) (at Int)) Int
+    (match (bytes.at src (Octets at)) ((None) 0) ((Some b) (int.of b))))
+
+  (fn is_space ((b Int)) Bool (or (or (= b 32) (= b 9)) (or (= b 10) (= b 13))))
+
+  (fn is_digit ((b Int)) Bool (and (<= 48 b) (<= b 57)))
+
+  (fn is_delimiter ((b Int)) Bool (or (or (= b 40) (= b 41)) (or (is_space b) (= b 0))))
+
+  ; A comment runs to the end of the line.
+  (fn is_comment ((b Int)) Bool (= b 59))
+
+  (fn is_quote ((b Int)) Bool (= b 34))
+
+  ; --- the scan --------------------------------------------------------------
+  ; One pass, left to right. `at` is where to look and `left` is how much walking can
+  ; still be done: it falls at every step, which is what makes the scan finite -- nothing
+  ; about an index into a sequence gets smaller on its own. Going round through a string
+  ; or a word costs two steps rather than one, so the budget allows two per byte.
+  (fn scan ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 1) (<= (unwrap (bytes.len src)) at))
+      (reversed out (NoTokens))
+      (if (is_space (byte_at src at))
+        (scan src (+ at 1) (- left 1) out)
+        (if (is_comment (byte_at src at))
+          (scan src (past_line src at left) (- left 1) out)
+          (if (= (byte_at src at) 40)
+            (scan src (+ at 1) (- left 1) (Tokens (Open) out))
+            (if (= (byte_at src at) 41)
+              (scan src (+ at 1) (- left 1) (Tokens (Close) out))
+              (if (is_quote (byte_at src at))
+                (scan_text src at (- left 1) out)
+                (scan_word src at (- left 1) out))))))))
+
+  ; Where the next line starts, or the end of the source.
+  (fn past_line ((src Bytes) (at Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      at
+      (if (<= (unwrap (bytes.len src)) at)
+        at
+        (if (= (byte_at src at) 10) (+ at 1) (past_line src (+ at 1) (- left 1))))))
+
+  ; A quoted string, from its opening quote to past its closing one. A backslash escapes
+  ; whatever follows it, so a quote can be written inside one.
+  (fn scan_text ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+    (uses Alloc)
+    (requires (< 0 left))
+    (scan src
+      (+ (end_of_text src (+ at 1) left) 1)
+      (- left 1)
+      (Tokens (Text (bytes.slice src (Octets (+ at 1)) (Octets (end_of_text src (+ at 1) left))))
+        out)))
+
+  (fn end_of_text ((src Bytes) (at Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      at
+      (if (<= (unwrap (bytes.len src)) at)
+        at
+        (if (is_quote (byte_at src at))
+          at
+          (if (= (byte_at src at) 92)
+            (end_of_text src (+ at 2) (- left 1))
+            (end_of_text src (+ at 1) (- left 1)))))))
+
+  ; Everything up to the next delimiter: a name, a keyword, or a number.
+  (fn scan_word ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+    (uses Alloc)
+    (requires (< 0 left))
+    (scan src
+      (end_of_word src at left)
+      (- left 1)
+      (Tokens (worded (bytes.slice src (Octets at) (Octets (end_of_word src at left))) (byte_at src at))
+        out)))
+
+  (fn worded ((text Bytes) (first Int)) Token
+    (if (or (is_digit first) (= first 45)) (Number text) (Word text)))
+
+  (fn end_of_word ((src Bytes) (at Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      at
+      (if (<= (unwrap (bytes.len src)) at)
+        at
+        (if (is_delimiter (byte_at src at)) at (end_of_word src (+ at 1) (- left 1))))))
+
+  (fn tokens_of ((src Bytes)) Tokens
+    (uses Alloc)
+    (scan src 0 (+ 2 (* 2 (unwrap (bytes.len src)))) (NoTokens)))
+
+  ; --- showing what was read -------------------------------------------------
+  (fn text_of ((b Bytes)) Str
+    (uses Alloc)
+    (match (bytes.decode b) ((Ok s) s) ((Err e) "<not text>")))
+
+  (fn shown ((t Token)) Str
+    (uses Alloc)
+    (match t
+      ((Open) "(")
+      ((Close) ")")
+      ((Word text) (text_of text))
+      ((Text text) (concat "\"" (concat (text_of text) "\"")))
+      ((Number text) (concat "#" (text_of text)))))
+
+  (fn joined ((ts Tokens)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTokens) "")
+      ((Tokens h rest) (concat (concat (shown h) " ") (joined rest)))))
+
+  ; A module with a comment, a nested signature, a string and a number in it.
+  (fn sample () Str
+    (uses Alloc)
+    (concat "(module m ; a comment\n"
+      (concat "   (fn add ((a Int) (b Int)) Int (+ a b))\n"
+        "   (test \"it adds\" (= 3 (add 1 2))))")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (joined (tokens_of (str.encode (sample)))))
+      (print (num.to_str (tokens_count (tokens_of (str.encode "(a (b c))"))))))))

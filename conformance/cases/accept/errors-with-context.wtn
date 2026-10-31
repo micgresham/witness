@@ -1,0 +1,8 @@
+(module m
+  (fn read ((raw Str)) (Result Int Fault)
+    (uses Alloc)
+    (if (str.eq raw "1") (Ok 1) (Err (fault "read" (concat "not a number: " raw)))))
+
+  (fn load ((raw Str)) (Result Int Fault)
+    (uses Alloc)
+    (context (read raw) "load" "reading the setting")))

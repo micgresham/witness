@@ -1,0 +1,335 @@
+; x86-64 machine code: the instructions the native backend needs, as bytes.
+;
+; A native backend is the same program as the WebAssembly one with a different last step,
+; and this is that step's alphabet. Each function answers the bytes of one instruction. A
+; register is its number (rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8 to
+; r15 8 to 15), and the extended registers are reached through the REX prefix, which this
+; works out from the numbers.
+;
+; Everything is 64-bit unless it says otherwise. Memory operands are always `base + disp32`
+; or `base + index + disp32`; the shorter forms save bytes and cost cases, and a backend
+; that is correct first has no use for them.
+;
+; The evidence is tests/test_x86.py, which disassembles every encoding with a disassembler
+; that shares nothing with this and checks it reads back as the instruction meant.
+;
+;   witness test compiler/x86.wtn
+(module x86
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn b1 ((n U32)) Bytes
+    (uses Alloc)
+    (bytes.of (low8 n)))
+
+  ; The low eight bits of a number, as a byte.
+  (fn low8 ((n U32)) U8
+    (let part (bit.and n (u32.of 255)) (if (<= part (u32.of 255)) (u8.of part) (u8.of 0))))
+
+  (fn cat2 ((a Bytes) (b Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a b))
+
+  (fn cat3 ((a Bytes) (b Bytes) (c Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a (bytes.concat b c)))
+
+  (fn cat4 ((a Bytes) (b Bytes) (c Bytes) (d Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a (bytes.concat b (bytes.concat c d))))
+
+  ; --- prefixes and operand bytes -------------------------------------------------
+  ; REX is 0100WRXB: W for a 64-bit operand, R extends the register field, X the index,
+  ; B the base or the register in the opcode.
+  (fn high_bit ((r U32) (shift U32)) U32 (if (<= (u32.of 8) r) shift (u32.of 0)))
+
+  (fn rex ((w Bool) (reg U32) (index U32) (base U32)) Bytes
+    (uses Alloc)
+    (b1 (wrap.add (u32.of 64) (wrap.add (if w (u32.of 8) (u32.of 0)) (wrap.add (high_bit reg (u32.of 4)) (wrap.add (high_bit index (u32.of 2)) (high_bit base (u32.of 1))))))))
+
+  (fn modrm ((md U32) (reg U32) (rm U32)) Bytes
+    (uses Alloc)
+    (b1 (wrap.add (wrap.mul md (u32.of 64)) (wrap.add (wrap.mul (bit.and reg (u32.of 7)) (u32.of 8)) (bit.and rm (u32.of 7))))))
+
+  (fn sib ((scale U32) (index U32) (base U32)) Bytes
+    (uses Alloc)
+    (b1 (wrap.add (wrap.mul scale (u32.of 64)) (wrap.add (wrap.mul (bit.and index (u32.of 7)) (u32.of 8)) (bit.and base (u32.of 7))))))
+
+  ; A 32-bit value, least significant byte first; a negative one in two's complement.
+  (fn imm32 ((n I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (b1 (low_of n (u32.of 0)))
+      (bytes.concat (b1 (low_of n (u32.of 8)))
+        (bytes.concat (b1 (low_of n (u32.of 16))) (b1 (low_of n (u32.of 24)))))))
+
+  (fn imm64 ((n I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (imm32 n) (imm32 (high_half n))))
+
+  ; Bits 32 to 63 of a word, read as a signed 32-bit value would be.
+  (fn high_half ((n I64)) I64 (bit.shr n 32))
+
+  (fn low_of ((n I64) (shift U32)) U32
+    (let part (bit.and (bit.shr n (int.of shift)) (i64.of 255))
+      (if (and (<= (i64.of 0) part) (<= part (i64.of 255))) (u32.of part) (u32.of 0))))
+
+  ; --- moving ------------------------------------------------------------------------
+  (fn push ((r U32)) Bytes
+    (uses Alloc)
+    (if (<= (u32.of 8) r)
+      (cat2 (b1 (u32.of 65)) (b1 (wrap.add (u32.of 80) (bit.and r (u32.of 7)))))
+      (b1 (wrap.add (u32.of 80) r))))
+
+  (fn pop ((r U32)) Bytes
+    (uses Alloc)
+    (if (<= (u32.of 8) r)
+      (cat2 (b1 (u32.of 65)) (b1 (wrap.add (u32.of 88) (bit.and r (u32.of 7)))))
+      (b1 (wrap.add (u32.of 88) r))))
+
+  ; mov r, imm64
+  (fn mov_imm ((r U32) (n I64)) Bytes
+    (uses Alloc)
+    (cat3 (rex true (u32.of 0) (u32.of 0) r)
+      (b1 (wrap.add (u32.of 184) (bit.and r (u32.of 7))))
+      (imm64 n)))
+
+  ; mov dst, src
+  (fn mov_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (cat3 (rex true src (u32.of 0) dst) (b1 (u32.of 137)) (modrm (u32.of 3) src dst)))
+
+  ; mov dst, dword src: the low half, zero-extended
+  (fn mov_32 ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (if (or (<= (u32.of 8) dst) (<= (u32.of 8) src))
+      (cat3 (rex false src (u32.of 0) dst) (b1 (u32.of 137)) (modrm (u32.of 3) src dst))
+      (cat2 (b1 (u32.of 137)) (modrm (u32.of 3) src dst))))
+
+  ; mov dst, [base + disp]
+  (fn load ((dst U32) (base U32) (disp I64)) Bytes
+    (uses Alloc)
+    (cat4 (rex true dst (u32.of 0) base)
+      (b1 (u32.of 139))
+      (modrm (u32.of 2) dst base)
+      (cat2 (base_sib base) (imm32 disp))))
+
+  ; mov [base + disp], src
+  (fn store ((base U32) (disp I64) (src U32)) Bytes
+    (uses Alloc)
+    (cat4 (rex true src (u32.of 0) base)
+      (b1 (u32.of 137))
+      (modrm (u32.of 2) src base)
+      (cat2 (base_sib base) (imm32 disp))))
+
+  ; A base of rsp or r12 needs a SIB byte; nothing else does.
+  (fn base_sib ((base U32)) Bytes
+    (uses Alloc)
+    (if (= (bit.and base (u32.of 7)) (u32.of 4))
+      (sib (u32.of 0) (u32.of 4) base)
+      (no_bytes)))
+
+  ; mov dst, [base + index + disp]
+  (fn load_indexed ((dst U32) (base U32) (index U32) (disp I64)) Bytes
+    (uses Alloc)
+    (cat4 (rex true dst index base)
+      (b1 (u32.of 139))
+      (modrm (u32.of 2) dst (u32.of 4))
+      (cat2 (sib (u32.of 0) index base) (imm32 disp))))
+
+  ; mov [base + index + disp], src
+  (fn store_indexed ((base U32) (index U32) (disp I64) (src U32)) Bytes
+    (uses Alloc)
+    (cat4 (rex true src index base)
+      (b1 (u32.of 137))
+      (modrm (u32.of 2) src (u32.of 4))
+      (cat2 (sib (u32.of 0) index base) (imm32 disp))))
+
+  ; movzx dst, byte [base + index + disp]
+  (fn load_byte ((dst U32) (base U32) (index U32) (disp I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat2 (rex false dst index base) (b1 (u32.of 15)))
+      (b1 (u32.of 182))
+      (modrm (u32.of 2) dst (u32.of 4))
+      (cat2 (sib (u32.of 0) index base) (imm32 disp))))
+
+  ; mov byte [base + index + disp], src (its low byte)
+  (fn store_byte ((base U32) (index U32) (disp I64) (src U32)) Bytes
+    (uses Alloc)
+    (cat4 (rex false src index base)
+      (b1 (u32.of 136))
+      (modrm (u32.of 2) src (u32.of 4))
+      (cat2 (sib (u32.of 0) index base) (imm32 disp))))
+
+  ; lea dst, [base + disp]
+  (fn lea ((dst U32) (base U32) (disp I64)) Bytes
+    (uses Alloc)
+    (cat4 (rex true dst (u32.of 0) base)
+      (b1 (u32.of 141))
+      (modrm (u32.of 2) dst base)
+      (cat2 (base_sib base) (imm32 disp))))
+
+  ; --- arithmetic ---------------------------------------------------------------------
+  (fn alu ((opcode U32) (dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (cat3 (rex true src (u32.of 0) dst) (b1 opcode) (modrm (u32.of 3) src dst)))
+
+  (fn add_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 1) dst src))
+
+  (fn sub_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 41) dst src))
+
+  (fn and_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 33) dst src))
+
+  (fn or_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 9) dst src))
+
+  (fn xor_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 49) dst src))
+
+  (fn cmp_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 57) dst src))
+
+  (fn test_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (alu (u32.of 133) dst src))
+
+  ; imul dst, src
+  (fn imul_rr ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (cat4 (rex true dst (u32.of 0) src)
+      (b1 (u32.of 15))
+      (b1 (u32.of 175))
+      (modrm (u32.of 3) dst src)))
+
+  (fn cqo () Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 72)) (b1 (u32.of 153))))
+
+  ; idiv src (signed, rdx:rax / src) and div src (unsigned)
+  (fn idiv ((src U32)) Bytes
+    (uses Alloc)
+    (cat3 (rex true (u32.of 0) (u32.of 0) src)
+      (b1 (u32.of 247))
+      (modrm (u32.of 3) (u32.of 7) src)))
+
+  (fn div ((src U32)) Bytes
+    (uses Alloc)
+    (cat3 (rex true (u32.of 0) (u32.of 0) src)
+      (b1 (u32.of 247))
+      (modrm (u32.of 3) (u32.of 6) src)))
+
+  ; shl, shr, sar of dst by cl
+  (fn shift_cl ((kind U32) (dst U32)) Bytes
+    (uses Alloc)
+    (cat3 (rex true (u32.of 0) (u32.of 0) dst)
+      (b1 (u32.of 211))
+      (modrm (u32.of 3) kind dst)))
+
+  (fn shl_cl ((dst U32)) Bytes
+    (uses Alloc)
+    (shift_cl (u32.of 4) dst))
+
+  (fn shr_cl ((dst U32)) Bytes
+    (uses Alloc)
+    (shift_cl (u32.of 5) dst))
+
+  (fn sar_cl ((dst U32)) Bytes
+    (uses Alloc)
+    (shift_cl (u32.of 7) dst))
+
+  ; add dst, imm32 and sub dst, imm32
+  (fn add_imm ((dst U32) (n I64)) Bytes
+    (uses Alloc)
+    (cat4 (rex true (u32.of 0) (u32.of 0) dst)
+      (b1 (u32.of 129))
+      (modrm (u32.of 3) (u32.of 0) dst)
+      (imm32 n)))
+
+  (fn sub_imm ((dst U32) (n I64)) Bytes
+    (uses Alloc)
+    (cat4 (rex true (u32.of 0) (u32.of 0) dst)
+      (b1 (u32.of 129))
+      (modrm (u32.of 3) (u32.of 5) dst)
+      (imm32 n)))
+
+  ; setcc al, then movzx eax, al: a condition as 0 or 1 in rax. `cc` is the low nibble of the
+  ; condition code: e 4, ne 5, l c, ge d, le e, g f, b 2, ae 3, be 6, a 7.
+  (fn setcc ((cc U32)) Bytes
+    (uses Alloc)
+    (cat3 (b1 (u32.of 15))
+      (b1 (wrap.add (u32.of 144) cc))
+      (cat3 (modrm (u32.of 3) (u32.of 0) (u32.of 0))
+        (cat2 (b1 (u32.of 15)) (b1 (u32.of 182)))
+        (modrm (u32.of 3) (u32.of 0) (u32.of 0)))))
+
+  ; movsx rax, al / ax / eax
+  (fn sign_extend ((bits U32)) Bytes
+    (uses Alloc)
+    (if (= bits (u32.of 32))
+      (cat3 (b1 (u32.of 72)) (b1 (u32.of 99)) (modrm (u32.of 3) (u32.of 0) (u32.of 0)))
+      (cat4 (b1 (u32.of 72))
+        (b1 (u32.of 15))
+        (b1 (if (= bits (u32.of 8)) (u32.of 190) (u32.of 191)))
+        (modrm (u32.of 3) (u32.of 0) (u32.of 0)))))
+
+  ; cmovz dst, src
+  (fn cmovz ((dst U32) (src U32)) Bytes
+    (uses Alloc)
+    (cat4 (rex true dst (u32.of 0) src)
+      (b1 (u32.of 15))
+      (b1 (u32.of 68))
+      (modrm (u32.of 3) dst src)))
+
+  ; --- control --------------------------------------------------------------------------
+  ; The size of each is fixed, so a layout can be worked out before any target is known.
+  (fn jmp_size () U32 (u32.of 5))
+
+  (fn jcc_size () U32 (u32.of 6))
+
+  (fn call_size () U32 (u32.of 5))
+
+  (fn jmp ((rel I64)) Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 233)) (imm32 rel)))
+
+  ; jcc with the condition's low nibble, as for `setcc`
+  (fn jcc ((cc U32) (rel I64)) Bytes
+    (uses Alloc)
+    (cat3 (b1 (u32.of 15)) (b1 (wrap.add (u32.of 128) cc)) (imm32 rel)))
+
+  (fn call ((rel I64)) Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 232)) (imm32 rel)))
+
+  ; ret imm16: return and drop that many bytes of arguments
+  (fn ret_pop ((n U32)) Bytes
+    (uses Alloc)
+    (cat3 (b1 (u32.of 194))
+      (b1 (bit.and n (u32.of 255)))
+      (b1 (bit.and (bit.shr n 8) (u32.of 255)))))
+
+  (fn syscall () Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 15)) (b1 (u32.of 5))))
+
+  ; rep movsb: copy rcx bytes from [rsi] to [rdi]
+  (fn rep_movsb () Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 243)) (b1 (u32.of 164))))
+
+  (fn ud2 () Bytes
+    (uses Alloc)
+    (cat2 (b1 (u32.of 15)) (b1 (u32.of 11))))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/x86.wtn is exercised by tests/test_x86.py")))

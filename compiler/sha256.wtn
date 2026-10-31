@@ -1,0 +1,401 @@
+; SHA-256 over `Bytes`, in Witness, as FIPS 180-4 defines it.
+;
+; This exists to settle a question rather than to be fast. Hashes are identity in this
+; project -- a definition is named by the hash of its content, and nothing can be stored
+; or run that has not been through the checker and hashed -- so Phase 2 cannot write the
+; compiler in Witness until Witness can compute a hash. Until `bit.and`, `bit.or`,
+; `bit.xor`, `bit.not`, `bit.shl` and `bit.shr` were added there were no bitwise
+; operations at all: `and`, `or` and `not` are Bool connectives, and a `U32` could be
+; added and compared but never taken apart. No hash and no serialiser could be written.
+; This is the proof that both now can be.
+;
+; Two things about the shape of the code are forced by the language and worth knowing
+; before reading it. There is no array, so the sixty-four words of a message schedule and
+; the sixty-four round constants are cons lists, and a word is reached by walking. And
+; every function must be proved to terminate: a walk along a list recurses on a binder
+; the `match` took out of it, which is a part of a part and so provably smaller, while a
+; walk along an index carries a budget that falls at every step, because nothing about an
+; index into a sequence gets smaller on its own.
+;
+; The published test vectors are at the bottom. For the record, the two everybody checks:
+;
+;   SHA-256("")    = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+;   SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+;
+;   witness test compiler/sha256.wtn
+;   witness run  compiler/sha256.wtn --grant Alloc,Console
+(module sha256
+  ; --- words -----------------------------------------------------------------
+  ; SHA-256 works in 32-bit words throughout, which is why every addition below is
+  ; `wrap.add`: the specification says "addition modulo 2^32", and that is an operation
+  ; with its own name here rather than an overflow nobody mentioned.
+  (enum Words (NoWords) (Words (head U32) (rest Words)))
+
+  (fn words_join ((p Words) (q Words)) Words
+    (match p ((NoWords) q) ((Words h rest) (Words h (words_join rest q)))))
+
+  ; A list is built up by prepending, so turning it round once at the end is what makes
+  ; appending a step and not a walk.
+  (fn reversed ((ws Words) (onto Words)) Words
+    (match ws ((NoWords) onto) ((Words h rest) (reversed rest (Words h onto)))))
+
+  ; The word `at` places from the front, or zero past the end. Walking the list is what
+  ; stands in for an index: the recursion is structural, so it needs no budget.
+  (fn word_at ((ws Words) (at Int)) U32
+    (match ws
+      ((NoWords) (u32.of 0))
+      ((Words h rest) (if (<= at 0) h (word_at rest (- at 1))))))
+
+  ; --- the eight working variables -------------------------------------------
+  ; FIPS 180-4 calls them a..h and so does this.
+  (record State (a U32) (b U32) (c U32) (d U32) (e U32) (f U32) (g U32) (h U32))
+
+  (fn added ((x State) (y State)) State
+    (make State
+      (a (wrap.add (get x a) (get y a)))
+      (b (wrap.add (get x b) (get y b)))
+      (c (wrap.add (get x c) (get y c)))
+      (d (wrap.add (get x d) (get y d)))
+      (e (wrap.add (get x e) (get y e)))
+      (f (wrap.add (get x f) (get y f)))
+      (g (wrap.add (get x g) (get y g)))
+      (h (wrap.add (get x h) (get y h)))))
+
+  ; --- the bit functions -----------------------------------------------------
+  ; A rotation is the two shifts joined together. Every count below is between 1 and 31,
+  ; so neither shift is the degenerate one -- and if one were, `bit.shl` and `bit.shr`
+  ; answer zero for a count at the width rather than refusing, so the rotation would
+  ; still be a defined value and not a proof obligation.
+  (fn rotated ((w U32) (by Int)) U32 (bit.or (bit.shr w by) (bit.shl w (- 32 by))))
+
+  (fn choice ((x U32) (y U32) (z U32)) U32 (bit.xor (bit.and x y) (bit.and (bit.not x) z)))
+
+  (fn majority ((x U32) (y U32) (z U32)) U32
+    (bit.xor (bit.and x y) (bit.xor (bit.and x z) (bit.and y z))))
+
+  (fn upper_sigma0 ((w U32)) U32
+    (bit.xor (rotated w 2) (bit.xor (rotated w 13) (rotated w 22))))
+
+  (fn upper_sigma1 ((w U32)) U32
+    (bit.xor (rotated w 6) (bit.xor (rotated w 11) (rotated w 25))))
+
+  ; The lower sigmas shift rather than rotate in their last term, which is where the
+  ; schedule stops being reversible and starts mixing.
+  (fn lower_sigma0 ((w U32)) U32
+    (bit.xor (rotated w 7) (bit.xor (rotated w 18) (bit.shr w 3))))
+
+  (fn lower_sigma1 ((w U32)) U32
+    (bit.xor (rotated w 17) (bit.xor (rotated w 19) (bit.shr w 10))))
+
+  ; --- reading a block -------------------------------------------------------
+  (fn byte_at ((src Bytes) (at Int)) U32
+    (match (bytes.at src (Octets at)) ((None) (u32.of 0)) ((Some b) (u32.of b))))
+
+  ; One word out of four bytes, most significant first, as FIPS 180-4 requires.
+  (fn word_starting_at ((src Bytes) (at Int)) U32
+    (bit.or (bit.shl (byte_at src at) 24)
+      (bit.or (bit.shl (byte_at src (+ at 1)) 16)
+        (bit.or (bit.shl (byte_at src (+ at 2)) 8) (byte_at src (+ at 3))))))
+
+  ; --- the message schedule --------------------------------------------------
+  ; The first sixteen words are the block read as words, collected newest-first because
+  ; that is the order the recurrence below wants them in.
+  (fn block_words ((block Bytes) (at Int) (left Int) (out Words)) Words
+    (requires (<= 0 left))
+    (if (<= left 0)
+      out
+      (block_words block (+ at 4) (- left 1) (Words (word_starting_at block at) out))))
+
+  ; W[t] from the four earlier words the specification names. `ws` is newest-first, so
+  ; W[t-1] is at the front and W[t-2], W[t-7], W[t-15] and W[t-16] are 1, 6, 14 and 15
+  ; places along.
+  (fn next_word ((ws Words)) U32
+    (wrap.add (wrap.add (lower_sigma1 (word_at ws 1)) (word_at ws 6))
+      (wrap.add (lower_sigma0 (word_at ws 14)) (word_at ws 15))))
+
+  (fn extended ((ws Words) (left Int)) Words
+    (requires (<= 0 left))
+    (if (<= left 0) ws (extended (Words (next_word ws) ws) (- left 1))))
+
+  ; Sixty-four words, oldest first, which is the order the rounds consume them in.
+  (fn schedule ((block Bytes)) Words
+    (reversed (extended (block_words block 0 16 (NoWords)) 48) (NoWords)))
+
+  ; --- the rounds ------------------------------------------------------------
+  (fn round ((s State) (w U32) (k U32)) State
+    (let first (wrap.add (wrap.add (wrap.add (get s h) (upper_sigma1 (get s e))) (choice (get s e) (get s f) (get s g))) (wrap.add w k))
+      (let second (wrap.add (upper_sigma0 (get s a)) (majority (get s a) (get s b) (get s c)))
+        (make State
+          (a (wrap.add first second))
+          (b (get s a))
+          (c (get s b))
+          (d (get s c))
+          (e (wrap.add (get s d) first))
+          (f (get s e))
+          (g (get s f))
+          (h (get s g))))))
+
+  ; The two lists are the same length, so walking one of them structurally walks both.
+  ; Running out of either stops rather than guessing, because a `match` names every
+  ; variant and there is no arm that could mean "this cannot happen".
+  (fn compressed ((s State) (ws Words) (ks Words)) State
+    (match ws
+      ((NoWords) s)
+      ((Words w rest) (match ks ((NoWords) s) ((Words k others) (compressed (round s w k) rest others))))))
+
+  ; --- padding ---------------------------------------------------------------
+  ; Division answers an Option rather than inventing a remainder, and there is no modulo
+  ; primitive, so this is both: the quotient times the divisor, taken off. The guard is
+  ; what tells the prover the answer is a remainder -- it cannot see that through a
+  ; division it treats as opaque.
+  (fn modulo ((n Int) (by Int)) Int
+    (requires (< 0 by))
+    (ensures (and (<= 0 result) (< result by)))
+    (match (num.div n by)
+      ((None) 0)
+      ((Some q) (let rest (- n (* by q)) (if (and (<= 0 rest) (< rest by)) rest 0)))))
+
+  ; How many zero bytes go between the single 0x80 byte and the eight-byte length, so
+  ; that the whole padded message is a multiple of 64 bytes long.
+  (fn zero_count ((len Int)) Int
+    (requires (<= 0 len))
+    (ensures (<= 0 result))
+    (let over (modulo (+ len 1) 64) (if (<= over 56) (- 56 over) (- 120 over))))
+
+  (fn zeros ((left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) out (zeros (- left 1) (bytes.concat out (bytes.of (u8.of 0))))))
+
+  ; One byte out of a wider word. Masking is total, but narrowing is not: the prover
+  ; knows only that a bitwise result is somewhere inside its width, so the `if` is what
+  ; supplies the bound `u8.of` needs. The other branch cannot be reached.
+  (fn byte_of_long ((w U64) (by Int)) U8
+    (let part (bit.and (bit.shr w by) (u64.of 255))
+      (if (<= (int.of part) 255) (u8.of part) (u8.of 0))))
+
+  (fn byte_of_word ((w U32) (by Int)) U8
+    (let part (bit.and (bit.shr w by) (u32.of 255))
+      (if (<= (int.of part) 255) (u8.of part) (u8.of 0))))
+
+  ; The length that goes on the end is in bits, not bytes, and it is a 64-bit number --
+  ; which is why it is the one place a U64 appears. A message long enough to overflow it
+  ; cannot be held in memory, and the guard is there so that saying so costs no proof.
+  (fn bit_length ((len Int)) U64
+    (requires (<= 0 len))
+    (if (<= len 2305843009213693951) (u64.of (* len 8)) (u64.of 0)))
+
+  ; The eight bytes of the bit length, most significant first. `left` counts bytes still
+  ; to write rather than a shift distance, so that one step away from zero is also one
+  ; step away from the end and the recursion needs nothing else said about it.
+  (fn length_suffix ((bits U64) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      out
+      (length_suffix bits
+        (- left 1)
+        (bytes.concat out (bytes.of (byte_of_long bits (* 8 (- left 1))))))))
+
+  (fn padded ((msg Bytes)) Bytes
+    (uses Alloc)
+    (let len (unwrap (bytes.len msg))
+      (length_suffix (bit_length len)
+        8
+        (zeros (zero_count len) (bytes.concat msg (bytes.of (u8.of 128)))))))
+
+  ; --- the hash --------------------------------------------------------------
+  ; One pass over the padded message, 64 bytes at a time. `left` is the budget: it starts
+  ; above the number of blocks there could be and falls at every step, which is what
+  ; makes the walk finite, since `at` does not get smaller on its own.
+  (fn digested ((msg Bytes) (at Int) (left Int) (s State)) State
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len msg)) at))
+      s
+      (digested msg
+        (+ at 64)
+        (- left 1)
+        (added s
+          (compressed s
+            (schedule (bytes.slice msg (Octets at) (Octets (+ at 64))))
+            (constants))))))
+
+  (fn constants () Words
+    (words_join (constants_1)
+      (words_join (constants_2) (words_join (constants_3) (constants_4)))))
+
+  (fn constants_1 () Words
+    (Words (u32.of 1116352408)
+      (Words (u32.of 1899447441)
+        (Words (u32.of 3049323471)
+          (Words (u32.of 3921009573)
+            (Words (u32.of 961987163)
+              (Words (u32.of 1508970993)
+                (Words (u32.of 2453635748)
+                  (Words (u32.of 2870763221)
+                    (Words (u32.of 3624381080)
+                      (Words (u32.of 310598401)
+                        (Words (u32.of 607225278)
+                          (Words (u32.of 1426881987)
+                            (Words (u32.of 1925078388)
+                              (Words (u32.of 2162078206)
+                                (Words (u32.of 2614888103)
+                                  (Words (u32.of 3248222580) (NoWords))))))))))))))))))
+
+  (fn constants_2 () Words
+    (Words (u32.of 3835390401)
+      (Words (u32.of 4022224774)
+        (Words (u32.of 264347078)
+          (Words (u32.of 604807628)
+            (Words (u32.of 770255983)
+              (Words (u32.of 1249150122)
+                (Words (u32.of 1555081692)
+                  (Words (u32.of 1996064986)
+                    (Words (u32.of 2554220882)
+                      (Words (u32.of 2821834349)
+                        (Words (u32.of 2952996808)
+                          (Words (u32.of 3210313671)
+                            (Words (u32.of 3336571891)
+                              (Words (u32.of 3584528711)
+                                (Words (u32.of 113926993)
+                                  (Words (u32.of 338241895) (NoWords))))))))))))))))))
+
+  (fn constants_3 () Words
+    (Words (u32.of 666307205)
+      (Words (u32.of 773529912)
+        (Words (u32.of 1294757372)
+          (Words (u32.of 1396182291)
+            (Words (u32.of 1695183700)
+              (Words (u32.of 1986661051)
+                (Words (u32.of 2177026350)
+                  (Words (u32.of 2456956037)
+                    (Words (u32.of 2730485921)
+                      (Words (u32.of 2820302411)
+                        (Words (u32.of 3259730800)
+                          (Words (u32.of 3345764771)
+                            (Words (u32.of 3516065817)
+                              (Words (u32.of 3600352804)
+                                (Words (u32.of 4094571909)
+                                  (Words (u32.of 275423344) (NoWords))))))))))))))))))
+
+  (fn constants_4 () Words
+    (Words (u32.of 430227734)
+      (Words (u32.of 506948616)
+        (Words (u32.of 659060556)
+          (Words (u32.of 883997877)
+            (Words (u32.of 958139571)
+              (Words (u32.of 1322822218)
+                (Words (u32.of 1537002063)
+                  (Words (u32.of 1747873779)
+                    (Words (u32.of 1955562222)
+                      (Words (u32.of 2024104815)
+                        (Words (u32.of 2227730452)
+                          (Words (u32.of 2361852424)
+                            (Words (u32.of 2428436474)
+                              (Words (u32.of 2756734187)
+                                (Words (u32.of 3204031479)
+                                  (Words (u32.of 3329325298) (NoWords))))))))))))))))))
+
+  (fn initial () State
+    (make State
+      (a (u32.of 1779033703))
+      (b (u32.of 3144134277))
+      (c (u32.of 1013904242))
+      (d (u32.of 2773480762))
+      (e (u32.of 1359893119))
+      (f (u32.of 2600822924))
+      (g (u32.of 528734635))
+      (h (u32.of 1541459225))))
+
+  ; --- the answer, and how to read it ----------------------------------------
+  (fn word_bytes ((w U32) (out Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat out
+      (bytes.concat (bytes.of (byte_of_word w 24))
+        (bytes.concat (bytes.of (byte_of_word w 16))
+          (bytes.concat (bytes.of (byte_of_word w 8)) (bytes.of (byte_of_word w 0)))))))
+
+  (fn state_bytes ((s State) (out Bytes)) Bytes
+    (uses Alloc)
+    (word_bytes (get s h)
+      (word_bytes (get s g)
+        (word_bytes (get s f)
+          (word_bytes (get s e)
+            (word_bytes (get s d)
+              (word_bytes (get s c) (word_bytes (get s b) (word_bytes (get s a) out)))))))))
+
+  (fn digest ((msg Bytes)) Bytes
+    (uses Alloc)
+    (let whole (padded msg)
+      (state_bytes (digested whole 0 (+ 1 (unwrap (bytes.len whole))) (initial))
+        (str.encode ""))))
+
+  ; Hexadecimal, because that is the form every published vector is written in. There is
+  ; no way to index a `Str`, so the digits are a decision rather than a lookup.
+  (fn hex_digit ((n Int)) Str
+    (if (= n 0)
+      "0"
+      (if (= n 1)
+        "1"
+        (if (= n 2)
+          "2"
+          (if (= n 3)
+            "3"
+            (if (= n 4)
+              "4"
+              (if (= n 5)
+                "5"
+                (if (= n 6)
+                  "6"
+                  (if (= n 7)
+                    "7"
+                    (if (= n 8)
+                      "8"
+                      (if (= n 9)
+                        "9"
+                        (if (= n 10)
+                          "a"
+                          (if (= n 11)
+                            "b"
+                            (if (= n 12) "c" (if (= n 13) "d" (if (= n 14) "e" "f"))))))))))))))))
+
+  (fn hex_byte ((b U8)) Str
+    (uses Alloc)
+    (concat (hex_digit (int.of (bit.shr b 4))) (hex_digit (int.of (bit.and b (u8.of 15))))))
+
+  (fn byte_of ((data Bytes) (at Int)) U8
+    (match (bytes.at data (Octets at)) ((None) (u8.of 0)) ((Some b) b)))
+
+  (fn hex ((data Bytes) (at Int) (left Int) (out Str)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len data)) at))
+      out
+      (hex data (+ at 1) (- left 1) (concat out (hex_byte (byte_of data at))))))
+
+  (fn hex_digest ((msg Bytes)) Str
+    (uses Alloc)
+    (let out (digest msg) (hex out 0 (unwrap (bytes.len out)) "")))
+
+  (fn hex_of_text ((text Str)) Str
+    (uses Alloc)
+    (hex_digest (str.encode text)))
+
+  ; --- the published vectors -------------------------------------------------
+  ; FIPS 180-4 Appendix B and the NESSIE/NIST example set. The first two are the ones
+  ; every implementation is checked against; the third is 56 bytes, which is exactly the
+  ; length that pushes the padding into a second block, and the fourth is 64.
+  (test "the empty message" (str.eq (hex_of_text "") "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
+
+  (test "abc" (str.eq (hex_of_text "abc") "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+
+  (test "one byte" (str.eq (hex_of_text "a") "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"))
+
+  (test "fifty-six bytes, so the length does not fit in the first block" (str.eq (hex_of_text "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"))
+
+  (test "sixty-four bytes, so a whole second block is padding" (str.eq (hex_of_text "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno") "2ff100b36c386c65a1afc462ad53e25479bec9498ed00aa5a04de584bc25301b"))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq (print (hex_of_text "")) (print (hex_of_text "abc")))))

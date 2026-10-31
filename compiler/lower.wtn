@@ -1,0 +1,1337 @@
+; Witness to WebAssembly, the part that reads a program.
+;
+; compiler/emit.wtn writes modules; this decides what to write. It walks the tree of each
+; function and produces the instructions for it, in the one representation the backend
+; has: every value is a 64-bit integer. A number, a `Bool` (0 or 1), a pointer into linear
+; memory and the address of a string are all one i64, which is what lets a generic
+; function and an `Option` of anything share their code, and lets a newtype disappear
+; entirely: `(Seconds 5)` and `(unwrap s)` compile to nothing.
+;
+; Values that are not numbers live in memory, in 8-byte words:
+;
+;   a variant with fields   [id][field]...     `id` numbers every variant of every enum
+;   a variant without       the address of a one-word cell holding its id, shared
+;   a record                [field]...         in declaration order, no header
+;   Str and Bytes           [length][bytes...] length in bytes
+;
+; Memory is never freed: a bump pointer moves forward. That is enough to compile the
+; compiler (docs/ROADMAP.md measures the allocation it needs) and not enough to run
+; anything long, which is the reference-counting item of the plan.
+;
+; What a width means is decided here, from the type of an operand: `+` on an `I32` is the
+; instruction because the prover has shown it stays in range, `wrap.add` is the
+; instruction and then a pull back into the width, and an `Int` -- which has no width --
+; is refused by name. A comparison is unsigned for a `U64` and signed otherwise, because
+; every narrower unsigned type is kept zero-extended and every signed one sign-extended.
+;
+; Anything this does not yet compile is refused with no output, saying what it was. The
+; evidence is tests/test_lower.py: programs are accepted by the Python checker, compiled,
+; loaded by node and called over a spread of inputs, and every answer is compared with
+; the interpreter's.
+;
+;   witness run compiler/lower.wtn --grant Alloc,Console
+(module lower
+  (use "wtn:b58d6e14d598fb77cc542c47a927239eac9d720ff370d57dde6a5eba4d5d1d31" as i64_div_s)
+
+  (use "wtn:2e72a0f48c6cd5f0e08d28b55d6e48bc9c399ae3f2c1695ab41f749eff5d140d" as i64_rem_s)
+
+  (use "wtn:89c9d51d608e0f05ec1b6a9446065fd5aab0f9717cdc63c015f0931932c66a32" as index_add)
+
+  (use "wtn:5065354d8960ba17d051e013ace8626175524c62a26eea0b1aaa4b2c805e8788" as index_sub)
+
+  (use "wtn:34755009e5ddf79f1d4873f8fe58edeb444cadbc739829e7523c5138fbdf2ff6" as index_mul)
+
+  (use "wtn:9b36943528bdd559dc090aae9c02bcd570de06b5001e0b564b8a0caaa3e57164" as index_div)
+
+  (use "wtn:06843d0d71170625bfe7977ecdfbccbaf85813ca655e002afc3006366f08bcb8"
+    as
+    index_to_str)
+
+  (use "wtn:daaf58ec489dceb48bc154d6ea45b4db93aeb4d3febc10da4068aa0f5b7150e3" as Chunks)
+
+  (use "wtn:e7385f0e53b6ca47eff4c4b04071f761976263bf4164262126f097d6ea649bb1" as joined)
+
+  (use "wtn:a21c39d745ed071e8a191a37f70dd1779e3f66cef78971e75cc5db8d15985d3a" as Ins)
+
+  (use "wtn:1073bcf7f2ec07adcc09eb7c2e8fe48e9f9e9761a767076f6172edba3db8cde8" as Inss)
+
+  (use "wtn:780cd5f1caffd09ae27df62731b93b0f47c18f7b93487643ce22510a7c5f029b" as Func)
+
+  (use "wtn:3e591891f9cf54232e04bb14b46fe1ad8efe8c82e1ddad2a481589bba3844f43" as Funcs)
+
+  (use "wtn:aaa5788594cd2f68165abd0f2e6560c4aa6aaf92e09822948cc887f7cd927be5" as Module)
+
+  (use "wtn:2246c36031ae9d98c0dcb67dfc9591483d4b9f520cbeedf2355dd9208a84d3ea" as Import)
+
+  (use "wtn:746b7af1483e2ad3bac5bd48a927f405dda763ad2e13285b41298d2d268a366f" as Imports)
+
+  (use "wtn:6049eb96cd5bb0261e93f3b63d858e9295b28d4454c9d335d6fc6b7357255c97" as Segment)
+
+  (use "wtn:1d8850cc1eac3078061af0c4abac9ffb8c04c7f625724d647535443ad3cd3899" as Segments)
+
+  (use "wtn:320dada2f786552b556d4d808782f8a42778e0dff5bd32206bfb6fd346fa5791" as encoded)
+
+  (use "wtn:dc64f3a1e2454c942a39c661654b712edf5608405a2ecfd55e7fbd8528fffffc" as inss_join)
+
+  (use "wtn:b39ace52277dbf2d77bb138be2fa632f7a4fd0334d24f209d9bbe1bcfc1bc7f8" as inss_one)
+
+  (use "wtn:e4c149ba3f059c4ca4c1315a32cc797ea261b37ca748c63d8fdeffa4d99f805c" as const)
+
+  (use "wtn:bb0f678baeea7519218f358553ead8eb2d912e89f25ccd92149e48c4becd55a8" as local_get)
+
+  (use "wtn:c78c468a3c6b87cafc6941344f76922c8acef37928bc2aa1295c2928bc2d52ca" as local_set)
+
+  (use "wtn:2f6e6fb9ae2b985873e1da37a007a2de5c00aebd0f4b9e10f26f4364348a3ec9" as i32_wrap)
+
+  (use "wtn:60e04221f55a81090a4ec27166c65de3808c91db99bd66ce95b8f46aa739fcaa"
+    as
+    i64_extend_u)
+
+  (use "wtn:d6b757c223d307c2aed69a316b3ba21c7cfddd375d3f71187e286f9cab632feb" as i64_eq)
+
+  (use "wtn:7eabcc9f94d563ca363e2b4362c2fd951fc4b074530fc82f672c84f22186d262" as i64_ne)
+
+  (use "wtn:96de543fd141647b7f39a730a0f5a12bd7b355c6d14b8a5837b812f6d32b1879" as i64_add)
+
+  (use "wtn:57fb329d056c439d3cd4e002778ced72febf70629673bbcedbfe7bb56d734368" as i64_sub)
+
+  (use "wtn:c0960fa9c3eeea46acf3004b39016b7dd9ee2e751bf123d451e0e055659f7198" as i64_mul)
+
+  (use "wtn:fed19b07b6d484a2e7ad581a15e660ed30bbb5d78d0c39fa3b27259c488ac176" as i64_and)
+
+  (use "wtn:1948673243fb0fe7991007a771231f77a657ac760ee91c8ec1ba132b458c6156" as i64_or)
+
+  (use "wtn:2809e729af0a73196cbc9bc8808cc0927fbea36df0caf9a6ea763c4e61da4b60" as i64_xor)
+
+  (use "wtn:9bebcaef44ec0c28e1641464cfe242e9c90aa105c6a9b2df703789529d456f88" as i64_shl)
+
+  (use "wtn:f184a43aa12a21c423b7798eea27065a8f039808515bc576be6670b9b76280f9" as i64_shr_u)
+
+  (use "wtn:ee2bc4fb5f9846f3b5fc4323f5c2aa9de518cb6ededfed5da39b6230915995eb" as i64_shr_s)
+
+  (use "wtn:faa84aa5a0431aeaf44ec05e82d426c9e74bccdc1716450153cf0fad9b82069c" as i64_lt_s)
+
+  (use "wtn:5352d978839d8dbb271fb7e413d18bd803a8c65cd73441f5ddbb332856a4404a" as i64_lt_u)
+
+  (use "wtn:e07b7eec90974999ff3afdc47501adfce68dc4287c8733d0e0a09d5f479be8f3" as i64_le_s)
+
+  (use "wtn:67692ad1cecdf86c881c34e1ff4238ae72ca745843c281767c04db348dec3b11" as i64_le_u)
+
+  (use "wtn:1a8836b61bfb81713af0d1dc5e1dc7cc2be04ea7c7b935e241a79742fbfde7b2" as i64_ge_u)
+
+  (use "wtn:984c550c73e730d53e2a1befcf24950d5d37f25efb7501504a67cbe5b0b7dd4c" as i64_eqz)
+
+  (use "wtn:60193cd843aec31ec4fcc945f07e1e15fceda7dd45245b57c1b4d75ba9b93522"
+    as
+    i64_extend8_s)
+
+  (use "wtn:0ed3123dbf1c7d33cb739f6ffdc4222fbd9f83a18ae7e5ebaf587fd4044ad8e7"
+    as
+    i64_extend16_s)
+
+  (use "wtn:7d3d1d2b462031f600d0f926d081adbae80536b3d7ac2b51596af0e6db87e73c"
+    as
+    i64_extend32_s)
+
+  (use "wtn:658f1f7c16657d10a6042117b9e035110a9807ad80e00fec2fb77ab89db72de3" as load64)
+
+  (use "wtn:fc6b7365e47bd0f4e52a92cfacb4561fec2cff5517ed5b08494885547445971b" as store64)
+
+  (use "wtn:7f605767659cf91d13d37c9c4a00f74ccb3f54984f19f8a705c4f0eafcbf8235" as drop)
+
+  (use "wtn:08e0439aa38af9ddf0cc1fdc98a91472cc2be0713e490ae56cb74e978aea2496"
+    as
+    unreachable)
+
+  (use "wtn:1b187b44a1927345a3ccd05a59a6c02555dce0c1d5c02da6a9b5d0d8af6bd875"
+    as
+    index_alloc)
+
+  (use "wtn:49b684e8ee3013f183f513c29b4038667e20f83f84bc04598eab5c4a661d07d0" as index_new)
+
+  (use "wtn:559e10b924501bc19db0ba6307ae8ce8db93524e959d8b2f671052934eab1cba"
+    as
+    index_concat)
+
+  (use "wtn:dc02872acd93206b3e1b21cd2366bdb3225e767c9284f3f35c726c9c4e602c3a" as index_eq)
+
+  (use "wtn:2167e1857a010cc64e061a5f5d28167dc3607d27dda414a19602a077b9bd0b16" as index_at)
+
+  (use "wtn:96e136769a0ba142df05391c9a135da076c45ac662703baad63c6fc882211455"
+    as
+    index_slice)
+
+  (use "wtn:570d8a7b17013b5704cc8a0c9c21d20f9cebce9ee0aff189a1623c95ad169f5d" as index_of)
+
+  (use "wtn:cd4cc382364f89e8d98dcea27516fe748de43225922a64e06ee9f496054de6de" as first_user)
+
+  (use "wtn:af98b7e00058a49e9aa5b9e1f7a88749d828c28c1f37b983f259b60dcacf3617" as runtime)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:8f001b8eb331c35b82070b925765a08ae8e67c3f0971edbcf672934f1e75dea3" as Trees)
+
+  (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:8b21cf36641449b0189337a07c77f45c96aee5f01ac1b4bea685eccc7b7b07f5" as named)
+
+  (use "wtn:899e21eb94eb82caaa0d2a3ac52dccd80eb8c4e238c6aa55cd5b7c73f92faad1" as type_of)
+
+  (use "wtn:c3a8f9595b151bc6b2d2b1dbc0e4635aea50e2084f3044491d404624520e57b0" as expr_type)
+
+  (use "wtn:5508c7d96fa2d42431d9f97870d408804428e2a159150591209172966b542804" as Locals)
+
+  (use "wtn:b46746af4939ea24630f986c53614000661ba3b268ffc17d7a3ee0e7dfccca73" as unknown)
+
+  (use "wtn:31171d9f60946b8e64202a837c2bf545b46de9023f823212b4646b1bdf5a4dee" as subst_all)
+
+  (use "wtn:c6b12f9f76d7b8009f10375465b08d69fa06928a90735ee2b0430696c173daf0" as prelude)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b"
+    as
+    module_items)
+
+  (use "wtn:98fea12a9af946d5c4ae7c3d12faf228d5a20503032413c6fe97f59e7f540375"
+    as
+    env_with_prelude)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  ; --- what lowering is told ---------------------------------------------------
+  ; The functions of the module (name, index in the module, parameter count), and the
+  ; variants of every enum (name, id, how many fields it carries).
+  (enum Fns (NoFns) (Fns (name Str) (index U32) (params U32) (rest Fns)))
+
+  (enum Vars (NoVars) (Vars (name Str) (id U32) (arity U32) (rest Vars)))
+
+  ; `here` is the function being lowered, which is what makes a call to it in tail
+  ; position a jump.
+  (record Ctx
+    (env Env)
+    (fns Fns)
+    (vars Vars)
+    (pool Pool)
+    (hosts Hosts)
+    (here Str)
+    (arity U32))
+
+  (fn fn_named ((fs Fns) (name Str)) (Option Fns)
+    (match fs
+      ((NoFns) (None))
+      ((Fns n i p rest) (if (str.eq n name) (Some fs) (fn_named rest name)))))
+
+  (fn var_named ((vs Vars) (name Str)) (Option Vars)
+    (match vs
+      ((NoVars) (None))
+      ((Vars n i a rest) (if (str.eq n name) (Some vs) (var_named rest name)))))
+
+  ; The names in scope and the local each lives in. A binder takes the next index after
+  ; those in scope, so siblings reuse indices and no counter is passed around. A name of
+  ; "" is a temporary nobody can refer to.
+  (enum Slots (NoSlots) (Slot (name Str) (index U32) (ty Ty) (rest Slots)))
+
+  (fn slots_count ((s Slots)) U32
+    (match s
+      ((NoSlots) (u32.of 0))
+      ((Slot n i t rest) (wrap.add (u32.of 1) (slots_count rest)))))
+
+  (fn slot_named ((s Slots) (name Str)) (Option Slots)
+    (match s
+      ((NoSlots) (None))
+      ((Slot n i t rest) (if (str.eq n name) (Some s) (slot_named rest name)))))
+
+  (fn locals_of ((s Slots)) Locals
+    (match s ((NoSlots) (NoLocals)) ((Slot n i t rest) (Local n t (locals_of rest)))))
+
+  ; --- what lowering answers -----------------------------------------------------
+  ; The instructions, how many locals they need (the highest index plus one), and the
+  ; first thing that could not be compiled. Lowering carries on after a fault so that the
+  ; code below never has to be written as a chain of matches on a `Result`.
+  (record Lowered (code Inss) (top U32) (fault (Option Fault)))
+
+  (fn done ((code Inss) (top U32)) Lowered
+    (make Lowered (code code) (top top) (fault (None))))
+
+  (fn bad ((why Str)) Lowered
+    (make Lowered (code (NoInss)) (top (u32.of 0)) (fault (Some (fault "lower" why)))))
+
+  (fn failed ((f Fault)) Lowered
+    (make Lowered (code (NoInss)) (top (u32.of 0)) (fault (Some f))))
+
+  (fn greater ((a U32) (b U32)) U32 (if (< a b) b a))
+
+  (fn first_fault ((a (Option Fault)) (b (Option Fault))) (Option Fault)
+    (match a ((Some f) (Some f)) ((None) b)))
+
+  ; One after the other: the code of both, the locals of either, the first fault.
+  (fn both ((a Lowered) (b Lowered)) Lowered
+    (make Lowered
+      (code (inss_join (get a code) (get b code)))
+      (top (greater (get a top) (get b top)))
+      (fault (first_fault (get a fault) (get b fault)))))
+
+  (fn then ((a Lowered) (more Inss)) Lowered
+    (make Lowered
+      (code (inss_join (get a code) more))
+      (top (get a top))
+      (fault (get a fault))))
+
+  (fn naming ((t Tree)) (Result Str Fault)
+    (uses Alloc)
+    (match t
+      ((Node items) (Err (fault "lower" "a name was expected, and a list was found")))
+      ((Leaf text quoted) (named text))))
+
+  (fn refusing ((what Str)) Lowered
+    (uses Alloc)
+    (bad (concat what " is not compiled yet")))
+
+  ; --- types ------------------------------------------------------------------------
+  (fn type_here ((c Ctx) (s Slots) (t Tree)) (Result Ty Fault)
+    (uses Alloc)
+    (expr_type (get c env) (locals_of s) t))
+
+  ; Bringing a result back into a width after an operation that may have left it. A
+  ; signed width is sign-extended and an unsigned one zero-extended, which is the form
+  ; every value of that type is kept in.
+  (fn narrowed ((base Str)) Inss
+    (if (str.eq base "I8")
+      (inss_one (i64_extend8_s))
+      (if (str.eq base "I16")
+        (inss_one (i64_extend16_s))
+        (if (str.eq base "I32")
+          (inss_one (i64_extend32_s))
+          (if (str.eq base "U8")
+            (Inss (const (i64.of 255)) (inss_one (i64_and)))
+            (if (str.eq base "U16")
+              (Inss (const (i64.of 65535)) (inss_one (i64_and)))
+              (if (str.eq base "U32")
+                (Inss (const (i64.of 4294967295)) (inss_one (i64_and)))
+                (NoInss))))))))
+
+  ; The number of bits in a fixed width, or 0 for anything else.
+  (fn bits_of ((base Str)) I64
+    (if (or (str.eq base "I8") (str.eq base "U8"))
+      (i64.of 8)
+      (if (or (str.eq base "I16") (str.eq base "U16"))
+        (i64.of 16)
+        (if (or (str.eq base "I32") (str.eq base "U32"))
+          (i64.of 32)
+          (if (or (str.eq base "I64") (str.eq base "U64")) (i64.of 64) (i64.of 0))))))
+
+  ; --- numbers --------------------------------------------------------------------------
+  ; A decimal integer with its sign. Each digit takes one step, and the budget is what
+  ; lets the prover see the walk end; a literal longer than the budget is not a number
+  ; this compiler reads.
+  (fn digits_of ((b Bytes) (at U32) (left U32) (acc I64)) (Option I64)
+    (if (or (<= left (u32.of 0)) (<= (unwrap (bytes.len b)) (int.of at)))
+      (Some acc)
+      (match (bytes.at b (Octets (int.of at)))
+        ((None) (Some acc))
+        ((Some d) (if (and (<= (u8.of 48) d) (<= d (u8.of 57))) (digits_of b (wrap.add at (u32.of 1)) (- left (u32.of 1)) (wrap.add (wrap.mul acc (i64.of 10)) (i64.of (wrap.sub d (u8.of 48))))) (None))))))
+
+  (fn number_of ((b Bytes)) (Option I64)
+    (match (bytes.at b (Octets 0))
+      ((None) (None))
+      ((Some first) (if (= first (u8.of 45)) (match (digits_of b (u32.of 1) (u32.of 20) (i64.of 0)) ((None) (None)) ((Some n) (Some (wrap.sub (i64.of 0) n)))) (if (and (<= (u8.of 48) first) (<= first (u8.of 57))) (digits_of b (u32.of 0) (u32.of 20) (i64.of 0)) (None))))))
+
+  ; --- reading the shapes of forms ---------------------------------------------------------
+  (fn trees_count ((ts Trees)) U32
+    (match ts
+      ((NoTrees) (u32.of 0))
+      ((Trees h rest) (wrap.add (u32.of 1) (trees_count rest)))))
+
+  (record Two (first Tree) (second Tree))
+
+  (record Three (first Tree) (second Tree) (third Tree))
+
+  (fn two_of ((ts Trees)) (Option Two)
+    (match ts
+      ((NoTrees) (None))
+      ((Trees a r1) (match r1 ((NoTrees) (None)) ((Trees b r2) (match r2 ((NoTrees) (Some (make Two (first a) (second b)))) ((Trees x y) (None))))))))
+
+  (fn three_of ((ts Trees)) (Option Three)
+    (match ts
+      ((NoTrees) (None))
+      ((Trees a r1) (match r1 ((NoTrees) (None)) ((Trees b r2) (match r2 ((NoTrees) (None)) ((Trees x r3) (match r3 ((NoTrees) (Some (make Three (first a) (second b) (third x)))) ((Trees y z) (None))))))))))
+
+  ; --- static data ---------------------------------------------------------------------------
+  ; The first word of memory that holds anything is 16. From there, one word for each
+  ; variant id: the cell a variant with no fields is the address of. Strings follow.
+  (fn cells_base () U32 (u32.of 16))
+
+  (fn cell_of ((id U32)) U32 (wrap.add (cells_base) (wrap.mul id (u32.of 8))))
+
+  (enum Texts (NoTexts) (Texts (text Bytes) (rest Texts)))
+
+  (enum Pool (NoPool) (Pool (text Bytes) (addr U32) (rest Pool)))
+
+  (fn pool_find ((p Pool) (text Bytes)) (Option U32)
+    (match p
+      ((NoPool) (None))
+      ((Pool t a rest) (if (bytes.eq t text) (Some a) (pool_find rest text)))))
+
+  ; `\n`, `\t`, `\"` and `\\` inside a string literal; the reader keeps the text as written.
+  (fn unescaped ((b Bytes) (at U32) (left U32) (out Bytes)) Bytes
+    (uses Alloc)
+    (if (<= left (u32.of 0))
+      out
+      (if (<= (unwrap (bytes.len b)) (int.of at))
+        out
+        (unescaped_step b at (- left (u32.of 1)) out (peek b at)))))
+
+  ; One byte: a backslash takes the next byte with it, translated.
+  (fn unescaped_step ((b Bytes) (at U32) (left U32) (out Bytes) (c U8)) Bytes
+    (uses Alloc)
+    (if (= c (u8.of 92))
+      (unescaped b
+        (wrap.add at (u32.of 2))
+        left
+        (bytes.concat out (bytes.of (escape_of (peek b (wrap.add at (u32.of 1)))))))
+      (unescaped b (wrap.add at (u32.of 1)) left (bytes.concat out (bytes.of c)))))
+
+  (fn peek ((b Bytes) (at U32)) U8
+    (match (bytes.at b (Octets (int.of at))) ((None) (u8.of 0)) ((Some c) c)))
+
+  (fn escape_of ((e U8)) U8
+    (if (= e (u8.of 110)) (u8.of 10) (if (= e (u8.of 116)) (u8.of 9) e)))
+
+  (fn text_of_literal ((raw Bytes)) Bytes
+    (uses Alloc)
+    (unescaped raw (u32.of 0) (octets_of raw) (no_bytes)))
+
+  (fn octets_of ((b Bytes)) U32
+    (let n (unwrap (bytes.len b)) (if (<= n 4294967295) (u32.of n) (u32.of 0))))
+
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  ; Every string literal of a tree, as it will lie in memory.
+  (fn literals_in ((t Tree) (acc Texts)) Texts
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (if quoted (Texts (text_of_literal text) acc) acc))
+      ((Node items) (match (bytes_literal items) ((Some b) (Texts b acc)) ((None) (literals_in_all items acc))))))
+
+  ; The bytes a `(bytes "hex")` form stands for, if this is one.
+  (fn bytes_literal ((items Trees)) (Option Bytes)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (None))
+      ((Trees h rest) (match h ((Node inner) (None)) ((Leaf htext hquoted) (if (or hquoted (not (bytes.eq htext (str.encode "bytes")))) (None) (bytes_arg rest)))))))
+
+  (fn bytes_arg ((rest Trees)) (Option Bytes)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (None))
+      ((Trees a more) (match more ((Trees extra others) (None)) ((NoTrees) (match a ((Node inner) (None)) ((Leaf atext aquoted) (if aquoted (let t (text_of_literal atext) (hex_bytes t (u32.of 0) (octets_of t) (no_bytes))) (None)))))))))
+
+  (fn hex_value ((c U8)) (Option U8)
+    (if (and (<= (u8.of 48) c) (<= c (u8.of 57)))
+      (Some (wrap.sub c (u8.of 48)))
+      (if (and (<= (u8.of 97) c) (<= c (u8.of 102)))
+        (Some (wrap.add (wrap.sub c (u8.of 97)) (u8.of 10)))
+        (if (and (<= (u8.of 65) c) (<= c (u8.of 70)))
+          (Some (wrap.add (wrap.sub c (u8.of 65)) (u8.of 10)))
+          (None)))))
+
+  ; Pairs of digits to bytes; `left` is the budget, one per pair.
+  (fn hex_bytes ((raw Bytes) (at U32) (left U32) (out Bytes)) (Option Bytes)
+    (uses Alloc)
+    (if (<= (unwrap (bytes.len raw)) (int.of at))
+      (Some out)
+      (if (<= left (u32.of 0))
+        (None)
+        (match (hex_value (peek raw at))
+          ((None) (None))
+          ((Some hi) (match (hex_value (peek raw (wrap.add at (u32.of 1)))) ((None) (None)) ((Some lo) (hex_bytes raw (wrap.add at (u32.of 2)) (- left (u32.of 1)) (bytes.concat out (bytes.of (wrap.add (wrap.mul hi (u8.of 16)) lo)))))))))))
+
+  (fn literals_in_all ((ts Trees) (acc Texts)) Texts
+    (uses Alloc)
+    (match ts ((NoTrees) acc) ((Trees h rest) (literals_in_all rest (literals_in h acc)))))
+
+  ; A word's worth of padding: bytes rounded up to a multiple of eight.
+  (fn rounded ((n U32)) U32 (bit.and (wrap.add n (u32.of 7)) (bit.not (u32.of 7))))
+
+  (fn pooled ((ts Texts) (pool Pool) (next U32)) Pool
+    (match ts
+      ((NoTexts) pool)
+      ((Texts t rest) (match (pool_find pool t) ((Some a) (pooled rest pool next)) ((None) (pooled rest (Pool t next pool) (wrap.add next (wrap.add (u32.of 8) (rounded (octets_of t))))))))))
+
+  ; Where the pool ends: the address of the first free byte after the last entry.
+  (fn pool_end ((p Pool) (floor U32)) U32
+    (match p
+      ((NoPool) floor)
+      ((Pool t a rest) (greater (wrap.add a (wrap.add (u32.of 8) (rounded (octets_of t)))) (pool_end rest floor)))))
+
+  ; --- bytes of a word -----------------------------------------------------------------------
+  (fn little ((n U32) (shift U32)) U8
+    (let part (bit.and (bit.shr n (int.of shift)) (u32.of 255))
+      (if (<= part (u32.of 255)) (u8.of part) (u8.of 0))))
+
+  ; A 32-bit value as the eight bytes a word holds, least significant first.
+  (fn word_bytes ((n U32)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (little n (u32.of 0)))
+      (bytes.concat (bytes.of (little n (u32.of 8)))
+        (bytes.concat (bytes.of (little n (u32.of 16)))
+          (bytes.concat (bytes.of (little n (u32.of 24)))
+            (bytes.concat (bytes.of (u8.of 0))
+              (bytes.concat (bytes.of (u8.of 0))
+                (bytes.concat (bytes.of (u8.of 0)) (bytes.of (u8.of 0))))))))))
+
+  ; --- expressions ---------------------------------------------------------------------------
+  ; Every function from here to the end of the lowering takes `fuel`, a budget that falls at
+  ; each step, because a tree has no structure the prover can see a handler descend. A
+  ; program nested deeper than the budget is refused, not looped on.
+  (fn too_deep () Lowered (bad "the program nests deeper than the compiler follows"))
+
+  (fn lower ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (t Tree)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1)) (lower_tree next c s depth tail t))))
+
+  ; The shape of a tree, which is a word, a string, or a call; kept apart from `lower` so
+  ; that the step down in `fuel` is taken where the prover can still see it.
+  (fn lower_tree ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (t Tree)) Lowered
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (if quoted (lower_string c text) (lower_word c s text)))
+      ((Node items) (match items ((NoTrees) (refusing "an empty list")) ((Trees head rest) (match head ((Node inner) (refusing "a call through a list")) ((Leaf htext hquoted) (match (named htext) ((Err f) (failed f)) ((Ok name) (lower_form fuel c s depth tail name rest))))))))))
+
+  (fn lower_string ((c Ctx) (raw Bytes)) Lowered
+    (uses Alloc)
+    (match (pool_find (get c pool) (text_of_literal raw))
+      ((None) (bad "a string literal that was not collected"))
+      ((Some a) (done (inss_one (const (i64.of a))) (u32.of 0)))))
+
+  (fn lower_word ((c Ctx) (s Slots) (text Bytes)) Lowered
+    (uses Alloc)
+    (match (named text)
+      ((Err f) (failed f))
+      ((Ok word) (if (str.eq word "true") (done (inss_one (const (i64.of 1))) (u32.of 0)) (if (str.eq word "false") (done (inss_one (const (i64.of 0))) (u32.of 0)) (if (str.eq word "unit") (done (inss_one (const (i64.of 0))) (u32.of 0)) (match (slot_named s word) ((Some found) (match found ((NoSlots) (bad "a name that is in scope and is not")) ((Slot n i t rest) (done (inss_one (local_get i)) (wrap.add i (u32.of 1)))))) ((None) (match (number_of text) ((Some n) (done (inss_one (const n)) (u32.of 0))) ((None) (bad (concat "no name `" (concat word "` is in scope")))))))))))))
+
+  (fn lower_all ((fuel U32) (c Ctx) (s Slots) (depth U32) (ts Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match ts
+          ((NoTrees) (done (NoInss) (u32.of 0)))
+          ((Trees t rest) (both (lower next c s depth false t) (lower_all next c s depth rest)))))))
+
+  (fn lower_form ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (if (str.eq name "if")
+          (lower_if next c s depth tail rest)
+          (if (str.eq name "let")
+            (lower_let next c s depth tail rest)
+            (if (str.eq name "seq")
+              (lower_seq next c s depth tail rest)
+              (if (str.eq name "match")
+                (lower_match next c s depth tail rest)
+                (if (str.eq name "make")
+                  (lower_make next c s depth rest)
+                  (if (str.eq name "get")
+                    (lower_get next c s depth rest)
+                    (if (str.eq name "with")
+                      (lower_with next c s depth rest)
+                      (if (str.eq name "unwrap")
+                        (lower_passing next c s depth rest)
+                        (if (str.eq name "declassify")
+                          (lower_declassify next c s depth rest)
+                          (if (str.eq name "bytes")
+                            (lower_bytes c rest)
+                            (lower_named next c s depth tail name rest))))))))))))))
+
+  ; `(bytes "6162")`: the pool holds the decoded bytes, laid out like any string.
+  (fn lower_bytes ((c Ctx) (rest Trees)) Lowered
+    (uses Alloc)
+    (match (bytes_arg rest)
+      ((None) (refusing "a Bytes literal is (bytes \"hex\")"))
+      ((Some b) (match (pool_find (get c pool) b) ((None) (bad "a Bytes literal that was not collected")) ((Some a) (done (inss_one (const (i64.of a))) (u32.of 0)))))))
+
+  ; `(unwrap x)` and a newtype's constructor are both just `x`: a newtype is its inner value.
+  (fn lower_passing ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match rest
+          ((NoTrees) (bad "this form takes one value"))
+          ((Trees t more) (match more ((NoTrees) (lower next c s depth false t)) ((Trees x y) (bad "this form takes one value"))))))))
+
+  ; `(declassify Label x)` changes the type and nothing else.
+  (fn lower_declassify ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match rest
+          ((NoTrees) (bad "a declassify takes a label and a value"))
+          ((Trees tag more) (lower_passing next c s depth more))))))
+
+  (fn lower_if ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (three_of rest)
+          ((None) (bad "an if takes a condition and two branches"))
+          ((Some parts) (let cond (lower next c s depth false (get parts first)) (let yes (lower next c s (wrap.add depth (u32.of 1)) tail (get parts second)) (let no (lower next c s (wrap.add depth (u32.of 1)) tail (get parts third)) (make Lowered (code (inss_join (get cond code) (Inss (i32_wrap) (inss_one (WIf true (get yes code) (get no code)))))) (top (greater (get cond top) (greater (get yes top) (get no top)))) (fault (first_fault (get cond fault) (first_fault (get yes fault) (get no fault)))))))))))))
+
+  (fn lower_let ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (three_of rest)
+          ((None) (bad "a let takes a name, a value and a body"))
+          ((Some parts) (match (naming (get parts first)) ((Err f) (failed f)) ((Ok name) (let at (slots_count s) (let value (lower next c s depth false (get parts second)) (let held (match (type_here c s (get parts second)) ((Ok ty) ty) ((Err f) (unknown))) (let body (lower next c (Slot name at held s) depth tail (get parts third)) (make Lowered (code (inss_join (get value code) (Inss (local_set at) (get body code)))) (top (greater (wrap.add at (u32.of 1)) (greater (get value top) (get body top)))) (fault (first_fault (get value fault) (get body fault)))))))))))))))
+
+  (fn lower_seq ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (ts Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match ts
+          ((NoTrees) (bad "a seq has nothing in it"))
+          ((Trees t rest) (match rest ((NoTrees) (lower next c s depth tail t)) ((Trees n more) (both (then (lower next c s depth false t) (inss_one (drop))) (lower_seq next c s depth tail rest)))))))))
+
+  ; --- calls ---------------------------------------------------------------------------------------
+  (fn lower_named ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (fn_named (get c fns) name)
+          ((Some found) (lower_call next c s depth tail found rest))
+          ((None) (match (var_named (get c vars) name) ((Some v) (lower_variant next c s depth v rest)) ((None) (match (newtype_of (get c env) name) ((Some n) (lower_passing next c s depth rest)) ((None) (lower_builtin next c s depth name rest))))))))))
+
+  ; Arguments left to right, then the call; or, for a call to the function being lowered
+  ; in tail position, the arguments are stored into its parameters and control goes back
+  ; to the top of the function. Every argument is evaluated before any parameter changes.
+  (fn lower_call ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (found Fns) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match found
+          ((NoFns) (bad "a function that is in the table and is not"))
+          ((Fns name index params more) (if (= (trees_count rest) params) (let args (lower_all next c s depth rest) (if (and tail (str.eq name (get c here))) (then args (inss_join (sets_down params) (inss_one (WBr depth)))) (then args (inss_one (WCall index))))) (bad (concat "a call to `" (concat name "` has the wrong number of arguments")))))))))
+
+  ; local.set of parameters n-1 down to 0.
+  (fn sets_down ((n U32)) Inss
+    (if (<= n (u32.of 0))
+      (NoInss)
+      (Inss (local_set (- n (u32.of 1))) (sets_down (- n (u32.of 1))))))
+
+  ; --- enums ---------------------------------------------------------------------------------------
+  ; A variant without fields is the address of its cell. One with fields is a block of the
+  ; id and then the fields, built into a temporary and left as its address.
+  (fn lower_variant ((fuel U32) (c Ctx) (s Slots) (depth U32) (v Vars) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match v
+          ((NoVars) (bad "a variant that is in the table and is not"))
+          ((Vars name id arity more) (if (= (trees_count rest) arity) (if (= arity (u32.of 0)) (done (inss_one (const (i64.of (cell_of id)))) (u32.of 0)) (let at (slots_count s) (let inside (Slot "" at (unknown) s) (let fields (lower_fields next c inside depth at rest (u32.of 8)) (make Lowered (code (inss_join (allocation (wrap.mul (wrap.add arity (u32.of 1)) (u32.of 8)) at) (inss_join (Inss (local_get at) (Inss (i32_wrap) (Inss (const (i64.of id)) (store64 (u32.of 0))))) (inss_join (get fields code) (inss_one (local_get at)))))) (top (greater (wrap.add at (u32.of 1)) (get fields top))) (fault (get fields fault))))))) (bad (concat "the variant `" (concat name "` has the wrong number of fields")))))))))
+
+  ; Reserve a block of that many bytes and keep its address in a local.
+  (fn allocation ((size U32) (at U32)) Inss
+    (Inss (const (i64.of size)) (Inss (WCall (index_alloc)) (inss_one (local_set at)))))
+
+  ; Each value stored into the block in `at`, from byte offset `offset` on.
+  (fn lower_fields ((fuel U32) (c Ctx) (s Slots) (depth U32) (at U32) (values Trees) (offset U32)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match values
+          ((NoTrees) (done (NoInss) (u32.of 0)))
+          ((Trees t more) (let value (lower next c s depth false t) (both (stored at value offset) (lower_fields next c s depth at more (wrap.add offset (u32.of 8))))))))))
+
+  (fn stored ((at U32) (value Lowered) (offset U32)) Lowered
+    (make Lowered
+      (code (inss_join (Inss (local_get at) (inss_one (i32_wrap))) (inss_join (get value code) (store64 offset))))
+      (top (get value top))
+      (fault (get value fault))))
+
+  ; --- records -----------------------------------------------------------------------------------
+  (fn init_value ((t Tree)) (Option Tree)
+    (match t
+      ((Leaf text quoted) (None))
+      ((Node items) (match items ((NoTrees) (None)) ((Trees n rest) (match rest ((Trees v none) (Some v)) ((NoTrees) (None))))))))
+
+  (fn init_name ((t Tree)) (Option Str)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (None))
+      ((Node items) (match items ((NoTrees) (None)) ((Trees n rest) (match n ((Leaf text quoted) (match (named text) ((Ok name) (Some name)) ((Err f) (None)))) ((Node inner) (None))))))))
+
+  (fn init_values ((ts Trees)) (Result Trees Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (Ok (NoTrees)))
+      ((Trees t rest) (match (init_value t) ((None) (Err (fault "lower" "a field is (name value)"))) ((Some v) (match (init_values rest) ((Err f) (Err f)) ((Ok others) (Ok (Trees v others)))))))))
+
+  (fn lower_make ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match rest
+          ((NoTrees) (bad "a make takes a record name and its fields"))
+          ((Trees n inits) (match (init_values inits) ((Err f) (failed f)) ((Ok values) (let at (slots_count s) (let inside (Slot "" at (unknown) s) (let fields (lower_fields next c inside depth at values (u32.of 0)) (make Lowered (code (inss_join (allocation (wrap.mul (trees_count values) (u32.of 8)) at) (inss_join (get fields code) (inss_one (local_get at))))) (top (greater (wrap.add at (u32.of 1)) (get fields top))) (fault (get fields fault)))))))))))))
+
+  (fn field_index ((fs RecordFields) (name Str) (at U32)) (Option U32)
+    (match fs
+      ((NoRecordFields) (None))
+      ((RecordFields n ty rest) (if (str.eq n name) (Some at) (field_index rest name (wrap.add at (u32.of 1)))))))
+
+  (fn fields_count ((fs RecordFields)) U32
+    (match fs
+      ((NoRecordFields) (u32.of 0))
+      ((RecordFields n ty rest) (wrap.add (u32.of 1) (fields_count rest)))))
+
+  (fn lower_get ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (two_of rest)
+          ((None) (bad "a get takes a record and a field"))
+          ((Some parts) (match (naming (get parts second)) ((Err f) (failed f)) ((Ok field) (match (type_here c s (get parts first)) ((Err f) (failed f)) ((Ok held) (match (record_of (get c env) (get held base)) ((None) (bad (concat "a get is on a record, and " (concat (get held base) " is not one")))) ((Some r) (match (field_index (get r fields) field (u32.of 0)) ((None) (bad (concat "no field named `" (concat field "`")))) ((Some i) (then (lower next c s depth false (get parts first)) (load64 (wrap.mul i (u32.of 8)))))))))))))))))
+
+  ; A copy of the record with some fields replaced, which is what a value that cannot
+  ; change has to mean. `old` and `new` are temporaries.
+  (fn lower_with ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match rest
+          ((NoTrees) (bad "a with takes a record and fields"))
+          ((Trees target inits) (match (type_here c s target) ((Err f) (failed f)) ((Ok held) (match (record_of (get c env) (get held base)) ((None) (bad "a with is on a record")) ((Some r) (let old (slots_count s) (let new (wrap.add old (u32.of 1)) (let inside (Slot "" new (unknown) (Slot "" old held s)) (let source (lower next c s depth false target) (let copy (with_fields next c inside depth old new (get r fields) inits (u32.of 0)) (make Lowered (code (inss_join (get source code) (inss_join (Inss (local_set old) (NoInss)) (inss_join (allocation (wrap.mul (fields_count (get r fields)) (u32.of 8)) new) (inss_join (get copy code) (inss_one (local_get new))))))) (top (greater (wrap.add new (u32.of 1)) (greater (get source top) (get copy top)))) (fault (first_fault (get source fault) (get copy fault))))))))))))))))))
+
+  (fn replacement ((inits Trees) (name Str)) (Option Tree)
+    (uses Alloc)
+    (match inits
+      ((NoTrees) (None))
+      ((Trees t rest) (match (init_name t) ((Some n) (if (str.eq n name) (init_value t) (replacement rest name))) ((None) (replacement rest name))))))
+
+  ; Each field of the record in declaration order: the new value where `inits` gives one,
+  ; otherwise the old record's.
+  (fn with_fields ((fuel U32) (c Ctx) (s Slots) (depth U32) (old U32) (new U32) (fs RecordFields) (inits Trees) (offset U32)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match fs
+          ((NoRecordFields) (done (NoInss) (u32.of 0)))
+          ((RecordFields n ty more) (both (match (replacement inits n) ((Some v) (stored new (lower next c s depth false v) offset)) ((None) (done (inss_join (Inss (local_get new) (inss_one (i32_wrap))) (inss_join (Inss (local_get old) (load64 offset)) (store64 offset))) (u32.of 0)))) (with_fields next c s depth old new more inits (wrap.add offset (u32.of 8)))))))))
+
+  ; --- match -------------------------------------------------------------------------------------------
+  (record ArmParts (variant Str) (binders Trees) (body Tree))
+
+  (fn arm_parts ((arm Tree)) (Option ArmParts)
+    (uses Alloc)
+    (match arm
+      ((Leaf text quoted) (None))
+      ((Node items) (match items ((NoTrees) (None)) ((Trees pattern more) (match more ((NoTrees) (None)) ((Trees body none) (match none ((Trees extra others) (None)) ((NoTrees) (match pattern ((Leaf ptext pquoted) (None)) ((Node pitems) (match pitems ((NoTrees) (None)) ((Trees head binders) (match head ((Node inner) (None)) ((Leaf vtext vquoted) (match (named vtext) ((Err f) (None)) ((Ok variant) (Some (make ArmParts (variant variant) (binders binders) (body body))))))))))))))))))))
+
+  (record Bound (code Inss) (slots Slots) (fault (Option Fault)))
+
+  (fn bound_fault ((s Slots) (f Fault)) Bound
+    (make Bound (code (NoInss)) (slots s) (fault (Some f))))
+
+  ; The binders of a pattern against the fields of the variant: each is read out of the
+  ; block in `held` into a local of its own.
+  (fn bind_fields ((held U32) (binders Trees) (tys Tys) (j U32) (s Slots)) Bound
+    (uses Alloc)
+    (match binders
+      ((NoTrees) (match tys ((NoTys) (make Bound (code (NoInss)) (slots s) (fault (None)))) ((Tys t more) (bound_fault s (fault "lower" "a pattern binds fewer names than the variant has fields")))))
+      ((Trees b others) (match tys ((NoTys) (bound_fault s (fault "lower" "a pattern binds more names than the variant has fields"))) ((Tys t more) (match (naming b) ((Err f) (bound_fault s f)) ((Ok name) (let at (slots_count s) (let after (bind_fields held others more (wrap.add j (u32.of 1)) (Slot name at t s)) (make Bound (code (inss_join (Inss (local_get held) (load64 (wrap.mul (wrap.add j (u32.of 1)) (u32.of 8)))) (Inss (local_set at) (get after code)))) (slots (get after slots)) (fault (get after fault))))))))))))
+
+  (fn lower_arm ((fuel U32) (c Ctx) (s Slots) (d EnumSignature) (given Tys) (depth U32) (tail Bool) (held U32) (arm Tree)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (arm_parts arm)
+          ((None) (bad "an arm is ((Variant binder...) body)"))
+          ((Some a) (match (variant_of d (get a variant)) ((None) (bad (concat "`" (concat (get a variant) "` is not a variant of that enum")))) ((Some v) (let bound (bind_fields held (get a binders) (subst_all (get v fields) (get d params) given) (u32.of 0) s) (match (get bound fault) ((Some f) (failed f)) ((None) (let body (lower next c (get bound slots) depth tail (get a body)) (make Lowered (code (inss_join (get bound code) (get body code))) (top (greater (slots_count (get bound slots)) (get body top))) (fault (get body fault))))))))))))))
+
+  ; Every arm but the last is a test on the tag and the rest hang off the `else`; the last
+  ; is taken without a test, because the match is exhaustive.
+  ; The tag of the block in `held` against an id: the first arm if they are equal, the
+  ; second if not.
+  (fn tagged_if ((held U32) (id U32) (yes Inss) (no Inss)) Inss
+    (inss_join (Inss (local_get held) (load64 (u32.of 0)))
+      (Inss (const (i64.of id)) (Inss (i64_eq) (inss_one (WIf true yes no))))))
+
+  (fn lower_arms ((fuel U32) (c Ctx) (s Slots) (d EnumSignature) (given Tys) (depth U32) (tail Bool) (held U32) (arms Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match arms
+          ((NoTrees) (done (inss_one (unreachable)) (u32.of 0)))
+          ((Trees arm more) (match more ((NoTrees) (lower_arm next c s d given depth tail held arm)) ((Trees following after) (match (arm_parts arm) ((None) (bad "an arm is ((Variant binder...) body)")) ((Some a) (match (var_named (get c vars) (get a variant)) ((None) (bad "an arm names a variant nobody declared")) ((Some found) (match found ((NoVars) (bad "a variant that is in the table and is not")) ((Vars vname id arity others) (let yes (lower_arm next c s d given (wrap.add depth (u32.of 1)) tail held arm) (let no (lower_arms next c s d given (wrap.add depth (u32.of 1)) tail held more) (make Lowered (code (tagged_if held id (get yes code) (get no code))) (top (greater (get yes top) (get no top))) (fault (first_fault (get yes fault) (get no fault)))))))))))))))))))
+
+  (fn lower_match ((fuel U32) (c Ctx) (s Slots) (depth U32) (tail Bool) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match rest
+          ((NoTrees) (bad "a match takes a value and its arms"))
+          ((Trees value arms) (match (type_here c s value) ((Err f) (failed f)) ((Ok seen) (match (enum_of (get c env) (get seen base)) ((None) (bad (concat "a match is on an enum, and " (concat (get seen base) " is not one")))) ((Some d) (let held (slots_count s) (let scrutinee (lower next c s depth false value) (let body (lower_arms next c (Slot "" held seen s) d (get seen args) depth tail held arms) (make Lowered (code (inss_join (get scrutinee code) (Inss (local_set held) (get body code)))) (top (greater (wrap.add held (u32.of 1)) (greater (get scrutinee top) (get body top)))) (fault (first_fault (get scrutinee fault) (get body fault))))))))))))))))
+
+  ; --- builtins --------------------------------------------------------------------------------------
+  (fn first_tree ((ts Trees)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees t more) (Some t))))
+
+  ; The base type of the first operand, which decides the width of an operation.
+  (fn base_of_first ((c Ctx) (s Slots) (ts Trees)) (Result Str Fault)
+    (uses Alloc)
+    (match (first_tree ts)
+      ((None) (Err (fault "lower" "this operation needs an operand")))
+      ((Some t) (match (type_here c s t) ((Err f) (Err f)) ((Ok ty) (Ok (get ty base)))))))
+
+  (fn is_conversion ((name Str)) Bool
+    (or (str.eq name "int.of")
+      (or (str.eq name "i8.of")
+        (or (str.eq name "i16.of")
+          (or (str.eq name "i32.of")
+            (or (str.eq name "i64.of")
+              (or (str.eq name "u8.of")
+                (or (str.eq name "u16.of")
+                  (or (str.eq name "u32.of") (str.eq name "u64.of"))))))))))
+
+  (fn arith_ins ((name Str)) Ins
+    (if (or (str.eq name "+") (str.eq name "wrap.add"))
+      (i64_add)
+      (if (or (str.eq name "-") (str.eq name "wrap.sub")) (i64_sub) (i64_mul))))
+
+  ; `+ - *` are the instruction (the prover has shown they stay in range) and `wrap.*`
+  ; are the instruction and then a pull back into the width.
+  (fn lower_arith ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees) (wrapping Bool)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (base_of_first c s rest)
+          ((Err f) (failed f))
+          ((Ok base) (if (str.eq base "Int") (if wrapping (refusing "a wrapping operation on an Int, which has no width") (then (lower_all next c s depth rest) (inss_one (WCall (int_operation name))))) (if (and wrapping (= (bits_of base) (i64.of 0))) (refusing "a wrapping operation on a type with no width") (then (lower_all next c s depth rest) (Inss (arith_ins name) (if wrapping (narrowed base) (NoInss)))))))))))
+
+  ; An `Int` has no width, so its arithmetic is the runtime's: the exact answer, or a trap
+  ; where the answer does not fit the word it is held in.
+  (fn int_operation ((name Str)) U32
+    (if (str.eq name "+") (index_add) (if (str.eq name "-") (index_sub) (index_mul))))
+
+  ; A comparison is unsigned for `U64` and signed otherwise, and answers an i64 0 or 1.
+  (fn lower_compare ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (base_of_first c s rest)
+          ((Err f) (failed f))
+          ((Ok base) (let unsigned (str.eq base "U64") (then (lower_all next c s depth rest) (Inss (if (str.eq name "<") (if unsigned (i64_lt_u) (i64_lt_s)) (if (str.eq name "<=") (if unsigned (i64_le_u) (i64_le_s)) (i64_eq))) (inss_one (i64_extend_u))))))))))
+
+  (fn mask_of ((base Str)) I64
+    (if (or (str.eq base "I8") (str.eq base "U8"))
+      (i64.of 255)
+      (if (or (str.eq base "I16") (str.eq base "U16")) (i64.of 65535) (i64.of 4294967295))))
+
+  ; Shifts by a count outside the width give zero, so the count is kept in a temporary and
+  ; tested. A right shift works on the bit pattern of the width, whatever its sign.
+  (fn lower_shift ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (two_of rest)
+          ((None) (bad "a shift takes a value and a count"))
+          ((Some parts) (match (type_here c s (get parts first)) ((Err f) (failed f)) ((Ok ty) (let base (get ty base) (let bits (bits_of base) (if (= bits (i64.of 0)) (refusing "a shift of something that is not a fixed width") (let held (slots_count s) (let count (wrap.add held (u32.of 1)) (let value (lower next c s depth false (get parts first)) (let amount (lower next c (Slot "" held ty s) depth false (get parts second)) (make Lowered (code (inss_join (get value code) (inss_join (Inss (local_set held) (NoInss)) (inss_join (get amount code) (Inss (local_set count) (Inss (local_get count) (Inss (const bits) (Inss (i64_ge_u) (inss_one (WIf true (inss_one (const (i64.of 0))) (if (str.eq name "bit.shl") (Inss (local_get held) (Inss (local_get count) (Inss (i64_shl) (narrowed base)))) (inss_join (Inss (local_get held) (if (= bits (i64.of 64)) (NoInss) (Inss (const (mask_of base)) (inss_one (i64_and))))) (Inss (local_get count) (Inss (i64_shr_u) (narrowed base))))))))))))))) (top (greater (wrap.add count (u32.of 1)) (greater (get value top) (get amount top)))) (fault (first_fault (get value fault) (get amount fault))))))))))))))))))
+
+  ; The arithmetic shift: the top bit of the width fills in from the left, and a count past
+  ; the width leaves only that bit. The value is moved to the top of the 64 bits, shifted
+  ; with the sign, and moved back, so it is the same for a signed width and an unsigned one.
+  (fn lower_sar ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (two_of rest)
+          ((None) (bad "a shift takes a value and a count"))
+          ((Some parts) (match (type_here c s (get parts first)) ((Err f) (failed f)) ((Ok ty) (let base (get ty base) (let bits (bits_of base) (if (= bits (i64.of 0)) (refusing "a shift of something that is not a fixed width") (let held (slots_count s) (let count (wrap.add held (u32.of 1)) (let value (lower next c s depth false (get parts first)) (let amount (lower next c (Slot "" held ty s) depth false (get parts second)) (make Lowered (code (inss_join (get value code) (inss_join (Inss (local_set held) (NoInss)) (inss_join (get amount code) (Inss (local_set count) (inss_join (Inss (local_get held) (if (= bits (i64.of 64)) (NoInss) (Inss (const (wrap.sub (i64.of 64) bits)) (inss_one (i64_shl))))) (inss_join (Inss (local_get count) (Inss (const bits) (Inss (i64_ge_u) (inss_one (WIf true (inss_one (const (wrap.sub bits (i64.of 1)))) (inss_one (local_get count))))))) (Inss (i64_shr_s) (if (= bits (i64.of 64)) (narrowed base) (Inss (const (wrap.sub (i64.of 64) bits)) (Inss (i64_shr_u) (narrowed base))))))))))))(top (greater (wrap.add count (u32.of 1)) (greater (get value top) (get amount top)))) (fault (first_fault (get value fault) (get amount fault))))))))))))))))))
+
+
+  (fn lower_bit_not ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (base_of_first c s rest)
+          ((Err f) (failed f))
+          ((Ok base) (if (= (bits_of base) (i64.of 0)) (refusing "bit.not of something that is not a fixed width") (then (lower_all next c s depth rest) (Inss (const (if (or (str.eq base "U8") (or (str.eq base "U16") (str.eq base "U32"))) (mask_of base) (i64.of -1))) (inss_one (i64_xor))))))))))
+
+  ; The builtins that are a call into the runtime.
+  (fn runtime_call ((name Str)) (Option U32)
+    (if (or (str.eq name "concat") (str.eq name "bytes.concat"))
+      (Some (index_concat))
+      (if (or (str.eq name "str.eq") (str.eq name "bytes.eq"))
+        (Some (index_eq))
+        (if (str.eq name "bytes.at")
+          (Some (index_at))
+          (if (str.eq name "bytes.slice")
+            (Some (index_slice))
+            (if (str.eq name "bytes.of") (Some (index_of)) (None)))))))
+
+  (fn lower_builtin ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next fuel
+        (if (or (str.eq name "+") (or (str.eq name "-") (str.eq name "*")))
+          (lower_arith next c s depth name rest false)
+          (if (or (str.eq name "wrap.add") (or (str.eq name "wrap.sub") (str.eq name "wrap.mul")))
+            (lower_arith next c s depth name rest true)
+            (if (or (str.eq name "<") (or (str.eq name "<=") (str.eq name "=")))
+              (lower_compare next c s depth name rest)
+              (if (or (str.eq name "and") (str.eq name "or"))
+                (then (lower_all next c s depth rest)
+                  (inss_one (if (str.eq name "and") (i64_and) (i64_or))))
+                (if (str.eq name "not")
+                  (then (lower_all next c s depth rest)
+                    (Inss (i64_eqz) (inss_one (i64_extend_u))))
+                  (if (is_conversion name)
+                    (lower_passing next c s depth rest)
+                    (if (or (str.eq name "bit.and") (or (str.eq name "bit.or") (str.eq name "bit.xor")))
+                      (then (lower_all next c s depth rest)
+                        (inss_one (if (str.eq name "bit.and") (i64_and) (if (str.eq name "bit.or") (i64_or) (i64_xor)))))
+                      (if (str.eq name "bit.not")
+                        (lower_bit_not next c s depth rest)
+                        (if (or (str.eq name "bit.shl") (str.eq name "bit.shr"))
+                          (lower_shift next c s depth name rest)
+                          (if (str.eq name "bit.sar")
+                            (lower_sar next c s depth name rest)
+                            (lower_runtime next c s depth name rest))))))))))))))
+
+  ; `num.div`: nothing for a zero divisor, otherwise the quotient rounded down.
+  (fn lower_div ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (base_of_first c s rest)
+          ((Err f) (failed f))
+          ((Ok base) (if (or (str.eq base "F16") (or (str.eq base "BF16") (str.eq base "F32"))) (refusing "division of floating-point numbers") (then (lower_all next c s depth rest) (Inss (const (if (str.eq base "U64") (i64.of 1) (i64.of 0))) (inss_one (WCall (index_div)))))))))))
+
+  ; `num.to_str`: the digits, unsigned for a `U64`.
+  (fn lower_to_str ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (base_of_first c s rest)
+          ((Err f) (failed f))
+          ((Ok base) (if (or (str.eq base "F16") (or (str.eq base "BF16") (str.eq base "F32"))) (refusing "printing a floating-point number") (then (lower_all next c s depth rest) (Inss (const (if (str.eq base "U64") (i64.of 1) (i64.of 0))) (inss_one (WCall (index_to_str)))))))))))
+
+  ; Reserved strings the lowering writes itself, so that they are in memory to point at.
+  (fn reserved_texts () Texts
+    (uses Alloc)
+    (Texts (str.encode "bytes.decode")
+      (Texts (str.encode "not valid UTF-8: invalid start byte")
+        (Texts (str.encode "not valid UTF-8: invalid continuation byte")
+          (Texts (str.encode "not valid UTF-8: unexpected end of data") (NoTexts))))))
+
+  (fn address_of ((p Pool) (text Str)) U32
+    (uses Alloc)
+    (match (pool_find p (str.encode text)) ((None) (u32.of 0)) ((Some a) a)))
+
+  ; Store `value` at a word offset of the block whose address is in local `at`.
+  (fn put ((at U32) (offset U32) (value Inss)) Inss
+    (inss_join (Inss (local_get at) (inss_one (i32_wrap)))
+      (inss_join value (store64 offset))))
+
+  (fn why_of ((k U32) (a1 U32) (a2 U32) (a3 U32)) Inss
+    (Inss (local_get k)
+      (Inss (const (i64.of 1))
+        (Inss (i64_eq)
+          (inss_one (WIf true (inss_one (const (i64.of a1))) (Inss (local_get k) (Inss (const (i64.of 2)) (Inss (i64_eq) (inss_one (WIf true (inss_one (const (i64.of a2))) (inss_one (const (i64.of a3))))))))))))))
+
+  ; `(Ok text)` when the validation answers 0, and otherwise an `(Err fault)` whose reason is
+  ; one of the three strings. t = the bytes, k = the answer, p and q = blocks being built.
+  (fn decode_ok ((t U32) (p U32) (ok_id U32)) Inss
+    (inss_join (allocation (u32.of 16) p)
+      (inss_join (put p (u32.of 0) (inss_one (const (i64.of ok_id))))
+        (inss_join (put p (u32.of 8) (inss_one (local_get t))) (inss_one (local_get p))))))
+
+  (fn decode_err ((k U32) (p U32) (q U32) (err_id U32) (none_cell U32) (op U32) (a1 U32) (a2 U32) (a3 U32)) Inss
+    (inss_join (allocation (u32.of 24) p)
+      (inss_join (put p (u32.of 0) (inss_one (const (i64.of op))))
+        (inss_join (put p (u32.of 8) (why_of k a1 a2 a3))
+          (inss_join (put p (u32.of 16) (inss_one (const (i64.of none_cell))))
+            (inss_join (allocation (u32.of 16) q)
+              (inss_join (put q (u32.of 0) (inss_one (const (i64.of err_id))))
+                (inss_join (put q (u32.of 8) (inss_one (local_get p)))
+                  (inss_one (local_get q))))))))))
+
+  (fn id_int ((vs Vars) (name Str)) U32
+    (match (var_named vs name)
+      ((None) (u32.of 0))
+      ((Some found) (match found ((NoVars) (u32.of 0)) ((Vars n id a rest) id)))))
+
+  (fn decode_all ((c Ctx) (check U32) (t U32)) Inss
+    (uses Alloc)
+    (let k (wrap.add t (u32.of 1))
+      (let p (wrap.add t (u32.of 2))
+        (let q (wrap.add t (u32.of 3))
+          (inss_join (inss_one (local_set t))
+            (inss_join (Inss (local_get t) (Inss (WCall check) (Inss (local_set k) (Inss (local_get k) (inss_one (i64_eqz))))))
+              (inss_one (WIf true (decode_ok t p (id_int (get c vars) "Ok")) (decode_err k p q (id_int (get c vars) "Err") (cell_of_id (get c vars) "None") (address_of (get c pool) "bytes.decode") (address_of (get c pool) "not valid UTF-8: invalid start byte") (address_of (get c pool) "not valid UTF-8: invalid continuation byte") (address_of (get c pool) "not valid UTF-8: unexpected end of data"))))))))))
+
+  (fn lower_decode ((fuel U32) (c Ctx) (s Slots) (depth U32) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (fn_named (get c fns) "rt_utf8_check")
+          ((None) (bad "bytes.decode needs compiler/rtlib.wtn linked in"))
+          ((Some found) (match found ((NoFns) (bad "a function that is in the table and is not")) ((Fns n check params more) (let t (slots_count s) (let value (lower_all next c s depth rest) (make Lowered (code (inss_join (get value code) (decode_all c check t))) (top (greater (wrap.add t (u32.of 4)) (get value top))) (fault (get value fault))))))))))))
+
+  (fn lower_runtime ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (runtime_call name)
+          ((Some f) (then (lower_all next c s depth rest) (inss_one (WCall f))))
+          ((None) (lower_special next c s depth name rest))))))
+
+  ; The builtins that are neither an operator nor one call into the runtime.
+  ; --- what the host is asked for -----------------------------------------------------------------------
+  ; An effect is a capability the host grants: each builtin that performs one is an import,
+  ; from a module named for the effect, and a module imports only the builtins it uses. A
+  ; host that does not grant `Net` cannot instantiate a module that calls `net.send`.
+  (enum Hosts
+    (NoHosts)
+    (Hosts (name Str) (effect Str) (slot U32) (params U32) (results U32) (rest Hosts)))
+
+  (record Cap (name Str) (effect Str) (params U32) (results U32))
+
+  (enum Caps (NoCaps) (Caps (head Cap) (rest Caps)))
+
+  (fn capability_table () Caps
+    (Caps (make Cap (name "print") (effect "Console") (params (u32.of 1)) (results (u32.of 0)))
+      (Caps (make Cap (name "log") (effect "Log") (params (u32.of 1)) (results (u32.of 0)))
+        (Caps (make Cap (name "net.send") (effect "Net") (params (u32.of 2)) (results (u32.of 1)))
+          (Caps (make Cap (name "clock.now") (effect "Clock") (params (u32.of 0)) (results (u32.of 1)))
+            (Caps (make Cap (name "clock.wall") (effect "Clock") (params (u32.of 0)) (results (u32.of 1)))
+              (Caps (make Cap (name "clock.ticks") (effect "Clock") (params (u32.of 0)) (results (u32.of 1)))
+                (Caps (make Cap (name "env.secret") (effect "Env") (params (u32.of 1)) (results (u32.of 1)))
+                  (Caps (make Cap (name "store.put") (effect "Store") (params (u32.of 2)) (results (u32.of 0)))
+                    (Caps (make Cap (name "store.get") (effect "Store") (params (u32.of 1)) (results (u32.of 1)))
+                      (NoCaps)))))))))))
+
+  ; Does this tree call `name` anywhere?
+  (fn mentions ((t Tree) (name Str)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) false)
+      ((Node items) (match items ((NoTrees) false) ((Trees head rest) (or (mentions_head head name) (mentions_all rest name)))))))
+
+  (fn mentions_head ((t Tree) (name Str)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (and (not quoted) (match (named text) ((Ok word) (str.eq word name)) ((Err f) false))))
+      ((Node items) (mentions t name))))
+
+  (fn mentions_all ((ts Trees) (name Str)) Bool
+    (uses Alloc)
+    (match ts
+      ((NoTrees) false)
+      ((Trees t rest) (or (mentions t name) (mentions_all rest name)))))
+
+  ; Only the capabilities the program uses, numbered in table order.
+  (fn hosts_used ((caps Caps) (items Trees) (slot U32)) Hosts
+    (uses Alloc)
+    (match caps
+      ((NoCaps) (NoHosts))
+      ((Caps cap rest) (if (mentions_all items (get cap name)) (Hosts (get cap name) (get cap effect) slot (get cap params) (get cap results) (hosts_used rest items (wrap.add slot (u32.of 1)))) (hosts_used rest items slot)))))
+
+  (fn host_named ((hs Hosts) (name Str)) (Option Hosts)
+    (match hs
+      ((NoHosts) (None))
+      ((Hosts n e slot p r rest) (if (str.eq n name) (Some hs) (host_named rest name)))))
+
+  (fn host_imports ((hs Hosts)) Imports
+    (match hs
+      ((NoHosts) (NoImports))
+      ((Hosts n e slot p r rest) (Imports (make Import (from e) (name n) (params p) (results r)) (host_imports rest)))))
+
+  ; A call to the host. A result of nothing is `unit`; `store.get` answers an address or
+  ; zero, and zero is `(None)`.
+  (fn lower_host ((fuel U32) (c Ctx) (s Slots) (depth U32) (found Hosts) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match found
+          ((NoHosts) (bad "a host function that is in the table and is not"))
+          ((Hosts name effect slot params results more) (if (= (trees_count rest) params) (let args (lower_all next c s depth rest) (if (str.eq name "store.get") (optional_host args slot (slots_count s) c) (then args (Inss (WHost slot) (if (= results (u32.of 0)) (inss_one (const (i64.of 0))) (NoInss)))))) (bad (concat "`" (concat name "` has the wrong number of arguments")))))))))
+
+  (fn optional_host ((args Lowered) (slot U32) (t U32) (c Ctx)) Lowered
+    (let p (wrap.add t (u32.of 1))
+      (make Lowered
+        (code (inss_join (get args code) (Inss (WHost slot) (Inss (local_set t) (Inss (local_get t) (Inss (i64_eqz) (inss_one (WIf true (inss_one (const (i64.of (cell_of_id (get c vars) "None")))) (inss_join (allocation (u32.of 16) p) (inss_join (put p (u32.of 0) (inss_one (const (i64.of (id_int (get c vars) "Some"))))) (inss_join (put p (u32.of 8) (inss_one (local_get t))) (inss_one (local_get p)))))))))))))
+        (top (greater (wrap.add t (u32.of 2)) (get args top)))
+        (fault (get args fault)))))
+
+  ; --- times ------------------------------------------------------------------------------------------
+  ; Every time type is a number of nanoseconds (or device ticks), so a reading, a
+  ; difference and a step are all a word and plain arithmetic on it.
+  (fn is_time_name ((name Str)) Bool
+    (or (str.eq name "instant.since")
+      (or (str.eq name "wall.since")
+        (or (str.eq name "ticks.since")
+          (or (str.eq name "instant.plus")
+            (or (str.eq name "wall.plus")
+              (or (str.eq name "duration.of_ms") (str.eq name "duration.ms"))))))))
+
+  (fn lower_time ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (let args (lower_all next c s depth rest)
+          (if (or (str.eq name "instant.since") (or (str.eq name "wall.since") (str.eq name "ticks.since")))
+            (then args (inss_one (i64_sub)))
+            (if (or (str.eq name "instant.plus") (str.eq name "wall.plus"))
+              (then args (inss_one (i64_add)))
+              (if (str.eq name "duration.of_ms")
+                (then args (Inss (const (i64.of 1000000)) (inss_one (i64_mul))))
+                (duration_ms args (slots_count s)))))))))
+
+  ; Milliseconds from nanoseconds, rounded down, which is a quotient and then one less
+  ; when the remainder is negative.
+  (fn duration_ms ((args Lowered) (t U32)) Lowered
+    (make Lowered
+      (code (inss_join (get args code) (Inss (local_set t) (Inss (local_get t) (Inss (const (i64.of 1000000)) (Inss (i64_div_s) (Inss (local_get t) (Inss (const (i64.of 1000000)) (Inss (i64_rem_s) (Inss (const (i64.of 0)) (Inss (i64_lt_s) (Inss (i64_extend_u) (inss_one (i64_sub))))))))))))))
+      (top (greater (wrap.add t (u32.of 1)) (get args top)))
+      (fault (get args fault))))
+
+  (fn lower_special ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (match (host_named (get c hosts) name)
+          ((Some found) (lower_host next c s depth found rest))
+          ((None) (lower_other next c s depth name rest))))))
+
+  (fn lower_other ((fuel U32) (c Ctx) (s Slots) (depth U32) (name Str) (rest Trees)) Lowered
+    (uses Alloc)
+    (if (<= fuel (u32.of 0))
+      (too_deep)
+      (let next (- fuel (u32.of 1))
+        (if (is_time_name name)
+          (lower_time next c s depth name rest)
+          (if (str.eq name "num.div")
+            (lower_div next c s depth rest)
+            (if (str.eq name "num.to_str")
+              (lower_to_str next c s depth rest)
+              (if (str.eq name "bytes.decode")
+                (lower_decode next c s depth rest)
+                (if (str.eq name "str.encode")
+                  (lower_passing next c s depth rest)
+                  (if (or (str.eq name "bytes.len") (str.eq name "str.octets"))
+                    (then (lower_all next c s depth rest) (load64 (u32.of 0)))
+                    (refusing (concat "the function `" (concat name "`"))))))))))))
+
+  ; --- the functions of a module ------------------------------------------------------------------
+  (record FnForm (name Str) (params Trees) (body Tree))
+
+  (enum Forms (NoForms) (Forms (head FnForm) (rest Forms)))
+
+  (fn forms_join ((a Forms) (b Forms)) Forms
+    (match a ((NoForms) b) ((Forms h rest) (Forms h (forms_join rest b)))))
+
+  (fn forms_count ((fs Forms)) U32
+    (match fs
+      ((NoForms) (u32.of 0))
+      ((Forms h rest) (wrap.add (u32.of 1) (forms_count rest)))))
+
+  (fn param_trees ((t Tree)) Trees
+    (match t ((Leaf text quoted) (NoTrees)) ((Node items) items)))
+
+  ; `(fn name (params) ret clause... body)`, or `(fn (name T...) ...)` for a generic one.
+  ; Anything that is not a `fn` is not a function, and is None.
+  (fn fn_form ((t Tree)) (Result (Option FnForm) Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (Ok (None)))
+      ((Node items) (match items ((NoTrees) (Ok (None))) ((Trees head rest) (if (is_word head "fn") (fn_parts rest) (Ok (None))))))))
+
+  ; What follows the word `fn`: a name, the parameters, a result type, then the clauses
+  ; and the body, which is the last form.
+  (fn fn_parts ((rest Trees)) (Result (Option FnForm) Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "lower" "a fn needs a name")))
+      ((Trees nm after) (match (declared_name nm) ((Err f) (Err f)) ((Ok name) (match after ((NoTrees) (Err (fault "lower" "a fn needs a parameter list"))) ((Trees params more) (match more ((NoTrees) (Err (fault "lower" "a fn needs a result type"))) ((Trees ret body) (match (last_of body) ((None) (Err (fault "lower" "a fn needs a body"))) ((Some b) (Ok (Some (make FnForm (name name) (params (param_trees params)) (body b)))))))))))))))
+
+  (fn declared_name ((t Tree)) (Result Str Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (named text))
+      ((Node items) (match items ((NoTrees) (Err (fault "lower" "a generic fn needs a name"))) ((Trees first more) (naming first))))))
+
+  (fn forms_of ((items Trees)) (Result Forms Fault)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (Ok (NoForms)))
+      ((Trees t more) (match (fn_form t) ((Err f) (Err f)) ((Ok found) (match (forms_of more) ((Err f) (Err f)) ((Ok others) (match found ((None) (Ok others)) ((Some form) (Ok (Forms form others)))))))))))
+
+  ; The index of each function: where it comes after the runtime.
+  (fn fns_of ((fs Forms) (at U32)) Fns
+    (match fs
+      ((NoForms) (NoFns))
+      ((Forms f rest) (Fns (get f name) at (trees_count (get f params)) (fns_of rest (wrap.add at (u32.of 1)))))))
+
+  ; The parameters as the scope the body is read in: each is the local of its position.
+  (fn param_slots ((ps Trees) (at U32) (acc Slots)) (Result Slots Fault)
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (Ok acc))
+      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "lower" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "lower" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "lower" "a parameter is (name Type)"))) ((Trees written none) (match (naming n) ((Err f) (Err f)) ((Ok name) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (param_slots more (wrap.add at (u32.of 1)) (Slot name at ty acc)))))))))))))))
+
+  (fn fuel_start () U32 (u32.of 100000))
+
+  ; One function. Its body is a loop, so that a call to itself in tail position can jump
+  ; back to the top rather than call.
+  (fn lower_fn ((c Ctx) (f FnForm)) (Result Func Fault)
+    (uses Alloc)
+    (match (param_slots (get f params) (u32.of 0) (NoSlots))
+      ((Err e) (Err e))
+      ((Ok slots) (let n (slots_count slots) (let here (with c (here (get f name)) (arity n)) (let body (lower (fuel_start) here slots (u32.of 0) true (get f body)) (match (get body fault) ((Some e) (Err e)) ((None) (Ok (make Func (name (get f name)) (params n) (results (u32.of 1)) (locals (wrap.sub (greater (get body top) n) n)) (body (inss_one (WLoop true (get body code)))) (exported true)))))))))))
+
+  (fn lower_fns ((c Ctx) (fs Forms)) (Result Funcs Fault)
+    (uses Alloc)
+    (match fs
+      ((NoForms) (Ok (NoFuncs)))
+      ((Forms f rest) (match (lower_fn c f) ((Err e) (Err e)) ((Ok done_fn) (match (lower_fns c rest) ((Err e) (Err e)) ((Ok others) (Ok (Funcs done_fn others)))))))))
+
+  (fn funcs_join ((a Funcs) (b Funcs)) Funcs
+    (match a ((NoFuncs) b) ((Funcs h rest) (Funcs h (funcs_join rest b)))))
+
+  ; --- the variants -----------------------------------------------------------------------------------
+  (fn variants_join ((a VariantSignatures) (b VariantSignatures)) VariantSignatures
+    (match a
+      ((NoVariantSignatures) b)
+      ((VariantSignatures h rest) (VariantSignatures h (variants_join rest b)))))
+
+  (fn all_variants ((es EnumSignatures)) VariantSignatures
+    (match es
+      ((NoEnumSignatures) (NoVariantSignatures))
+      ((EnumSignatures e rest) (variants_join (get e variants) (all_variants rest)))))
+
+  (fn tys_length ((ts Tys)) U32
+    (match ts ((NoTys) (u32.of 0)) ((Tys h rest) (wrap.add (u32.of 1) (tys_length rest)))))
+
+  (fn numbered ((vs VariantSignatures) (next U32)) Vars
+    (match vs
+      ((NoVariantSignatures) (NoVars))
+      ((VariantSignatures v rest) (Vars (get v name) next (tys_length (get v fields)) (numbered rest (wrap.add next (u32.of 1)))))))
+
+  (fn vars_count ((vs Vars)) U32
+    (match vs
+      ((NoVars) (u32.of 0))
+      ((Vars n id a rest) (wrap.add (u32.of 1) (vars_count rest)))))
+
+  (fn id_of ((vs Vars) (name Str)) I64
+    (match (var_named vs name)
+      ((None) (i64.of 0))
+      ((Some found) (match found ((NoVars) (i64.of 0)) ((Vars n id a rest) (i64.of id))))))
+
+  ; --- the static data ---------------------------------------------------------------------------------
+  ; The cell for each id holds the id, so that a variant without fields can be matched like
+  ; one with: read the first word.
+  (fn cells_to ((id U32) (left U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (if (<= left (u32.of 0))
+      tail
+      (Chunks (word_bytes id) (cells_to (wrap.add id (u32.of 1)) (- left (u32.of 1)) tail))))
+
+  (fn pool_segments ((p Pool)) Segments
+    (uses Alloc)
+    (match p
+      ((NoPool) (NoSegments))
+      ((Pool t a rest) (Segments (make Segment (offset a) (bytes (bytes.concat (word_bytes (octets_of t)) t))) (pool_segments rest)))))
+
+  (fn segments_join ((a Segments) (b Segments)) Segments
+    (match a ((NoSegments) b) ((Segments h rest) (Segments h (segments_join rest b)))))
+
+  ; --- the module ----------------------------------------------------------------------------------------
+  (fn module_of ((decls Env) (forms Forms) (items Trees)) (Result Module Fault)
+    (uses Alloc)
+    (let vars (numbered (all_variants (get decls enums)) (u32.of 0))
+      (let count (vars_count vars)
+        (let floor (cell_of count)
+          (let pool (pooled (texts_join (reserved_texts) (literals_in_all items (NoTexts))) (NoPool) floor)
+            (let hosts (hosts_used (capability_table) items (u32.of 0))
+              (let c (make Ctx (env decls) (fns (fns_of forms (first_user))) (vars vars) (pool pool) (hosts hosts) (here "") (arity (u32.of 0)))
+                (match (lower_fns c forms)
+                  ((Err e) (Err e))
+                  ((Ok funcs) (let heap (rounded (pool_end pool floor)) (Ok (make Module (imports (host_imports hosts)) (funcs (funcs_join (runtime (i64.of (cell_of_id vars "None")) (id_of vars "Some") (i64.of heap)) funcs)) (segments (Segments (make Segment (offset (cells_base)) (bytes (joined (cells_to (u32.of 0) count (NoChunks))))) (pool_segments pool))) (pages (wrap.add (bit.shr heap 16) (u32.of 2))) (heap (i64.of heap))))))))))))))
+
+  (fn assembled ((decls Env) (forms Forms) (items Trees)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (module_of decls forms items) ((Err e) (Err e)) ((Ok m) (Ok (encoded m)))))
+
+  (fn cell_of_id ((vs Vars) (name Str)) U32
+    (match (var_named vs name)
+      ((None) (u32.of 0))
+      ((Some found) (match found ((NoVars) (u32.of 0)) ((Vars n id a rest) (cell_of id))))))
+
+  ; Witness source in, the bytes of a module out. The program is expected to have been
+  ; checked; this reads what a checked program looks like and does not repeat the checks.
+  (fn compile_module ((src Str)) (Result Module Fault)
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (Err f))
+      ((Ok tree) (match (parse (tokens_of (str.encode (prelude)))) ((Err f) (Err f)) ((Ok base) (match (env_with_prelude src) ((Err f) (Err f)) ((Ok decls) (let items (trees_join (module_items base) (module_items tree)) (match (forms_of items) ((Err f) (Err f)) ((Ok forms) (module_of decls forms items)))))))))))
+
+  ; Witness source in, the bytes of a WebAssembly module out.
+  (fn compile_source ((src Str)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (compile_module src) ((Err e) (Err e)) ((Ok m) (Ok (encoded m)))))
+
+  (fn texts_join ((a Texts) (b Texts)) Texts
+    (match a ((NoTexts) b) ((Texts h rest) (Texts h (texts_join rest b)))))
+
+  (fn trees_join ((a Trees) (b Trees)) Trees
+    (match a ((NoTrees) b) ((Trees h rest) (Trees h (trees_join rest b)))))
+
+  (fn describe ((r (Result Bytes Fault))) Str
+    (uses Alloc)
+    (match r
+      ((Ok wasm) (concat "compiled " (concat (num.to_str (unwrap (bytes.len wasm))) " bytes")))
+      ((Err f) (concat "not compiled: " (get f why)))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (describe (compile_source "(module m (fn double ((x I32)) I32 (wrap.add x x)))")))))

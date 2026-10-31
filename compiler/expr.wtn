@@ -1,0 +1,1331 @@
+; The type of an expression, read from its tree against the names in scope.
+;
+; The second piece of the Phase 2 checker, after compiler/typecheck.wtn read a type out
+; of source. It covers the part of the language that needs nothing but a scope: literals,
+; names, `if`, and arithmetic and comparison on `Int`. A call to a declared function, a
+; `match`, a `let` and the rest come next and say so by refusing: a form this does not
+; read is turned away with the form's name, never guessed at.
+;
+; What is judged is only the type. Whether an operation can overflow, or a condition is
+; provable, is the prover's business and none of this pass's; it answers what the
+; Python checker's `_expr` answers before any obligation is raised.
+;
+;   witness run compiler/expr.wtn --grant Alloc,Console
+(module expr
+  ; Every label a type carries, wherever in it: the kernel's own walk, taken rather than
+  ; written again under another name.
+  (use "wtn:608532136ea7a9cc73a01524073c19bacd7aaefce3efb4faebb6528ea4a86b11"
+    as
+    labels_deep)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:8b21cf36641449b0189337a07c77f45c96aee5f01ac1b4bea685eccc7b7b07f5" as named)
+
+  (use "wtn:d371dabcadae5e0f7dbfea300a8b823e4d3140e5e0336a00393fe722ceb7069b" as plain)
+
+  (use "wtn:af1e918412dddc13cfa2e8020e1c36c71b7fdc47c9df423fd0693bccd2af9575" as shown)
+
+  (use "wtn:a9e2f9aa9fbff0e4da8d7b33ee725f08fc9f01529c5e2edd3e20bf5e5b5edcbb" as Env)
+
+  (use "wtn:0467e6da785e3d4510a5f4b6c4d415736dfaeecf2e4adbdc2ac82fe76ee3de28"
+    as
+    signature_of)
+
+  (use "wtn:cb1c272b8561a914b20850daea0e4846febca0ac1a963e0144cd7ba06b6d6d3c"
+    as
+    env_of_source)
+
+  (use "wtn:709fc445d0bb2126a17cc59426ba8c16a2cc8fc8d1a9036bf0bfd7817aba5bca" as enum_of)
+
+  (use "wtn:eeac0a58c74c2c8e42df0f7056c90c7eb7b0dd78485f27e810b2e75a271447ba" as variant_of)
+
+  (use "wtn:8d123602cebf5e9de6a5e992a7483873e86b9595b4833c48ab2f123b03f9da9c" as names_has)
+
+  (use "wtn:391e924d31f28ba56c34bd35b70757803b8021c81a605839336cc0c9dc1131d1" as record_of)
+
+  (use "wtn:a1bfb0d57b638229fc7a5772ac4d6b49ca9bfd6668aeeef9dced9e6d8f141bfa" as field_at)
+
+  (use "wtn:0806fb421a4d2267c936e2efbc71aada4a3d2f76ac8116019678462d0ad0348a" as ty_plus)
+
+  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+
+  (use "wtn:239508bf7fe41345cc8ffe9f317fc3c35f7629f881efa5ea44d60ff81b7f574c"
+    as
+    allowed_format)
+
+  (use "wtn:5254c76f0de7323e88d2201fb6aba452c6edef99e1e18ee34fc76135dece5e0b"
+    as
+    is_fixed_width)
+
+  (use "wtn:2783d5badf8794113c8eb4d51c6bf8f7e37774eaabcfd2b791c9e82fb1a2e051" as fits_want)
+
+  (use "wtn:7b463d2694f8a95de73c4ebcc36ac8d62a74441441ff03349277665f634ca61d" as answered)
+
+  (use "wtn:17eba03513ce8dcf68f8fbe92fc3f6771c5d30442de431246d594b8ecdd6d48f"
+    as
+    wants_count)
+
+  (use "wtn:fb2f9c7b433809854f53f9e2237db409e6d3b99d5e621038f5feb004dc957372"
+    as
+    stands_for_a_number)
+
+  (use "wtn:bf7764f50adf617405038f927a145e9a225a550297a206d4a9162b3fb8b65d8b" as tys_count)
+
+  (use "wtn:2bf9db991f79bd86386f9d48b3d14c3938df6dbacab323d8c9f06fdbab332347" as newtype_of)
+
+  (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
+
+  (use "wtn:899e21eb94eb82caaa0d2a3ac52dccd80eb8c4e238c6aa55cd5b7c73f92faad1" as type_of)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:c56f68cb6f11d167c5858b05b0968d1342cb17fa51c3859637f194cfb58bba9c" as collected)
+
+  (use "wtn:8cad77ce8028c78b6f80b49536f0448d8c6f075789964549c88ebef18b6275ab" as dims_eq)
+
+  (use "wtn:87738bbc3d280b4506682245c8a9c435c6331baf7356e9575b361b2d6a6eb11a"
+    as
+    names_within)
+
+  (use "wtn:add8d88231eab6d22b551e7feeed5144097f259ae3f8bb82eb9d90e8256ec974"
+    as
+    names_index)
+
+  (use "wtn:4858b623debd74b1316b0b39a4f7f4e213d411a22c2d2f8ceb911c05dd60fecb" as ty_at)
+
+  (use "wtn:cec34254f3af0a4b2bbeb035ac2b15ccf29cd47dc111e463543cda0b385e0fda"
+    as
+    names_count)
+
+  (use "wtn:51cc51adfdd8a230b6994a43e368eb4d1c2659779ba83843976a6a406b4ffdfc"
+    as
+    is_primitive)
+
+  (use "wtn:389c32161549ec786e2e27e301b832610ff750d6be481603802f9a9a25ed52a8" as ty_strip)
+
+  (use "wtn:4aab89ca9b8d498c2f69d8799321ce4c6aae73c69e22950b63f8b9f8f4f63fbe"
+    as
+    names_union)
+
+  (use "wtn:c6398eb5ab0b14cf194672066b7d3a72fdde0ca40fe9d9986e10ed14a34ee143" as patch_of)
+
+  (use "wtn:fd8007113ca063049f03120013647bb573bd426ebee0c31d860f249064364e68" as channel_of)
+
+  (use "wtn:fa0c3f1564b61f14efea122459d97a80aee0a0200a55894c0585e196050765c8" as model_of)
+
+  (use "wtn:cb0e87935811915a297c2317f1bef541beee6bfa64a0b5c0fffd4bd056368cfa" as uses_in)
+
+  (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
+
+  (use "wtn:315e70b0830671f92192b9b7cff60d910b683354fdc3c37bb8da01d8eec89674" as is_digit)
+
+  ; --- scope -----------------------------------------------------------------
+  ; The names a body can see, innermost first, each with the type it was declared at.
+  (enum Locals (NoLocals) (Local (name Str) (ty Ty) (rest Locals)))
+
+  (fn lookup ((ls Locals) (name Str)) (Option Ty)
+    (match ls
+      ((NoLocals) (None))
+      ((Local n ty rest) (if (str.eq n name) (Some ty) (lookup rest name)))))
+
+  ; --- binders ---------------------------------------------------------------
+  ; What Python's checker asks of a name a `let` or a pattern introduces: it starts with a
+  ; lower-case letter, it is not the name of a group of builtins (`str.eq` would read two
+  ; ways), and nothing already in scope has it. Lower-case is ASCII here, where Python's
+  ; also takes any other lower-case letter; no name in this project starts with one.
+  (fn binder_ok ((ls Locals) (name Str)) (Result Unit Fault)
+    (uses Alloc)
+    (if (not (lower_first (byte_at (str.encode name) 0)))
+      (Err (fault "type" (concat "bindings start lower-case: `" (concat name "`"))))
+      (if (is_group name)
+        (Err (fault "type" (concat "`" (concat name "` names a group of builtins, so a binding may not take it"))))
+        (match (lookup ls name)
+          ((Some ty) (Err (fault "type" (concat "`" (concat name "` is already bound in this scope")))))
+          ((None) (Ok unit))))))
+
+  (fn lower_first ((b Int)) Bool (and (<= 97 b) (<= b 122)))
+
+  (fn is_group ((name Str)) Bool
+    (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (or (str.eq name "bf16") (str.eq name "bit")) (str.eq name "bytes")) (str.eq name "clock")) (str.eq name "duration")) (str.eq name "env")) (str.eq name "f16")) (str.eq name "f32")) (str.eq name "i16")) (str.eq name "i32")) (str.eq name "i64")) (str.eq name "i8")) (str.eq name "instant")) (str.eq name "int")) (str.eq name "net")) (str.eq name "num")) (str.eq name "sat")) (str.eq name "store")) (str.eq name "str")) (str.eq name "tensor")) (str.eq name "ticks")) (str.eq name "u16")) (str.eq name "u32")) (str.eq name "u64")) (str.eq name "u8")) (str.eq name "wall"))
+      (str.eq name "wrap")))
+
+  ; --- types that are not all known yet ---------------------------------------
+  ; `Ok 1` is a `Result Int ?`: the error type is not settled by anything written, and
+  ; becomes whatever the place it is used in wants. Python's checker does this with
+  ; unification variables; here an unknown is the type `?`, which fits anywhere and is
+  ; filled in by `join` when two types for one place meet.
+  (fn unknown () Ty (plain "?"))
+
+  (fn is_unknown ((t Ty)) Bool (str.eq (get t base) "?"))
+
+  (fn loose_fits ((got Ty) (want Ty)) Bool
+    (or (or (is_unknown got) (is_unknown want))
+      (and (and (str.eq (get got base) (get want base)) (dims_eq (get got dims) (get want dims)))
+        (and (names_within (get got labels) (get want labels))
+          (tys_loose_fit (get got args) (get want args))))))
+
+  (fn tys_loose_fit ((p Tys) (q Tys)) Bool
+    (match p
+      ((NoTys) (match q ((NoTys) true) ((Tys b more) false)))
+      ((Tys a rest) (match q ((NoTys) false) ((Tys b more) (and (loose_fits a b) (tys_loose_fit rest more)))))))
+
+  ; Two types for one place, the branches of an `if` or the arms of a `match`: the same
+  ; type wherever the labels are not looked at, since the answer carries both sets.
+  (fn loose_eq ((a Ty) (b Ty)) Bool
+    (or (or (is_unknown a) (is_unknown b))
+      (and (and (str.eq (get a base) (get b base)) (dims_eq (get a dims) (get b dims)))
+        (tys_loose_eq (get a args) (get b args)))))
+
+  (fn tys_loose_eq ((p Tys) (q Tys)) Bool
+    (match p
+      ((NoTys) (match q ((NoTys) true) ((Tys b more) false)))
+      ((Tys a rest) (match q ((NoTys) false) ((Tys b more) (and (loose_eq a b) (tys_loose_eq rest more)))))))
+
+  ; Two types for one place, with each unknown filled from the other.
+  (fn join ((a Ty) (b Ty)) Ty
+    (uses Alloc)
+    (if (is_unknown a)
+      b
+      (if (is_unknown b)
+        a
+        (with a
+          (labels (names_union (get a labels) (get b labels)))
+          (args (join_tys (get a args) (get b args)))))))
+
+  (fn join_tys ((p Tys) (q Tys)) Tys
+    (uses Alloc)
+    (match p
+      ((NoTys) p)
+      ((Tys x rest) (match q ((NoTys) p) ((Tys y more) (Tys (join x y) (join_tys rest more)))))))
+
+  ; --- generic types ------------------------------------------------------------
+  ; A type written with the parameters of a declaration, at the arguments it was given.
+  (fn subst ((t Ty) (params Names) (given Tys)) Ty
+    (uses Alloc)
+    (if (< (names_index params (get t base)) 0)
+      (with t (args (subst_all (get t args) params given)))
+      (match (ty_at given (names_index params (get t base)))
+        ((Some a) (ty_plus a (get t labels)))
+        ((None) t))))
+
+  (fn subst_all ((ts Tys) (params Names) (given Tys)) Tys
+    (uses Alloc)
+    (match ts
+      ((NoTys) (NoTys))
+      ((Tys h rest) (Tys (subst h params given) (subst_all rest params given)))))
+
+  (fn unknowns ((params Names)) Tys
+    (match params ((NoNames) (NoTys)) ((Names first rest) (Tys (unknown) (unknowns rest)))))
+
+  (fn set_at ((ts Tys) (i Int) (ty Ty)) Tys
+    (match ts
+      ((NoTys) (NoTys))
+      ((Tys h rest) (if (= i 0) (Tys ty rest) (Tys h (set_at rest (- i 1) ty))))))
+
+  ; What a parameter's type, written with the declaration's type parameters, says about
+  ; them once it meets the type actually given: each parameter is bound the first time
+  ; it is met and must agree afterwards.
+  (fn bind ((pat Ty) (actual Ty) (params Names) (acc Tys)) (Result Tys Fault)
+    (uses Alloc)
+    (if (< (names_index params (get pat base)) 0)
+      (if (is_unknown actual)
+        (Ok acc)
+        (if (str.eq (get pat base) (get actual base))
+          (bind_all (get pat args) (get actual args) params acc)
+          (Err (fault "type" "an argument has a different type than its parameter"))))
+      (match (ty_at acc (names_index params (get pat base)))
+        ((None) (Ok acc))
+        ((Some seen) (if (is_unknown seen) (Ok (set_at acc (names_index params (get pat base)) actual)) (if (loose_fits actual seen) (Ok (set_at acc (names_index params (get pat base)) (join seen actual))) (Err (fault "type" "a type parameter is given two different types"))))))))
+
+  (fn bind_all ((pats Tys) (actuals Tys) (params Names) (acc Tys)) (Result Tys Fault)
+    (uses Alloc)
+    (match pats
+      ((NoTys) (Ok acc))
+      ((Tys p more) (match actuals ((NoTys) (Ok acc)) ((Tys a rest) (match (bind p a params acc) ((Err f) (Err f)) ((Ok next) (bind_all more rest params next))))))))
+
+  ; --- leaves ------------------------------------------------------------------
+  ; A quoted token is a `Str`. A word is a literal if it is `true` or `false`, or a
+  ; number if it starts with a digit -- the reader's own rule for a number -- and a name
+  ; otherwise, which must be in scope.
+  (fn leaf_type ((ls Locals) (text Bytes) (quoted Bool)) (Result Ty Fault)
+    (uses Alloc)
+    (if quoted
+      (Ok (plain "Str"))
+      (if (is_number text)
+        (if (has_point text 0 (unwrap (bytes.len text)))
+          (Ok (plain "Real"))
+          (Ok (plain "Int")))
+        (match (named text)
+          ((Err e) (Err e))
+          ((Ok word) (if (or (str.eq word "true") (str.eq word "false")) (Ok (plain "Bool")) (if (str.eq word "unit") (Ok (plain "Unit")) (match (lookup ls word) ((Some ty) (Ok ty)) ((None) (Err (fault "type" (concat "no name `" (concat word "` is in scope")))))))))))))
+
+  ; A number starts with a digit, or with a minus sign and then a digit.
+  (fn is_number ((text Bytes)) Bool
+    (or (is_digit (byte_at text 0))
+      (and (= (byte_at text 0) 45) (is_digit (byte_at text 1)))))
+
+  (fn has_point ((b Bytes) (at Int) (left Int)) Bool
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len b)) at))
+      false
+      (if (= (byte_at b at) 46) true (has_point b (+ at 1) (- left 1)))))
+
+  ; --- forms -------------------------------------------------------------------
+  (fn expr_type ((decls Env) (ls Locals) (t Tree)) (Result Ty Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (leaf_type ls text quoted))
+      ((Node items) (match items ((NoTrees) (Err (fault "type" "an empty list is not an expression"))) ((Trees head rest) (match head ((Node inner) (Err (fault "type" "a call's head is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (form_type decls ls name rest))))))))))
+
+  (fn form_type ((decls Env) (ls Locals) (name Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (if (str.eq name "if")
+      (if_type decls ls rest)
+      (if (str.eq name "let")
+        (let_type decls ls rest)
+        (if (str.eq name "match")
+          (match_type decls ls rest)
+          (if (str.eq name "make")
+            (make_type decls ls rest)
+            (if (str.eq name "get")
+              (get_type decls ls rest)
+              (if (str.eq name "with")
+                (with_type decls ls rest)
+                (if (str.eq name "seq")
+                  (seq_type decls ls rest)
+                  (if (str.eq name "unwrap")
+                    (unwrap_type decls ls rest)
+                    (if (str.eq name "declassify")
+                      (declassify_type decls ls rest)
+                      (if (str.eq name "bytes")
+                        (bytes_type rest)
+                        (match (signature_of decls name)
+                          ((Some sig) (call_type decls ls sig rest))
+                          ((None) (other_type decls ls name rest))))))))))))))
+
+  ; `(bytes "6162")`: a literal `Bytes`, written as pairs of hexadecimal digits.
+  (fn bytes_type ((rest Trees)) (Result Ty Fault)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a Bytes literal is (bytes \"hex\")")))
+      ((Trees a more) (match more ((Trees extra others) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))) ((NoTrees) (match a ((Node inner) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))) ((Leaf text quoted) (if quoted (Ok (plain "Bytes")) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))))))))))
+
+  ; Everything that is neither a special form nor a declared function: a newtype's
+  ; constructor, a variant's, or a primitive.
+  (fn other_type ((decls Env) (ls Locals) (name Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (newtype_of decls name)
+      ((Some d) (wrap_type decls ls d rest))
+      ((None) (match (owner_of (get decls enums) name) ((Some e) (variant_call decls ls e name rest)) ((None) (match (primitive name) ((Some b) (if (or (str.eq name "tensor.add") (str.eq name "tensor.matmul")) (tensor_type_of decls ls name rest) (builtin_type decls ls b rest))) ((None) (if (or (or (str.eq name "array.empty") (str.eq name "array.len")) (or (str.eq name "array.at") (str.eq name "array.push"))) (array_type decls ls name rest) (if (str.eq name "update") (update_type decls ls rest) (if (str.eq name "send") (send_type decls ls rest) (if (str.eq name "recv") (recv_type decls rest) (if (str.eq name "infer") (infer_type decls ls rest) (if (str.eq name "scope") (scope_type decls ls rest) (if (str.eq name "par") (par_type decls ls rest) (if (str.eq name "log.fields") (match rest ((NoTrees) (Err (fault "type" "a log.fields needs at least one field"))) ((Trees first others) (log_type decls ls rest (NoNames)))) (Err (fault "type" (concat "`" (concat name "` is not read yet")))))))))))))))))))
+
+  ; `(declassify Label expr)`: the value without that label, wherever in its type it was.
+  ; Whether the function is allowed to release it is the effect pass's question.
+  (fn declassify_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a declassify takes a label and an expression")))
+      ((Trees which more) (match which ((Node inner) (Err (fault "type" "a label is a name"))) ((Leaf ltext lquoted) (match more ((NoTrees) (Err (fault "type" "a declassify takes a label and an expression"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a declassify takes a label and an expression"))) ((NoTrees) (match (named ltext) ((Err f) (Err f)) ((Ok name) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (Ok (ty_strip t name)))))))))))))))
+
+  ; --- patches, updates and logs -----------------------------------------------
+  ; A record, or a patch read as the record it partially updates: the same fields, each
+  ; in an `Option`, so that leaving one out is a decision written down.
+  (fn any_record ((decls Env) (name Str)) (Option RecordSignature)
+    (match (record_of decls name)
+      ((Some d) (Some d))
+      ((None) (match (patch_of decls name) ((None) (None)) ((Some pt) (match (record_of decls (get pt target)) ((None) (None)) ((Some r) (Some (make RecordSignature (name name) (fields (optional_fields (get r fields))) (wired false))))))))))
+
+  (fn optional_fields ((fs RecordFields)) RecordFields
+    (match fs
+      ((NoRecordFields) (NoRecordFields))
+      ((RecordFields n ty rest) (RecordFields n (make Ty (base "Option") (labels (NoNames)) (args (Tys ty (NoTys))) (dims (NoDims))) (optional_fields rest)))))
+
+  ; `(update record patch)`: the patch must be one for that record, and the result carries
+  ; whatever labels the patch brought.
+  (fn update_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "an update takes a record and a patch")))
+      ((Trees value more) (match more ((NoTrees) (Err (fault "type" "an update takes a record and a patch"))) ((Trees amendment none) (match none ((Trees extra others) (Err (fault "type" "an update takes a record and a patch"))) ((NoTrees) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (expr_type decls ls amendment) ((Err f) (Err f)) ((Ok given) (match (patch_of decls (get given base)) ((None) (Err (fault "type" "an update needs a patch"))) ((Some pt) (if (str.eq (get pt target) (get held base)) (Ok (ty_plus held (get given labels))) (Err (fault "type" "a patch updates a different record"))))))))))))))))
+
+  ; `(log.fields (name value)...)`: lower-case names, none twice, and nothing labelled
+  ; unless the label has a redaction policy.
+  (fn log_type ((decls Env) (ls Locals) (rest Trees) (seen Names)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Ok (plain "Unit")))
+      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "type" "a log field is (name value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a log field is (name value)"))) ((Trees fname after) (match after ((NoTrees) (Err (fault "type" "a log field is (name value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a log field is (name value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "type" "a log field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (if (not (lower_first (byte_at (str.encode field) 0))) (Err (fault "type" "log field names start lower-case")) (if (names_has seen field) (Err (fault "type" "a log field is given twice")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (if (all_redacted (get decls redactions) (labels_deep t)) (log_type decls ls more (Names field seen)) (Err (fault "type" "a field carries a label that has no redaction policy, so it cannot be logged"))))))))))))))))))))))
+
+  (fn all_redacted ((policy Names) (ls Names)) Bool
+    (match ls
+      ((NoNames) true)
+      ((Names l more) (and (names_has policy l) (all_redacted policy more)))))
+
+  ; --- channels, models and tasks ------------------------------------------------
+  ; `(send Channel value)` checks the receiver's labels here, where the data still is: the
+  ; value must be the channel's payload, and every label it carries must be one the
+  ; channel admits. `(recv Channel)` answers what arrives, which carries exactly those.
+  (fn send_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a send takes a channel and a value")))
+      ((Trees chan more) (match chan ((Node inner) (Err (fault "type" "a channel's name is a name"))) ((Leaf ctext cquoted) (match more ((NoTrees) (Err (fault "type" "a send takes a channel and a value"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a send takes a channel and a value"))) ((NoTrees) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "type" (concat "no channel named `" (concat cname "`"))))) ((Some c) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok sent) (if (not (or (is_unknown sent) (str.eq (get sent base) (get c payload)))) (Err (fault "type" "the value sent is not the channel's payload")) (if (all_redacted (get c admits) (labels_deep sent)) (Ok (plain "Unit")) (Err (fault "type" "a channel does not admit the labels the value carries")))))))))))))))))))
+
+  (fn recv_type ((decls Env) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a recv takes a channel")))
+      ((Trees chan more) (match more ((Trees extra others) (Err (fault "type" "a recv takes a channel"))) ((NoTrees) (match chan ((Node inner) (Err (fault "type" "a channel's name is a name"))) ((Leaf ctext cquoted) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "type" (concat "no channel named `" (concat cname "`"))))) ((Some c) (Ok (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base (get c payload)) (labels (get c admits)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims)))))))))))))))
+
+  ; `(infer Model input)`: the input must be the model's, and the answer carries the
+  ; labels of the input, of the training data, and `ModelOutput`, so that what a model
+  ; says is not mistaken for a fact.
+  (fn infer_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "an infer takes a model and an input")))
+      ((Trees m more) (match m ((Node inner) (Err (fault "type" "a model's name is a name"))) ((Leaf mtext mquoted) (match more ((NoTrees) (Err (fault "type" "an infer takes a model and an input"))) ((Trees input none) (match none ((Trees extra others) (Err (fault "type" "an infer takes a model and an input"))) ((NoTrees) (match (named mtext) ((Err f) (Err f)) ((Ok mname) (match (model_of decls mname) ((None) (Err (fault "type" (concat "no model named `" (concat mname "`"))))) ((Some known) (match (expr_type decls ls input) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (ty_plus (get known input) (get given labels))) (Ok (ty_plus (get known output) (names_union (get given labels) (names_union (get known trained) (Names "ModelOutput" (NoNames)))))) (Err (fault "type" "the input is not the model's input"))))))))))))))))))
+
+  ; A task fails with a `Fault`, so its work is a `(Result T Fault)` and the scope hands
+  ; the body a `T`. The scope itself answers the body's type, which must be able to carry
+  ; an escalated failure.
+  (fn carried ((t Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (if (is_unknown t)
+      (Ok t)
+      (if (not (str.eq (get t base) "Result"))
+        (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)"))
+        (match (get t args)
+          ((NoTys) (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)")))
+          ((Tys value more) (match more ((NoTys) (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)"))) ((Tys failure none) (if (loose_fits failure (plain "Fault")) (Ok (ty_plus value (get t labels))) (Err (fault "type" "a task fails with a Fault"))))))))))
+
+  ; A scope's own answer is a `(Result T Fault)`: what is not settled is pinned to Fault.
+  (fn failing () Ty
+    (make Ty
+      (base "Result")
+      (labels (NoNames))
+      (args (Tys (unknown) (Tys (plain "Fault") (NoTys))))
+      (dims (NoDims))))
+
+  ; `(scope ((name work (deadline d) (on-fail p) [(on where)])...) body)`.
+  (fn scope_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a scope takes tasks and a body")))
+      ((Trees tasks more) (match more ((NoTrees) (Err (fault "type" "a scope takes tasks and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "a scope takes tasks and a body"))) ((NoTrees) (match tasks ((Leaf ttext tquoted) (Err (fault "type" "a scope's tasks are a list"))) ((Node list) (match (task_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok answer) (match (carried answer) ((Err f) (Err f)) ((Ok kept) (Ok (join answer (failing))))))))))))))))))
+
+  ; The tasks one after another: each is read in the scope outside them all, and binds
+  ; its name for the body. `inner` is that growing scope.
+  (fn task_scope ((decls Env) (outer Locals) (inner Locals) (tasks Trees)) (Result Locals Fault)
+    (uses Alloc)
+    (match tasks
+      ((NoTrees) (Ok inner))
+      ((Trees task more) (match task ((Leaf ttext tquoted) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Trees name after) (match after ((NoTrees) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "type" "a task's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok tname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok done) (match (carried done) ((Err f) (Err f)) ((Ok value) (match (task_deadline decls outer clauses) ((Err f) (Err f)) ((Ok fine) (match (placed decls (concat "task `" (concat tname "`")) clauses done) ((Err f) (Err f)) ((Ok wired) (match (binder_ok inner tname) ((Err f) (Err f)) ((Ok free) (task_scope decls outer (Local tname value inner) more))))))))))))))))))))))))
+
+  ; The first clause of a task is `(deadline d)`, and `d` is a Duration.
+  (fn task_deadline ((decls Env) (outer Locals) (clauses Trees)) (Result Unit Fault)
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) (Err (fault "type" "a task needs a deadline")))
+      ((Trees clause more) (match clause ((Leaf ctext cquoted) (Err (fault "type" "a task needs a deadline"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a task needs a deadline"))) ((Trees head args) (if (is_word head "deadline") (match args ((NoTrees) (Err (fault "type" "a deadline is a duration"))) ((Trees d none) (match (expr_type decls outer d) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (plain "Duration")) (Ok unit) (Err (fault "type" "a deadline is a Duration"))))))) (Err (fault "type" "a task needs a deadline"))))))))))
+
+  ; `(par ((name work [(on where)])...) body)`: every branch is read in the scope before
+  ; the block, so a branch cannot observe another, and the body sees all their names.
+  (fn par_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a par takes branches and a body")))
+      ((Trees branches more) (match more ((NoTrees) (Err (fault "type" "a par takes branches and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "a par takes branches and a body"))) ((NoTrees) (match branches ((Leaf btext bquoted) (Err (fault "type" "a par's branches are a list"))) ((Node list) (match (branch_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (expr_type decls inside body))))))))))))
+
+  (fn branch_scope ((decls Env) (outer Locals) (inner Locals) (branches Trees)) (Result Locals Fault)
+    (uses Alloc)
+    (match branches
+      ((NoTrees) (Ok inner))
+      ((Trees branch more) (match branch ((Leaf btext bquoted) (Err (fault "type" "a branch is (name work)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a branch is (name work)"))) ((Trees name after) (match after ((NoTrees) (Err (fault "type" "a branch is (name work)"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "type" "a branch's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok bname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok value) (match (placed decls (concat "branch `" (concat bname "`")) clauses value) ((Err f) (Err f)) ((Ok fine) (match (binder_ok inner bname) ((Err f) (Err f)) ((Ok free) (branch_scope decls outer (Local bname value inner) more))))))))))))))))))))
+
+  ; --- what crosses to memory of its own ---------------------------------------------
+  ; Work placed on another `process` or `node` is copied over a wire, not shared, so every
+  ; part of what it answers needs an agreed form: a primitive, or a record with a schema.
+  ; Whether the profile has such a place at all is compiler/effects.wtn's business.
+  (fn placed ((decls Env) (what Str) (clauses Trees) (carried Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (let where (place_in clauses)
+      (if (or (str.eq where "process") (str.eq where "node"))
+        (let why (wire_why decls carried (NoNames) 4096)
+          (if (str.eq why "")
+            (Ok unit)
+            (Err (fault "type" (concat "placement: " (concat what (concat " runs with memory of its own, so what it carries must have a wire form: " why)))))))
+        (Ok unit))))
+
+  ; The place in an `(on where)` clause, or "" when there is none.
+  (fn place_in ((clauses Trees)) Str
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) "")
+      ((Trees c more) (match c
+        ((Leaf text quoted) (place_in more))
+        ((Node parts) (match parts
+          ((NoTrees) (place_in more))
+          ((Trees head args) (if (is_word head "on")
+            (match args ((NoTrees) "") ((Trees w rest) (match w ((Leaf wtext wquoted) (match (named wtext) ((Ok n) n) ((Err f) ""))) ((Node inner) ""))))
+            (place_in more)))))))))
+
+  ; Why `t` has no wire form, or "" when it has one. A type already being looked at is
+  ; taken to have one, so a recursive enum ends.
+  (fn wire_why ((decls Env) (t Ty) (seen Names) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let base (get t base)
+      (if (or (<= left 0) (or (is_unknown t) (names_has seen base)))
+        ""
+        (if (str.eq base "Array")
+          (wires_why decls (get t args) (Names base seen) (- left 1))
+          (if (wire_prim base)
+            ""
+            (match (newtype_of decls base)
+              ((Some d) (wire_why decls (get d inner) (Names base seen) (- left 1)))
+              ((None) (match (enum_of decls base)
+                ((Some d) (let first (wires_why decls (get t args) (Names base seen) (- left 1))
+                  (if (str.eq first "") (variants_why decls (get d variants) (get d params) (get t args) (Names base seen) (- left 1)) first)))
+                ((None) (match (record_of decls base)
+                  ((Some r) (if (get r wired)
+                    (fields_why decls (get r fields) (Names base seen) (- left 1))
+                    (concat "`" (concat base "` declares no wire schema, so two machines cannot agree on it"))))
+                  ((None) (concat "`" (concat base "` has no wire form")))))))))))))
+
+  (fn wires_why ((decls Env) (ts Tys) (seen Names) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) ""
+    (match ts
+      ((NoTys) "")
+      ((Tys t rest) (let why (wire_why decls t seen (- left 1)) (if (str.eq why "") (wires_why decls rest seen (- left 1)) why))))))
+
+  (fn variants_why ((decls Env) (vs VariantSignatures) (params Names) (given Tys) (seen Names) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) ""
+    (match vs
+      ((NoVariantSignatures) "")
+      ((VariantSignatures v rest) (let why (wires_why decls (subst_all (get v fields) params given) seen (- left 1))
+        (if (str.eq why "") (variants_why decls rest params given seen (- left 1)) why))))))
+
+  (fn fields_why ((decls Env) (fs RecordFields) (seen Names) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) ""
+    (match fs
+      ((NoRecordFields) "")
+      ((RecordFields n ty rest) (let why (wire_why decls ty seen (- left 1)) (if (str.eq why "") (fields_why decls rest seen (- left 1)) why))))))
+
+  (fn wire_prim ((base Str)) Bool
+    (or (or (or (str.eq base "Bool") (str.eq base "Bytes")) (or (str.eq base "Int") (str.eq base "Str")))
+      (or (or (str.eq base "Tensor") (str.eq base "Unit")) (or (is_fixed_width base) (or (str.eq base "F16") (or (str.eq base "BF16") (str.eq base "F32")))))))
+
+  ; `(seq a b ... z)`: everything but the last is evaluated for what it does and must
+  ; be a Unit, since a value computed and dropped is nearly always a mistake.
+  (fn seq_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a seq needs at least one expression")))
+      ((Trees h more) (match more ((NoTrees) (expr_type decls ls h)) ((Trees next after) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (if (or (str.eq (get t base) "Unit") (str.eq (get t base) "?")) (seq_type decls ls more) (Err (fault "type" (concat "a " (concat (get t base) " value is computed and discarded"))))))))))))
+
+  (fn unwrap_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "an unwrap takes one expression")))
+      ((Trees h more) (match more ((Trees extra others) (Err (fault "type" "an unwrap takes one expression"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (match (newtype_of decls (get t base)) ((None) (Err (fault "type" (concat "cannot unwrap a " (concat (get t base) "; only newtypes wrap a value"))))) ((Some d) (Ok (ty_plus (get d inner) (get t labels))))))))))))
+
+  ; `(Newtype value)`: the value must fit what the newtype wraps.
+  (fn wrap_type ((decls Env) (ls Locals) (d NewtypeSignature) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a newtype wraps one value")))
+      ((Trees h more) (match more ((Trees extra others) (Err (fault "type" "a newtype wraps one value"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get d inner)) (Ok (plain (get d name))) (Err (fault "type" "a value does not fit the type a newtype wraps"))))))))))
+
+  ; The enum a variant belongs to, wherever it is declared.
+  (fn owner_of ((es EnumSignatures) (name Str)) (Option EnumSignature)
+    (match es
+      ((NoEnumSignatures) (None))
+      ((EnumSignatures d more) (match (variant_of d name) ((Some v) (Some d)) ((None) (owner_of more name))))))
+
+  ; A variant used as a constructor. For a generic enum the type arguments are found
+  ; from the arguments given; one nothing settles stays unknown (`None` is an `Option ?`)
+  ; until the place it is used fills it in.
+  (fn variant_call ((decls Env) (ls Locals) (e EnumSignature) (name Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (variant_of e name)
+      ((None) (Err (fault "type" "a variant is not in its own enum")))
+      ((Some v) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get v fields)))) (Err (fault "type" "a variant is given a different number of arguments than it has fields")) (match (bind_all (get v fields) actuals (get e params) (unknowns (get e params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get v fields) (get e params) found) actuals) (Ok (make Ty (base (get e name)) (labels (NoNames)) (args found) (dims (NoDims)))) (Err (fault "type" "an argument does not fit its field")))))))))))
+
+  ; Each given type against the one wanted in its place, and neither list longer.
+  (fn loose_all ((wanted Tys) (given Tys)) Bool
+    (match wanted
+      ((NoTys) (match given ((NoTys) true) ((Tys g more) false)))
+      ((Tys w wmore) (match given ((NoTys) false) ((Tys g gmore) (and (loose_fits g w) (loose_all wmore gmore)))))))
+
+  ; --- arrays and tensors --------------------------------------------------------
+  ; What these answer depends on what they hold, which the kernel's table of primitives
+  ; cannot say, so each has its own rule. Reading an array is total: `array.at` answers an
+  ; `Option`, and the labels of the array ride along on whatever comes out of it.
+  (fn array_type ((decls Env) (ls Locals) (name Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (arg_types decls ls rest)
+      ((Err f) (Err f))
+      ((Ok args) (if (str.eq name "array.empty") (if (= (tys_count args) 0) (Ok (make Ty (base "Array") (labels (NoNames)) (args (Tys (unknown) (NoTys))) (dims (NoDims)))) (Err (fault "type" "array.empty takes no arguments"))) (match args ((NoTys) (Err (fault "type" "an array operation takes an array"))) ((Tys holder more) (if (not (str.eq (get holder base) "Array")) (Err (fault "type" "an array operation wants an array")) (match (get holder args) ((NoTys) (Err (fault "type" "an array operation wants an array"))) ((Tys element none) (array_op name holder element more))))))))))
+
+  (fn array_op ((name Str) (holder Ty) (element Ty) (more Tys)) (Result Ty Fault)
+    (uses Alloc)
+    (if (str.eq name "array.len")
+      (match more
+        ((NoTys) (Ok (make Ty (base "Count") (labels (get holder labels)) (args (NoTys)) (dims (NoDims)))))
+        ((Tys extra others) (Err (fault "type" "array.len takes one argument"))))
+      (match more
+        ((NoTys) (Err (fault "type" "an array operation is given too few arguments")))
+        ((Tys second tail) (match tail ((Tys extra others) (Err (fault "type" "an array operation is given too many arguments"))) ((NoTys) (if (str.eq name "array.at") (if (or (is_unknown second) (str.eq (get second base) "Count")) (Ok (make Ty (base "Option") (labels (get holder labels)) (args (Tys (ty_plus element (get holder labels)) (NoTys))) (dims (NoDims)))) (Err (fault "type" "an index into an array is a Count"))) (if (loose_fits second element) (Ok (make Ty (base "Array") (labels (names_union (get holder labels) (get second labels))) (args (Tys (join element second) (NoTys))) (dims (NoDims)))) (Err (fault "type" "the value pushed onto an array is not what it holds"))))))))))
+
+  ; `tensor.add` is elementwise, so the shapes must match; `tensor.matmul` contracts the
+  ; last axis of the left against the first of the right, and the two must agree by name
+  ; as well as size.
+  (fn tensor_type_of ((decls Env) (ls Locals) (name Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (arg_types decls ls rest)
+      ((Err f) (Err f))
+      ((Ok args) (match args ((NoTys) (Err (fault "type" "a tensor operation takes two tensors"))) ((Tys left more) (match more ((NoTys) (Err (fault "type" "a tensor operation takes two tensors"))) ((Tys right none) (match none ((NoTys) (tensor_result name left right)) ((Tys extra others) (Err (fault "type" "a tensor operation takes two tensors")))))))))))
+
+  (fn tensor_result ((name Str) (left Ty) (right Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (if (not (and (is_tensor left) (is_tensor right)))
+      (Err (fault "type" "a tensor operation wants tensors with axes"))
+      (if (not (and (tys_loose_fit (get left args) (get right args)) (tys_loose_fit (get right args) (get left args))))
+        (Err (fault "type" "a tensor operation needs one element format on both sides"))
+        (if (str.eq name "tensor.add")
+          (if (dims_eq (get left dims) (get right dims))
+            (Ok (make Ty (base "Tensor") (labels (names_union (get left labels) (get right labels))) (args (get left args)) (dims (get left dims))))
+            (Err (fault "type" "tensor.add works elementwise, so the shapes must match")))
+          (if (or (< (dims_count (get left dims)) 2) (< (dims_count (get right dims)) 2))
+            (Err (fault "type" "tensor.matmul needs two axes on each side"))
+            (if (dims_eq (dims_last (get left dims)) (dims_first (get right dims)))
+              (Ok (make Ty (base "Tensor") (labels (names_union (get left labels) (get right labels))) (args (get left args)) (dims (dims_join (dims_init (get left dims)) (dims_rest (get right dims))))))
+              (Err (fault "type" "tensor.matmul contracts the last axis of the left with the first of the right, and they are not the same axis"))))))))
+
+  (fn is_tensor ((t Ty)) Bool
+    (and (str.eq (get t base) "Tensor") (< 0 (dims_count (get t dims)))))
+
+  (fn dims_count ((ds Dims)) Int
+    (match ds ((NoDims) 0) ((Dims a n rest) (+ 1 (dims_count rest)))))
+
+  (fn dims_first ((ds Dims)) Dims
+    (match ds ((NoDims) ds) ((Dims a n rest) (Dims a n (NoDims)))))
+
+  (fn dims_rest ((ds Dims)) Dims (match ds ((NoDims) ds) ((Dims a n rest) rest)))
+
+  (fn dims_last ((ds Dims)) Dims
+    (match ds
+      ((NoDims) ds)
+      ((Dims a n rest) (match rest ((NoDims) (Dims a n (NoDims))) ((Dims b m more) (dims_last rest))))))
+
+  (fn dims_init ((ds Dims)) Dims
+    (match ds
+      ((NoDims) ds)
+      ((Dims a n rest) (match rest ((NoDims) (NoDims)) ((Dims b m more) (Dims a n (dims_init rest)))))))
+
+  (fn dims_join ((p Dims) (q Dims)) Dims
+    (match p ((NoDims) q) ((Dims a n rest) (Dims a n (dims_join rest q)))))
+
+  ; A primitive, typed from the kernel's table of them: the number format it is used at
+  ; is whatever its numeric arguments agree on, and each argument must fit its place.
+  (fn builtin_type ((decls Env) (ls Locals) (b Builtin) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (arg_types decls ls rest)
+      ((Err f) (Err f))
+      ((Ok args) (if (not (= (tys_count args) (wants_count (get b params)))) (Err (fault "type" "a primitive is given a different number of arguments than it takes")) (if (and (get b sink) (any_labelled args)) (Err (fault "type" "a sink is given data that carries a label")) (match (format_of (get b params) args "") ((Err f) (Err f)) ((Ok kind) (if (not (allowed_format b kind)) (Err (fault "type" "a primitive is used at a format it does not take")) (if (and (get b fixed) (not (is_fixed_width kind))) (Err (fault "type" "a primitive needs a fixed width; Int is unbounded")) (if (args_fit (get b params) args kind) (match (answered b kind) ((Err f) (Err f)) ((Ok answer) (Ok (ty_plus answer (names_union (if (get b sink) (NoNames) (labels_of args)) (get b ret_labels)))))) (Err (fault "type" "an argument of a primitive is not what it wants"))))))))))))
+
+  (fn arg_types ((decls Env) (ls Locals) (rest Trees)) (Result Tys Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Ok (NoTys)))
+      ((Trees h more) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (match (arg_types decls ls more) ((Err f) (Err f)) ((Ok others) (Ok (Tys t others)))))))))
+
+  ; Every label the arguments carry.
+  (fn labels_of ((ts Tys)) Names
+    (uses Alloc)
+    (match ts
+      ((NoTys) (NoNames))
+      ((Tys t more) (names_union (get t labels) (labels_of more)))))
+
+  (fn any_labelled ((ts Tys)) Bool
+    (match ts
+      ((NoTys) false)
+      ((Tys t more) (match (get t labels) ((Names first others) true) ((NoNames) (any_labelled more))))))
+
+  ; The number format the call is at: what its numeric arguments are, which must agree.
+  (fn format_of ((ws Wants) (ts Tys) (seen Str)) (Result Str Fault)
+    (uses Alloc)
+    (match ws
+      ((NoWants) (Ok (if (str.eq seen "") "Int" seen)))
+      ((Wants w wmore) (match ts ((NoTys) (Ok (if (str.eq seen "") "Int" seen))) ((Tys t tmore) (if (and (stands_for_a_number w) (not (str.eq (get t base) "Real"))) (if (or (str.eq seen "") (str.eq seen (get t base))) (format_of wmore tmore (get t base)) (Err (fault "type" "a primitive mixes number formats"))) (format_of wmore tmore seen)))))))
+
+  (fn args_fit ((ws Wants) (ts Tys) (kind Str)) Bool
+    (match ws
+      ((NoWants) true)
+      ((Wants w wmore) (match ts ((NoTys) true) ((Tys t tmore) (and (fits_want w kind (get t base)) (args_fit wmore tmore kind)))))))
+
+  ; `(let name value body)`: the body is read with the name in scope at the value's type.
+  (fn let_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((Trees n more) (match n ((Node inner) (Err (fault "type" "a let binds a name"))) ((Leaf text quoted) (match more ((Trees v tail) (match tail ((Trees body none) (match none ((NoTrees) (match (named text) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err f)) ((Ok fine) (match (expr_type decls ls v) ((Err f) (Err f)) ((Ok bound) (expr_type decls (Local name bound ls) body)))))))) ((Trees extra others) (Err (fault "type" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body")))))))
+      ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body")))))
+
+  ; `(match value ((Variant binder...) body)...)` on a value of a declared enum. Read as
+  ; Python's checker reads it: no wildcard, every variant exactly once, a binder for each
+  ; field, and arms that agree on one type. A generic enum, and a value carrying labels,
+  ; are turned away by name, since reading them needs the type arguments and the label
+  ; flow worked out first.
+  (fn match_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a match takes a value and its arms")))
+      ((Trees value arms) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok seen) (match (enum_of decls (get seen base)) ((None) (Err (fault "type" (concat "a match is on an enum; " (concat (get seen base) " is not one"))))) ((Some d) (if (= (tys_count (get seen args)) (names_count (get d params))) (match (arms_type decls ls d (get seen args) (get seen labels) arms (NoNames) (None)) ((Err f) (Err f)) ((Ok ty) (labelled_arms decls (get seen labels) arms ty))) (Err (fault "type" "a generic enum is matched at all of its type arguments"))))))))))
+
+  ; A match on labelled data: what it answers carries the labels, and no arm may perform an
+  ; effect, since whether it happens would reveal which arm was taken.
+  (fn labelled_arms ((decls Env) (labels Names) (arms Trees) (ty Ty)) (Result Ty Fault)
+    (uses Alloc)
+    (match labels
+      ((NoNames) (Ok ty))
+      ((Names l more) (match (effects_in_all decls arms)
+        ((NoNames) (Ok (ty_plus ty labels)))
+        ((Names e others) (Err (fault "type" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")))))))
+
+  (fn tys_plus ((ts Tys) (labels Names)) Tys
+    (uses Alloc)
+    (match ts ((NoTys) (NoTys)) ((Tys t rest) (Tys (ty_plus t labels) (tys_plus rest labels)))))
+
+  (record Arm (variant Str) (ty Ty))
+
+  ; The arms in order, remembering which variants have been handled and the type the
+  ; arms so far have given.
+  (fn arms_type ((decls Env) (ls Locals) (d EnumSignature) (given Tys) (labels Names) (arms Trees) (seen Names) (prior (Option Ty))) (Result Ty Fault)
+    (uses Alloc)
+    (match arms
+      ((NoTrees) (match prior ((None) (Err (fault "type" "a match has no arms"))) ((Some ty) (if (all_handled (get d variants) seen) (Ok ty) (Err (fault "type" (concat "a match on " (concat (get d name) " does not handle every variant"))))))))
+      ((Trees a more) (match (arm_type decls ls d given labels a) ((Err f) (Err f)) ((Ok done) (if (names_has seen (get done variant)) (Err (fault "type" (concat "`" (concat (get done variant) "` is handled twice")))) (match prior ((None) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (get done ty)))) ((Some before) (if (loose_eq before (get done ty)) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (join before (get done ty)))) (Err (fault "type" "the arms of a match have different types")))))))))))
+
+  (fn all_handled ((vs VariantSignatures) (seen Names)) Bool
+    (match vs
+      ((NoVariantSignatures) true)
+      ((VariantSignatures v rest) (and (names_has seen (get v name)) (all_handled rest seen)))))
+
+  ; One arm: `((Variant binder...) body)`.
+  (fn arm_type ((decls Env) (ls Locals) (d EnumSignature) (given Tys) (labels Names) (arm Tree)) (Result Arm Fault)
+    (uses Alloc)
+    (match arm
+      ((Leaf text quoted) (Err (fault "type" "an arm is ((Variant binder...) body)")))
+      ((Node items) (match items ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees pattern more) (match more ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((NoTrees) (match pattern ((Leaf ptext pquoted) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Node pitems) (match pitems ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees head binders) (match head ((Node inner) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Leaf vtext vquoted) (match (named vtext) ((Err f) (Err f)) ((Ok variant) (if (str.eq variant "_") (Err (fault "type" "wildcard arms are not allowed: a new variant must never be handled silently")) (match (variant_of d variant) ((None) (Err (fault "type" (concat "`" (concat variant (concat "` is not a variant of " (get d name))))))) ((Some v) (match (bound ls binders (tys_plus (subst_all (get v fields) (get d params) given) labels)) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok ty) (Ok (make Arm (variant variant) (ty ty)))))))))))))))))))))))))))
+
+  ; The binders of a pattern against the fields of the variant, one each.
+  (fn bound ((ls Locals) (binders Trees) (fields Tys)) (Result Locals Fault)
+    (uses Alloc)
+    (match binders
+      ((NoTrees) (match fields ((NoTys) (Ok ls)) ((Tys f more) (Err (fault "type" "a pattern binds fewer names than the variant has fields")))))
+      ((Trees b others) (match fields ((NoTys) (Err (fault "type" "a pattern binds more names than the variant has fields"))) ((Tys f more) (match b ((Node inner) (Err (fault "type" "a binder is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (match (binder_ok ls name) ((Err e) (Err e)) ((Ok fine) (bound (Local name f ls) others more))))))))))))
+
+  ; --- records -----------------------------------------------------------------
+  ; `(make Record (field value)...)` names every field, in declaration order; `(get r f)`
+  ; reads one, carrying the labels of the record; `(with r (field value)...)` changes at
+  ; least one, still in declaration order. Each value must fit its field's type.
+  (fn make_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a make takes a record name and its fields")))
+      ((Trees n inits) (match n ((Node inner) (Err (fault "type" "a record's name is a name"))) ((Leaf text quoted) (match (named text) ((Err f) (Err f)) ((Ok name) (match (any_record decls name) ((None) (Err (fault "type" (concat "no record is named `" (concat name "`"))))) ((Some d) (match (init_checks decls ls (get d fields) inits true) ((Err f) (Err f)) ((Ok done) (Ok (plain name)))))))))))))
+
+  (fn get_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((Trees value more) (match more ((Trees field none) (match none ((NoTrees) (match field ((Node inner) (Err (fault "type" "a field's name is a name"))) ((Leaf text quoted) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (field_of decls held text)))))) ((Trees extra others) (Err (fault "type" "a get takes a record and a field"))))) ((NoTrees) (Err (fault "type" "a get takes a record and a field")))))
+      ((NoTrees) (Err (fault "type" "a get takes a record and a field")))))
+
+  (fn field_of ((decls Env) (held Ty) (text Bytes)) (Result Ty Fault)
+    (uses Alloc)
+    (match (named text)
+      ((Err f) (Err f))
+      ((Ok field) (match (any_record decls (get held base)) ((None) (Err (fault "type" "a get is on a record"))) ((Some d) (match (field_at (get d fields) field) ((None) (Err (fault "type" (concat (get d name) (concat " has no field `" (concat field "`")))))) ((Some ty) (Ok (ty_plus ty (get held labels))))))))))
+
+  (fn with_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a with takes a record and the fields to change")))
+      ((Trees value inits) (match inits ((NoTrees) (Err (fault "type" "a with changes at least one field"))) ((Trees first others) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (any_record decls (get held base)) ((None) (Err (fault "type" "a with is on a record"))) ((Some d) (match (init_checks decls ls (get d fields) inits false) ((Err f) (Err f)) ((Ok done) (Ok held))))))))))))
+
+  ; The initialisers in order against the record's fields. Exact (a `make`) means the
+  ; next initialiser must be for the next field; otherwise (a `with`) fields may be
+  ; skipped, but never repeated or taken out of order. The recursion is on the
+  ; initialisers, so each value is a piece of the list being walked.
+  (fn init_checks ((decls Env) (ls Locals) (fields RecordFields) (inits Trees) (exact Bool)) (Result Unit Fault)
+    (uses Alloc)
+    (match inits
+      ((NoTrees) (match fields ((NoRecordFields) (Ok unit)) ((RecordFields n ty rest) (if exact (Err (fault "type" "a make needs every field")) (Ok unit)))))
+      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "type" "an initialiser is (field value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "an initialiser is (field value)"))) ((Trees fname rest) (match rest ((NoTrees) (Err (fault "type" "an initialiser is (field value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "an initialiser is (field value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "type" "a field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (match (find_field fields field) ((None) (Err (fault "type" (concat "no field `" (concat field "` is left to give, in this order"))))) ((Some found) (if (and exact (not (field_first fields field))) (Err (fault "type" "a make gives its fields in declaration order, with none left out")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get found ty)) (init_checks decls ls (get found after) more exact) (Err (fault "type" (concat "a value does not fit field `" (concat field "`")))))))))))))))))))))))))
+
+  (record Found (ty Ty) (after RecordFields))
+
+  (fn find_field ((fs RecordFields) (which Str)) (Option Found)
+    (match fs
+      ((NoRecordFields) (None))
+      ((RecordFields n ty rest) (if (str.eq n which) (Some (make Found (ty ty) (after rest))) (find_field rest which)))))
+
+  (fn field_first ((fs RecordFields) (which Str)) Bool
+    (match fs ((NoRecordFields) false) ((RecordFields n ty rest) (str.eq n which))))
+
+  ; --- label parameters ----------------------------------------------------------
+  ; `(shout (label L))` takes one definition for every label. The caller decides what `L`
+  ; stands for: every position that mentions it contributes the labels its argument
+  ; carries beyond those written beside it, and they join, so argument order decides
+  ; nothing. Then `L` is replaced in the parameters and the result by what was found, and
+  ; the call is read as any other.
+  (fn names_without ((ns Names) (x Str)) Names
+    (uses Alloc)
+    (match ns
+      ((NoNames) ns)
+      ((Names h more) (if (str.eq h x) (names_without more x) (Names h (names_without more x))))))
+
+  (fn names_minus ((ns Names) (gone Names)) Names
+    (uses Alloc)
+    (match gone
+      ((NoNames) ns)
+      ((Names h more) (names_minus (names_without ns h) more))))
+
+  (fn label_found ((declared Ty) (actual Ty) (l Str)) Names
+    (uses Alloc)
+    (names_union
+      (if (names_has (get declared labels)
+          l)
+        (names_minus (get actual labels) (names_without (get declared labels) l))
+        (NoNames))
+      (labels_found (get declared args) (get actual args) l)))
+
+  (fn labels_found ((ds Tys) (as Tys) (l Str)) Names
+    (uses Alloc)
+    (match ds
+      ((NoTys) (NoNames))
+      ((Tys d rest) (match as ((NoTys) (NoNames)) ((Tys a more) (names_union (label_found d a l) (labels_found rest more l)))))))
+
+  (fn label_replaced ((t Ty) (l Str) (found Names)) Ty
+    (uses Alloc)
+    (with t
+      (labels (if (names_has (get t labels) l) (names_union (names_without (get t labels) l) found) (get t labels)))
+      (args (labels_replaced (get t args) l found))))
+
+  (fn labels_replaced ((ts Tys) (l Str) (found Names)) Tys
+    (uses Alloc)
+    (match ts
+      ((NoTys) ts)
+      ((Tys h more) (Tys (label_replaced h l found) (labels_replaced more l found)))))
+
+  (fn labels_solved ((ps Tys) (actuals Tys) (l Str)) Names
+    (uses Alloc)
+    (match ps
+      ((NoTys) (NoNames))
+      ((Tys p rest) (match actuals ((NoTys) (NoNames)) ((Tys a more) (names_union (label_found p a l) (labels_solved rest more l)))))))
+
+  ; A call to a declared function. A label parameter is solved first, from the arguments;
+  ; then a generic one has its type parameters found out, as a generic variant's are.
+  (fn call_type ((decls Env) (ls Locals) (sig FnSignature) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (if (str.eq (get sig label_param) "")
+      (call_plain decls ls sig rest)
+      (match (arg_types decls ls rest)
+        ((Err f) (Err f))
+        ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get sig params))))
+          (Err (fault "type" "a call is given a different number of arguments than the function takes"))
+          (call_plain decls ls (with sig (params (labels_replaced (get sig params) (get sig label_param) (labels_solved (get sig params) actuals (get sig label_param)))) (ret (label_replaced (get sig ret) (get sig label_param) (labels_solved (get sig params) actuals (get sig label_param)))) (label_param "")) rest))))))
+
+  (fn call_plain ((decls Env) (ls Locals) (sig FnSignature) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match (get sig type_params)
+      ((NoNames) (match (call_args decls ls rest (get sig params)) ((Err f) (Err f)) ((Ok done) (Ok (if (names_has (get decls foreigns) (get sig name)) (ty_plus (get sig ret) (Names "Unverified" (NoNames))) (get sig ret))))))
+      ((Names first others) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get sig params)))) (Err (fault "type" "a call is given a different number of arguments than the function takes")) (match (bind_all (get sig params) actuals (get sig type_params) (unknowns (get sig type_params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get sig params) (get sig type_params) found) actuals) (Ok (subst (get sig ret) (get sig type_params) found)) (Err (fault "type" "an argument does not fit its parameter")))))))))))
+
+  ; Each argument against the parameter in its place, and neither list longer than the other.
+  (fn call_args ((decls Env) (ls Locals) (rest Trees) (want Tys)) (Result Unit Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (match want ((NoTys) (Ok unit)) ((Tys w more) (Err (fault "type" "a call has fewer arguments than the function takes")))))
+      ((Trees a others) (match want ((NoTys) (Err (fault "type" "a call has more arguments than the function takes"))) ((Tys w more) (match (expr_type decls ls a) ((Err f) (Err f)) ((Ok got) (if (loose_fits got w) (call_args decls ls others more) (Err (fault "type" "an argument does not fit its parameter"))))))))))
+
+  ; `(if c a b)`: a `Bool` condition and two branches of one type, which is the type.
+  ; An effect inside a branch decided by labelled data would reveal that data by happening or not.
+  (fn hidden_effect ((decls Env) (labels Names) (a Tree) (b Tree)) Bool
+    (uses Alloc)
+    (match labels
+      ((NoNames) false)
+      ((Names l more) (match (names_union (effects_in decls a) (effects_in decls b)) ((NoNames) false) ((Names e others) true)))))
+
+  (fn if_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((Trees c more) (match more ((Trees a others) (match others ((Trees b none) (match none ((NoTrees) (match (expr_type decls ls c) ((Err e) (Err e)) ((Ok cond) (if (loose_eq cond (plain "Bool")) (match (expr_type decls ls a) ((Err e) (Err e)) ((Ok then) (match (expr_type decls ls b) ((Err e) (Err e)) ((Ok other) (if (loose_eq then other) (if (hidden_effect decls (get cond labels) a b) (Err (fault "type" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")) (Ok (ty_plus (join then other) (get cond labels)))) (Err (fault "type" "the branches of an if have different types"))))))) (Err (fault "type" "the condition of an if is a Bool")))))) ((Trees extra tail) (Err (fault "type" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "type" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "type" "an if takes a condition and two branches")))))
+      ((NoTrees) (Err (fault "type" "an if takes a condition and two branches")))))
+
+  ; --- effects ------------------------------------------------------------------
+  ; What a body performs, read off the tree. It follows the same forms the typer does,
+  ; because what is an expression and what is a name or a pattern depends on the form: a
+  ; field called `log` is not a call to anything. A call performs what the function it
+  ; names declares, a primitive what the kernel's table says, and a few forms perform
+  ; something of their own -- a log line `Log`, a channel `Ipc`, a scope `Clock`, a
+  ; model whatever its device is.
+  (fn effects_in ((decls Env) (t Tree)) Names
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (NoNames))
+      ((Node items) (match items ((NoTrees) (NoNames)) ((Trees head rest) (match head ((Node inner) (effects_in_all decls items)) ((Leaf htext hquoted) (match (named htext) ((Err f) (NoNames)) ((Ok name) (form_effects decls name rest))))))))))
+
+  (fn effects_in_all ((decls Env) (ts Trees)) Names
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (NoNames))
+      ((Trees h more) (names_union (effects_in decls h) (effects_in_all decls more)))))
+
+  (fn form_effects ((decls Env) (name Str) (rest Trees)) Names
+    (uses Alloc)
+    (if (or (str.eq name "let") (str.eq name "declassify"))
+      (match rest ((NoTrees) (NoNames)) ((Trees first more) (effects_in_all decls more)))
+      (if (str.eq name "get")
+        (match rest ((NoTrees) (NoNames)) ((Trees value more) (effects_in decls value)))
+        (if (str.eq name "match")
+          (match rest
+            ((NoTrees) (NoNames))
+            ((Trees value arms) (names_union (effects_in decls value) (arms_effects decls arms))))
+          (if (str.eq name "make")
+            (match rest
+              ((NoTrees) (NoNames))
+              ((Trees kind inits) (inits_effects decls inits)))
+            (if (str.eq name "log.fields")
+              (names_union (Names "Log" (NoNames)) (inits_effects decls rest))
+              (if (str.eq name "with")
+                (match rest
+                  ((NoTrees) (NoNames))
+                  ((Trees value inits) (names_union (effects_in decls value) (inits_effects decls inits))))
+                (if (str.eq name "send")
+                  (names_union (Names "Ipc" (NoNames))
+                    (match rest
+                      ((NoTrees) (NoNames))
+                      ((Trees chan more) (effects_in_all decls more))))
+                  (if (str.eq name "recv")
+                    (Names "Ipc" (NoNames))
+                    (if (str.eq name "infer")
+                      (match rest
+                        ((NoTrees) (NoNames))
+                        ((Trees m more) (names_union (device_effects decls m) (effects_in_all decls more))))
+                      (if (str.eq name "scope")
+                        (names_union (Names "Clock" (NoNames)) (grouped_effects decls rest))
+                        (if (str.eq name "par")
+                          (par_effects decls rest)
+                          (names_union (call_effects decls name)
+                            (effects_in_all decls rest))))))))))))))
+
+  ; `(match v ((Variant binder...) body)...)`: only the bodies are expressions.
+  (fn arms_effects ((decls Env) (arms Trees)) Names
+    (uses Alloc)
+    (match arms
+      ((NoTrees) (NoNames))
+      ((Trees arm more) (names_union (match arm ((Leaf text quoted) (NoNames)) ((Node parts) (match parts ((NoTrees) (NoNames)) ((Trees pattern after) (effects_in_all decls after))))) (arms_effects decls more)))))
+
+  ; `((field value)...)`: only the values are expressions.
+  (fn inits_effects ((decls Env) (inits Trees)) Names
+    (uses Alloc)
+    (match inits
+      ((NoTrees) (NoNames))
+      ((Trees init more) (names_union (match init ((Leaf text quoted) (NoNames)) ((Node parts) (match parts ((NoTrees) (NoNames)) ((Trees field after) (effects_in_all decls after))))) (inits_effects decls more)))))
+
+  ; `(scope (task...) body)` and `(par (branch...) body)`: the tasks or branches, each of
+  ; which is `(name work clause...)`, then the body.
+  (fn grouped_effects ((decls Env) (rest Trees)) Names
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (NoNames))
+      ((Trees group more) (names_union (match group ((Leaf text quoted) (NoNames)) ((Node members) (members_effects decls members))) (effects_in_all decls more)))))
+
+  ; A `par` whose branches do something other than build values depends on the order they
+  ; run in, which is `Nondet`; the function has to say so.
+  (fn par_effects ((decls Env) (rest Trees)) Names
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (NoNames))
+      ((Trees group more) (names_union (match group ((Leaf text quoted) (NoNames)) ((Node members) (branches_effects decls members))) (effects_in_all decls more)))))
+
+  (fn branches_effects ((decls Env) (members Trees)) Names
+    (uses Alloc)
+    (match members
+      ((NoTrees) (NoNames))
+      ((Trees member more) (names_union (match member ((Leaf text quoted) (NoNames)) ((Node parts) (match parts ((NoTrees) (NoNames)) ((Trees name after) (let mine (effects_in_all decls after) (if (order_free mine) mine (names_union mine (Names "Nondet" (NoNames))))))))) (branches_effects decls more)))))
+
+  ; Building a value is not an effect anything can observe.
+  (fn order_free ((es Names)) Bool
+    (match es ((NoNames) true) ((Names e more) (and (str.eq e "Alloc") (order_free more)))))
+
+  (fn members_effects ((decls Env) (members Trees)) Names
+    (uses Alloc)
+    (match members
+      ((NoTrees) (NoNames))
+      ((Trees member more) (names_union (match member ((Leaf text quoted) (NoNames)) ((Node parts) (match parts ((NoTrees) (NoNames)) ((Trees name after) (effects_in_all decls after))))) (members_effects decls more)))))
+
+  (fn device_effects ((decls Env) (m Tree)) Names
+    (uses Alloc)
+    (match m
+      ((Node inner) (NoNames))
+      ((Leaf text quoted) (match (named text) ((Err f) (NoNames)) ((Ok mname) (match (model_of decls mname) ((None) (NoNames)) ((Some known) (if (str.eq (get known device) "gpu") (Names "Gpu" (NoNames)) (if (str.eq (get known device) "npu") (Names "Npu" (NoNames)) (Names "Alloc" (NoNames)))))))))))
+
+  ; What calling a name performs.
+  (fn call_effects ((decls Env) (name Str)) Names
+    (uses Alloc)
+    (match (signature_of decls name)
+      ((Some sig) (if (names_has (get decls foreigns) name) (names_union (Names "Foreign" (NoNames)) (get sig effects)) (get sig effects)))
+      ((None) (match (primitive name) ((Some b) (get b effects)) ((None) (if (or (or (str.eq name "array.empty") (str.eq name "array.push")) (or (str.eq name "tensor.add") (str.eq name "tensor.matmul"))) (Names "Alloc" (NoNames)) (NoNames)))))))
+
+  ; The first name in a `(uses ...)` that is not an effect.
+  (fn first_unknown ((declared Names)) (Option Str)
+    (match declared
+      ((NoNames) (None))
+      ((Names e more) (if (known_effect e) (first_unknown more) (Some e)))))
+
+  (fn known_effect ((e Str)) Bool
+    (or (or (or (str.eq e "Alloc") (str.eq e "Clock")) (or (str.eq e "Console") (str.eq e "Env")))
+      (or (or (or (str.eq e "Foreign") (str.eq e "Gpu")) (or (str.eq e "Ipc") (str.eq e "Log")))
+        (or (or (str.eq e "Net") (str.eq e "Nondet"))
+          (or (str.eq e "Npu") (str.eq e "Store"))))))
+
+  ; The first effect performed that is not declared, if any.
+  (fn first_missing ((performed Names) (declared Names)) (Option Str)
+    (match performed
+      ((NoNames) (None))
+      ((Names e more) (if (names_has declared e) (first_missing more declared) (Some e)))))
+
+  ; --- a whole function ------------------------------------------------------
+  ; `(fn name ((param Type)...) Ret clause... body)`: the parameters are the scope, and
+  ; the body's type must fit the declared result. Clauses are not read here. A generic
+  ; function is turned away by name, since its parameters are types not yet known.
+  (fn check_fn ((decls Env) (t Tree)) (Result Unit Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (Err (fault "type" "a fn is a list")))
+      ((Node items) (match items ((NoTrees) (Err (fault "type" "a fn is a list"))) ((Trees keyword rest) (match rest ((NoTrees) (Err (fault "type" "a fn needs a name"))) ((Trees name after) (match name ((Node generic) (match generic ((NoTrees) (Err (fault "type" "a fn needs a name"))) ((Trees first tparams) (match (type_params_of tparams) ((Err f) (Err f)) ((Ok names) (check_after decls names after)))))) ((Leaf ntext nquoted) (check_after decls (NoNames) after))))))))))
+
+  (fn check_after ((decls Env) (tparams Names) (after Trees)) (Result Unit Fault)
+    (uses Alloc)
+    (match after
+      ((NoTrees) (Err (fault "type" "a fn needs a parameter list")))
+      ((Trees params more) (match more ((NoTrees) (Err (fault "type" "a fn needs a return type"))) ((Trees ret body) (check_body decls tparams params ret body))))))
+
+  ; The type parameters in a generic fn's name. A label parameter, written last as
+  ; `(label L)`, adds no type parameter: in the body `L` is a label like any other, which
+  ; is what rigid means -- nothing in the body can name what it stands for, so a value
+  ; carrying it cannot be returned without it.
+  (fn type_params_of ((ts Trees)) (Result Names Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (Ok (NoNames)))
+      ((Trees h more) (match h ((Node inner) (type_params_of more)) ((Leaf text quoted) (match (named text) ((Err f) (Err f)) ((Ok word) (match (type_params_of more) ((Err f) (Err f)) ((Ok others) (Ok (Names word others)))))))))))
+
+  ; Every name in a written type is something: a type parameter in scope (which takes no
+  ; arguments), a primitive, or a declared enum, record or newtype at the right arity.
+  (fn resolved ((decls Env) (tparams Names) (t Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (if (names_has tparams (get t base))
+      (if (= (tys_count (get t args)) 0)
+        (Ok unit)
+        (Err (fault "type" "a type parameter takes no arguments")))
+      (if (is_primitive (get t base))
+        (if (= (tys_count (get t args)) (primitive_arity (get t base)))
+          (resolved_all decls tparams (get t args))
+          (Err (fault "type" (concat (get t base) " is given the wrong number of type arguments"))))
+        (match (enum_of decls (get t base))
+          ((Some d) (if (= (tys_count (get t args)) (names_count (get d params))) (resolved_all decls tparams (get t args)) (Err (fault "type" (concat (get t base) " is given the wrong number of type arguments")))))
+          ((None) (if (or (present_newtype decls (get t base)) (present_any_record decls (get t base))) (if (= (tys_count (get t args)) 0) (Ok unit) (Err (fault "type" (concat (get t base) " takes no type arguments")))) (Err (fault "type" (concat "no type is named `" (concat (get t base) "`"))))))))))
+
+  (fn resolved_all ((decls Env) (tparams Names) (ts Tys)) (Result Unit Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTys) (Ok unit))
+      ((Tys h more) (match (resolved decls tparams h) ((Err f) (Err f)) ((Ok done) (resolved_all decls tparams more))))))
+
+  ; An array holds one type; a tensor's one argument is its element format; every other
+  ; primitive stands alone.
+  (fn primitive_arity ((name Str)) Int
+    (if (or (str.eq name "Array") (str.eq name "Tensor")) 1 0))
+
+  (fn present_newtype ((decls Env) (name Str)) Bool
+    (match (newtype_of decls name) ((Some d) true) ((None) false)))
+
+  (fn present_any_record ((decls Env) (name Str)) Bool
+    (match (any_record decls name) ((Some d) true) ((None) false)))
+
+  (fn check_body ((decls Env) (tparams Names) (params Tree) (ret Tree) (body Trees)) (Result Unit Fault)
+    (uses Alloc)
+    (match (param_locals decls tparams (NoLocals) (param_trees params))
+      ((Err f) (Err f))
+      ((Ok ls) (match (type_of ret) ((Err f) (Err f)) ((Ok declared) (match (resolved decls tparams declared) ((Err f) (Err f)) ((Ok known) (match (last_of body) ((None) (Err (fault "type" "a fn needs a body"))) ((Some b) (match (expr_type decls ls b) ((Err f) (Err f)) ((Ok got) (if (loose_fits got declared) (match (first_unknown (uses_in body)) ((Some odd) (Err (fault "effect" (concat "no effect is named `" (concat odd "`"))))) ((None) (match (first_missing (effects_in decls b) (uses_in body)) ((None) (Ok unit)) ((Some missing) (Err (fault "effect" (concat "a fn performs " (concat missing " but does not declare it")))))))) (Err (fault "type" "the body of a fn does not fit its declared result"))))))))))))))
+
+  (fn param_trees ((t Tree)) Trees
+    (match t ((Leaf text quoted) (NoTrees)) ((Node items) items)))
+
+  (fn param_locals ((decls Env) (tparams Names) (ls Locals) (ps Trees)) (Result Locals Fault)
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (Ok ls))
+      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "type" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "type" "a parameter is (name Type)"))) ((Trees written none) (match n ((Node inner) (Err (fault "type" "a parameter is (name Type)"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err f)) ((Ok fine) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (match (resolved decls tparams ty) ((Err f) (Err f)) ((Ok known) (param_locals decls tparams (Local name ty ls) more))))))))))))))))))))
+
+  ; --- a whole module, one line per fn -------------------------------------------
+  (fn report_source ((src Str)) Str
+    (uses Alloc)
+    (match (env_with_prelude src)
+      ((Err f) (concat "no environment: " (get f why)))
+      ((Ok decls) (match (parse (tokens_of (str.encode src))) ((Err f) (concat "not a form: " (get f why))) ((Ok tree) (report_items decls (module_items tree)))))))
+
+  ; The prelude is part of every module: `Option`, `Result`, `Fault` and the newtypes the
+  ; primitives answer in. The environment starts from it and the module's own
+  ; declarations are added on top, so a module that redeclares one is refused.
+  (fn prelude () Str
+    "(module prelude (enum (Option T) (None) (Some (value T))) (enum (Result T E) (Ok (value T)) (Err (error E))) (record Fault (schema Fault 1) (op Str) (why Str) (cause (Option Fault))) (newtype Chars Int) (newtype Octets Int) (newtype Count Int) (newtype Instant I64) (newtype WallTime I64) (newtype Ticks I64) (newtype Duration I64) (fn fault ((op Str) (why Str)) Fault (make Fault (op op) (why why) (cause (None)))) (fn (context T) ((r (Result T Fault)) (op Str) (why Str)) (Result T Fault) r))")
+
+  (fn env_with_prelude ((src Str)) (Result Env Fault)
+    (uses Alloc)
+    (match (env_of_source (prelude))
+      ((Err f) (Err f))
+      ((Ok base) (match (parse (tokens_of (str.encode src))) ((Err f) (Err f)) ((Ok tree) (collected (module_items tree) base))))))
+
+  (fn module_items ((t Tree)) Trees
+    (match t
+      ((Leaf text quoted) (NoTrees))
+      ((Node items) (match items ((NoTrees) (NoTrees)) ((Trees keyword rest) (match rest ((NoTrees) (NoTrees)) ((Trees name more) more)))))))
+
+  (fn report_items ((decls Env) (items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees h more) (concat (report_one decls h) (report_items decls more)))))
+
+  (fn report_one ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (match h
+      ((Leaf text quoted) "")
+      ((Node parts) (match parts ((NoTrees) "") ((Trees head after) (if (is_word head "fn") (concat (fn_label after) (concat (outcome (check_fn decls h)) "\n")) ""))))))
+
+  (fn fn_label ((after Trees)) Str
+    (uses Alloc)
+    (match after
+      ((NoTrees) "?: ")
+      ((Trees name more) (match name ((Node inner) "(generic): ") ((Leaf text quoted) (match (named text) ((Err f) "?: ") ((Ok word) (concat word ": "))))))))
+
+  (fn outcome ((r (Result Unit Fault))) Str
+    (match r ((Ok done) "ok") ((Err f) (get f why))))
+
+  ; --- saying what was found -----------------------------------------------------
+  (fn array_of_int () Ty
+    (make Ty
+      (base "Array")
+      (labels (NoNames))
+      (args (Tys (plain "Int") (NoTys)))
+      (dims (NoDims))))
+
+  (fn tensor_ab () Ty
+    (make Ty
+      (base "Tensor")
+      (labels (NoNames))
+      (args (Tys (plain "F32") (NoTys)))
+      (dims (Dims "a" 2 (Dims "b" 3 (NoDims))))))
+
+  (fn tensor_bc () Ty
+    (make Ty
+      (base "Tensor")
+      (labels (NoNames))
+      (args (Tys (plain "F32") (NoTys)))
+      (dims (Dims "b" 3 (Dims "c" 4 (NoDims))))))
+
+  (fn labelled_msg ((tag Str)) Ty
+    (make Ty (base "Msg") (labels (Names tag (NoNames))) (args (NoTys)) (dims (NoDims))))
+
+  (fn secret_text () Ty
+    (make Ty
+      (base "Str")
+      (labels (Names "Secret" (NoNames)))
+      (args (NoTys))
+      (dims (NoDims))))
+
+  (fn sample () Locals
+    (Local "n"
+      (plain "Int")
+      (Local "ok"
+        (plain "Bool")
+        (Local "s"
+          (plain "Str")
+          (Local "sh"
+            (plain "Shape")
+            (Local "p"
+              (plain "Point")
+              (Local "arr"
+                (array_of_int)
+                (Local "ta"
+                  (tensor_ab)
+                  (Local "tb"
+                    (tensor_bc)
+                    (Local "sec"
+                      (secret_text)
+                      (Local "msg"
+                        (plain "Msg")
+                        (Local "smsg"
+                          (labelled_msg "Secret")
+                          (Local "umsg" (labelled_msg "Unverified") (NoLocals))))))))))))))
+
+  ; The declarations the calls below are made against.
+  (fn declarations () Str
+    "(module m (fn double ((x Int)) Int (* x 2)) (fn both ((a Bool) (b Bool)) Bool a) (fn greet ((s Str)) Str s) (fn (keep T) ((x T)) T x) (enum Shape (Dot) (Pair (a Int) (b Int))) (record Point (x Int) (y Int) (tag Str)) (patch PointPatch Point) (redact Secret hidden) (foreign fetch ((k Str)) Str) (record Msg (schema Msg 1) (body Str)) (channel Out Msg (accepts Secret)) (model Clf (input Str) (output Str) (trained-on Corpus) (device cpu) (weights \"wtn:abc\")))")
+
+  (fn typed ((src Str)) Str
+    (uses Alloc)
+    (match (env_with_prelude (declarations))
+      ((Err f) (concat "no environment: " (get f why)))
+      ((Ok decls) (match (parse (tokens_of (str.encode src))) ((Err f) (concat "not a form: " (get f why))) ((Ok tree) (match (expr_type decls (sample) tree) ((Err f) (concat "ill-typed: " (get f why))) ((Ok t) (shown t))))))))
+
+  (test "a number is an Int" (str.eq "Int" (typed "42")))
+
+  (test "a quoted token is a Str" (str.eq "Str" (typed "\"hi\"")))
+
+  (test "true and false are Bools" (str.eq "Bool" (typed "true")))
+
+  (test "a name has the type it was declared at" (str.eq "Bool" (typed "ok")))
+
+  (test "a name out of scope is refused" (str.eq "ill-typed: no name `x` is in scope" (typed "x")))
+
+  (test "arithmetic on Int is an Int" (str.eq "Int" (typed "(+ n (* 2 n))")))
+
+  (test "a comparison is a Bool" (str.eq "Bool" (typed "(<= n 3)")))
+
+  (test "arithmetic on a Str is refused" (str.eq "ill-typed: a primitive mixes number formats" (typed "(+ s 1)")))
+
+  (test "an operator takes two operands" (str.eq "ill-typed: a primitive is given a different number of arguments than it takes" (typed "(+ 1)")))
+
+  (test "an if takes the type of its branches" (str.eq "Str" (typed "(if ok s \"no\")")))
+
+  (test "the branches of an if must agree" (str.eq "ill-typed: the branches of an if have different types" (typed "(if ok 1 s)")))
+
+  (test "the condition of an if is a Bool" (str.eq "ill-typed: the condition of an if is a Bool" (typed "(if n 1 2)")))
+
+  (test "a let puts its name in scope for the body" (str.eq "Int" (typed "(let k (+ n 1) (* k k))")))
+
+  (test "a let's name is not in scope outside it" (str.eq "ill-typed: no name `k` is in scope" (typed "(+ (let k 1 k) k)")))
+
+  (test "a call has the function's result type" (str.eq "Int" (typed "(double (+ n 1))")))
+
+  (test "an argument must fit its parameter" (str.eq "ill-typed: an argument does not fit its parameter" (typed "(double ok)")))
+
+  (test "too few arguments are refused" (str.eq "ill-typed: a call has fewer arguments than the function takes" (typed "(both ok)")))
+
+  (test "too many arguments are refused" (str.eq "ill-typed: a call has more arguments than the function takes" (typed "(greet s s)")))
+
+  (test "a generic function's parameter is found from its argument" (str.eq "Str" (typed "(keep s)")))
+
+  (test "a constructor of a generic enum finds its argument" (str.eq "(Option Int)" (typed "(Some 1)")))
+
+  (test "an argument nothing settles stays unknown" (str.eq "(Option ?)" (typed "(None)")))
+
+  (test "the other branch settles it" (str.eq "(Option Int)" (typed "(if ok (Some 1) (None))")))
+
+  (test "a match on a generic enum binds the instantiated fields" (str.eq "Int" (typed "(match (Some n) ((Some x) x) ((None) 0))")))
+
+  (test "a match has the type of its arms" (str.eq "Int" (typed "(match sh ((Dot) 0) ((Pair a b) (+ a b)))")))
+
+  (test "a variant left out is refused" (str.eq "ill-typed: a match on Shape does not handle every variant" (typed "(match sh ((Dot) 0))")))
+
+  (test "a variant handled twice is refused" (str.eq "ill-typed: `Dot` is handled twice" (typed "(match sh ((Dot) 0) ((Dot) 1) ((Pair a b) a))")))
+
+  (test "a wildcard is refused" (str.eq "ill-typed: wildcard arms are not allowed: a new variant must never be handled silently" (typed "(match sh ((Dot) 0) ((_) 1))")))
+
+  (test "a pattern binds every field" (str.eq "ill-typed: a pattern binds fewer names than the variant has fields" (typed "(match sh ((Dot) 0) ((Pair a) a))")))
+
+  (test "arms must agree" (str.eq "ill-typed: the arms of a match have different types" (typed "(match sh ((Dot) 0) ((Pair a b) ok))")))
+
+  (test "a let may not shadow a name in scope" (str.eq "ill-typed: `n` is already bound in this scope" (typed "(let n 1 n)")))
+
+  (test "a pattern may not shadow a name in scope" (str.eq "ill-typed: `n` is already bound in this scope" (typed "(match sh ((Dot) 0) ((Pair n b) b))")))
+
+  (test "a binder may not be a group of builtins" (str.eq "ill-typed: `str` names a group of builtins, so a binding may not take it" (typed "(let str 1 str)")))
+
+  (test "a binder starts lower-case" (str.eq "ill-typed: bindings start lower-case: `K`" (typed "(let K 1 K)")))
+
+  (test "a make has the record's type" (str.eq "Point" (typed "(make Point (x 1) (y 2) (tag \"a\"))")))
+
+  (test "a make needs every field" (str.eq "ill-typed: a make needs every field" (typed "(make Point (x 1) (y 2))")))
+
+  (test "a make gives its fields in order" (str.eq "ill-typed: a make gives its fields in declaration order, with none left out" (typed "(make Point (y 2) (x 1) (tag \"a\"))")))
+
+  (test "a field's value must fit" (str.eq "ill-typed: a value does not fit field `x`" (typed "(make Point (x ok) (y 2) (tag \"a\"))")))
+
+  (test "a get has the field's type" (str.eq "Str" (typed "(get p tag)")))
+
+  (test "a get of a missing field is refused" (str.eq "ill-typed: Point has no field `z`" (typed "(get p z)")))
+
+  (test "a with has the record's type" (str.eq "Point" (typed "(with p (x 1) (tag \"q\"))")))
+
+  (test "a with may not repeat a field" (str.eq "ill-typed: no field `x` is left to give, in this order" (typed "(with p (x 1) (x 2))")))
+
+  (test "a with changes at least one field" (str.eq "ill-typed: a with changes at least one field" (typed "(with p)")))
+
+  (test "an array's length is a Count" (str.eq "Count" (typed "(array.len arr)")))
+
+  (test "an element comes out in an Option" (str.eq "(Option Int)" (typed "(array.at arr (array.len arr))")))
+
+  (test "what is pushed must be what the array holds" (str.eq "ill-typed: the value pushed onto an array is not what it holds" (typed "(array.push arr s)")))
+
+  (test "an empty array's element is not settled yet" (str.eq "(Array ?)" (typed "(array.empty)")))
+
+  (test "a matrix product contracts the axes that meet" (str.eq "(Tensor F32 (a 2) (c 4))" (typed "(tensor.matmul ta tb)")))
+
+  (test "a transposed product is refused" (str.eq "ill-typed: tensor.matmul contracts the last axis of the left with the first of the right, and they are not the same axis" (typed "(tensor.matmul tb ta)")))
+
+  (test "a label travels through a primitive" (str.eq "Str @Secret" (typed "(concat sec s)")))
+
+  (test "declassify releases a label" (str.eq "Str" (typed "(declassify Secret (concat sec s))")))
+
+  (test "the branches of an if may carry different labels" (str.eq "Str @Secret" (typed "(if ok sec s)")))
+
+  (test "a decimal literal is a Real until a format is named" (str.eq "F32" (typed "(f32.of 1.5)")))
+
+  (test "an update takes a patch of that record" (str.eq "Point" (typed "(update p (make PointPatch (x (Some 1)) (y (None)) (tag (None))))")))
+
+  (test "an update without a patch is refused" (str.eq "ill-typed: an update needs a patch" (typed "(update p p)")))
+
+  (test "a patch must give every field, in an Option" (str.eq "ill-typed: a make needs every field" (typed "(make PointPatch (x (Some 1)))")))
+
+  (test "a log line is a Unit" (str.eq "Unit" (typed "(log.fields (count n) (name s))")))
+
+  (test "a log field may not repeat" (str.eq "ill-typed: a log field is given twice" (typed "(log.fields (count n) (count n))")))
+
+  (test "what a foreign function answers is unverified" (str.eq "Str @Unverified" (typed "(fetch s)")))
+
+  (test "a send checks the channel's labels" (str.eq "Unit" (typed "(send Out smsg)")))
+
+  (test "a send must be the channel's payload" (str.eq "ill-typed: the value sent is not the channel's payload" (typed "(send Out s)")))
+
+  (test "a recv answers what the channel admits" (str.eq "(Option Msg @Secret)" (typed "(recv Out)")))
+
+  (test "an infer carries its input's labels and its training data's" (str.eq "Str @Corpus @ModelOutput" (typed "(infer Clf s)")))
+
+  (test "a par binds each branch for the body" (str.eq "Int" (typed "(par ((a (+ n 1)) (b (+ n 2))) (+ a b))")))
+
+  (test "a scope hands the body what its tasks carry" (str.eq "(Result Int Fault)" (typed "(scope ((t (Ok 1) (deadline (duration.of_ms (i64.of 5))) (on-fail fail))) (Ok (+ t 1)))")))
+
+  (test "a form not read yet is turned away by name" (str.eq "ill-typed: `mystery` is not read yet" (typed "(mystery n)")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (typed "(if (<= n 3) n (+ n 1))"))
+      (print (typed "(if n 1 2)"))
+      (print (typed "(f n)")))))

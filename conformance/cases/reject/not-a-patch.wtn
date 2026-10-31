@@ -1,0 +1,4 @@
+(module m
+  (record R (a Int))
+
+  (fn f ((r R)) R (update r r)))

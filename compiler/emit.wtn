@@ -1,0 +1,520 @@
+; The WebAssembly the backend writes: a description of a module in, its bytes out.
+;
+; compiler/wasm.wtn settled that the binary format can be written at all, with i32 values
+; and four instructions. This is the encoder a real backend needs: every value is a
+; 64-bit integer, which is how the lowering represents everything (a number, a `Bool`, a
+; pointer into linear memory), so a type parameter costs nothing and a generic function
+; needs no copy per type. A module has a memory, a heap pointer in a global, functions
+; that call each other and a function imported from the host, and static data.
+;
+; The instruction type is the target's own, one constructor for each shape of
+; instruction. Most are a single opcode byte, so `WOp` takes the byte, and the names below
+; (`add`, `eq`, ...) are what a lowering writes. A body is a list of instructions in the
+; order WebAssembly reads them, structured control nested as the format nests it.
+;
+; Nothing here is quadratic. A function body of n instructions is turned into a list of
+; n small pieces and joined by merging neighbours, round after round, which copies each
+; byte about log n times, where appending one piece at a time copies it n times over. That
+; is the difference between a few kilobytes and the compiler's own size.
+;
+;   witness test compiler/emit.wtn
+(module emit
+  ; --- instructions ----------------------------------------------------------
+  ; `WLoad` and `WStore` carry the opcode, the alignment as a power of two, and the
+  ; offset added to the address. `WIf` and `WBlock` say whether they leave a value.
+  (enum Ins
+    (WConst (n I64))
+    (WLocalGet (index U32))
+    (WLocalSet (index U32))
+    (WLocalTee (index U32))
+    (WGlobalGet (index U32))
+    (WGlobalSet (index U32))
+    (WOp (code U8))
+    (WLoad (code U8) (align U8) (offset U32))
+    (WStore (code U8) (align U8) (offset U32))
+    (WCall (func U32))
+    (WHost (slot U32))
+    (WIf (value Bool) (then Inss) (other Inss))
+    (WBlock (value Bool) (body Inss))
+    (WLoop (value Bool) (body Inss))
+    (WBr (depth U32))
+    (WBrIf (depth U32))
+    (WCopy)
+    (WFill)
+    (WMemSize)
+    (WMemGrow))
+
+  (enum Inss (NoInss) (Inss (head Ins) (rest Inss)))
+
+  (fn inss_join ((p Inss) (q Inss)) Inss
+    (match p ((NoInss) q) ((Inss h rest) (Inss h (inss_join rest q)))))
+
+  (fn inss_one ((i Ins)) Inss (Inss i (NoInss)))
+
+  ; --- the mnemonics a lowering writes ------------------------------------------
+  (fn op ((code U8)) Ins (WOp code))
+
+  (fn i64_eqz () Ins (WOp (u8.of 80)))
+
+  (fn i64_eq () Ins (WOp (u8.of 81)))
+
+  (fn i64_ne () Ins (WOp (u8.of 82)))
+
+  (fn i64_lt_s () Ins (WOp (u8.of 83)))
+
+  (fn i64_lt_u () Ins (WOp (u8.of 84)))
+
+  (fn i64_gt_s () Ins (WOp (u8.of 85)))
+
+  (fn i64_gt_u () Ins (WOp (u8.of 86)))
+
+  (fn i64_le_s () Ins (WOp (u8.of 87)))
+
+  (fn i64_le_u () Ins (WOp (u8.of 88)))
+
+  (fn i64_ge_s () Ins (WOp (u8.of 89)))
+
+  (fn i64_ge_u () Ins (WOp (u8.of 90)))
+
+  (fn i64_add () Ins (WOp (u8.of 124)))
+
+  (fn i64_sub () Ins (WOp (u8.of 125)))
+
+  (fn i64_mul () Ins (WOp (u8.of 126)))
+
+  (fn i64_div_s () Ins (WOp (u8.of 127)))
+
+  (fn i64_div_u () Ins (WOp (u8.of 128)))
+
+  (fn i64_rem_s () Ins (WOp (u8.of 129)))
+
+  (fn i64_rem_u () Ins (WOp (u8.of 130)))
+
+  (fn i64_and () Ins (WOp (u8.of 131)))
+
+  (fn i64_or () Ins (WOp (u8.of 132)))
+
+  (fn i64_xor () Ins (WOp (u8.of 133)))
+
+  (fn i64_shl () Ins (WOp (u8.of 134)))
+
+  (fn i64_shr_s () Ins (WOp (u8.of 135)))
+
+  (fn i64_shr_u () Ins (WOp (u8.of 136)))
+
+  (fn i64_extend8_s () Ins (WOp (u8.of 194)))
+
+  (fn i64_extend16_s () Ins (WOp (u8.of 195)))
+
+  (fn i64_extend32_s () Ins (WOp (u8.of 196)))
+
+  (fn i32_wrap () Ins (WOp (u8.of 167)))
+
+  (fn i64_extend_u () Ins (WOp (u8.of 173)))
+
+  (fn drop () Ins (WOp (u8.of 26)))
+
+  (fn select () Ins (WOp (u8.of 27)))
+
+  (fn unreachable () Ins (WOp (u8.of 0)))
+
+  (fn return_ () Ins (WOp (u8.of 15)))
+
+  (fn const ((n I64)) Ins (WConst n))
+
+  (fn local_get ((i U32)) Ins (WLocalGet i))
+
+  (fn local_set ((i U32)) Ins (WLocalSet i))
+
+  (fn local_tee ((i U32)) Ins (WLocalTee i))
+
+  ; An 8-byte word at an address held as an i64: the address is narrowed to the i32 the
+  ; instruction wants. `at` is a byte offset.
+  (fn load64 ((at U32)) Inss
+    (Inss (i32_wrap) (Inss (WLoad (u8.of 41) (u8.of 3) at) (NoInss))))
+
+  ; A store narrows nothing: the address has to be an i32 *beneath* the value, so the
+  ; lowering narrows it before it pushes the value.
+  (fn store64 ((at U32)) Inss (Inss (WStore (u8.of 55) (u8.of 3) at) (NoInss)))
+
+  (fn load8 ((at U32)) Inss
+    (Inss (i32_wrap) (Inss (WLoad (u8.of 49) (u8.of 0) at) (NoInss))))
+
+  ; --- what a module is made of -------------------------------------------------
+  ; Every parameter and every result is an i64, so a signature is two counts. `locals`
+  ; counts the i64 locals beyond the parameters.
+  (record Func
+    (name Str)
+    (params U32)
+    (results U32)
+    (locals U32)
+    (body Inss)
+    (exported Bool))
+
+  (enum Funcs (NoFuncs) (Funcs (head Func) (rest Funcs)))
+
+  (record Import (from Str) (name Str) (params U32) (results U32))
+
+  (enum Imports (NoImports) (Imports (head Import) (rest Imports)))
+
+  ; A run of bytes at a fixed place in memory when the module is loaded.
+  (record Segment (offset U32) (bytes Bytes))
+
+  (enum Segments (NoSegments) (Segments (head Segment) (rest Segments)))
+
+  ; `heap` is where the allocator starts, `pages` the memory it starts with.
+  (record Module (imports Imports) (funcs Funcs) (segments Segments) (pages U32) (heap I64))
+
+  (fn imports_count ((is Imports)) U32
+    (match is
+      ((NoImports) (u32.of 0))
+      ((Imports h rest) (wrap.add (u32.of 1) (imports_count rest)))))
+
+  (fn funcs_count ((fs Funcs)) U32
+    (match fs
+      ((NoFuncs) (u32.of 0))
+      ((Funcs h rest) (wrap.add (u32.of 1) (funcs_count rest)))))
+
+  (fn segments_count ((ss Segments)) U32
+    (match ss
+      ((NoSegments) (u32.of 0))
+      ((Segments h rest) (wrap.add (u32.of 1) (segments_count rest)))))
+
+  ; --- pieces, and joining them ---------------------------------------------------
+  (enum Chunks (NoChunks) (Chunks (head Bytes) (rest Chunks)))
+
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((b U8)) Bytes
+    (uses Alloc)
+    (bytes.of b))
+
+  ; Neighbours merged in pairs. Each round halves the number of pieces, so thirty rounds
+  ; is far more than a module of any size needs; the budget is what lets the prover see
+  ; the walk end.
+  (fn merged ((cs Chunks)) Chunks
+    (uses Alloc)
+    (match cs
+      ((NoChunks) (NoChunks))
+      ((Chunks a rest) (match rest ((NoChunks) (Chunks a (NoChunks))) ((Chunks b more) (Chunks (bytes.concat a b) (merged more)))))))
+
+  (fn joined_in ((cs Chunks) (rounds U32)) Bytes
+    (uses Alloc)
+    (match cs
+      ((NoChunks) (no_bytes))
+      ((Chunks a rest) (match rest ((NoChunks) a) ((Chunks b more) (if (<= rounds (u32.of 0)) (bytes.concat a (joined_linear rest)) (joined_in (merged cs) (- rounds (u32.of 1)))))))))
+
+  ; What is left if the rounds run out, which a module of any size does not reach.
+  (fn joined_linear ((cs Chunks)) Bytes
+    (uses Alloc)
+    (match cs
+      ((NoChunks) (no_bytes))
+      ((Chunks a rest) (bytes.concat a (joined_linear rest)))))
+
+  (fn joined ((cs Chunks)) Bytes
+    (uses Alloc)
+    (joined_in cs (u32.of 40)))
+
+  (fn chunk_join ((a Chunks) (b Chunks)) Chunks
+    (match a ((NoChunks) b) ((Chunks h rest) (Chunks h (chunk_join rest b)))))
+
+  ; --- LEB128 ---------------------------------------------------------------------
+  ; A group of a varint is seven bits of payload, with the top bit set when another
+  ; group follows. The narrowing is guarded because the prover knows only that a masked
+  ; value sits somewhere in its width.
+  (fn group32 ((part U32) (more Bool)) U8
+    (if (<= part (u32.of 127))
+      (if more (u8.of (+ part (u32.of 128))) (u8.of part))
+      (u8.of 0)))
+
+  ; Unsigned. A `U32` is five groups at most.
+  (fn uleb_to ((w U32) (left U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (let part (bit.and w (u32.of 127))
+      (let rest (bit.shr w 7)
+        (if (or (<= left (u32.of 0)) (= rest (u32.of 0)))
+          (Chunks (byte (group32 part false)) tail)
+          (Chunks (byte (group32 part true)) (uleb_to rest (- left (u32.of 1)) tail))))))
+
+  (fn uleb ((w U32)) Bytes
+    (uses Alloc)
+    (joined (uleb_to w (u32.of 5) (NoChunks))))
+
+  (fn group64 ((part I64) (more Bool)) U8
+    (if (and (<= (i64.of 0) part) (<= part (i64.of 127)))
+      (if more (u8.of (+ part (i64.of 128))) (u8.of part))
+      (u8.of 0)))
+
+  ; An arithmetic shift right by seven. `bit.shr` fills with zero, so a negative value
+  ; needs the seven vacated places put back: they are the top seven bits of the word,
+  ; which read as signed is -144115188075855872.
+  (fn down7 ((w I64)) I64
+    (if (< w (i64.of 0)) (bit.or (bit.shr w 7) (i64.of -144115188075855872)) (bit.shr w 7)))
+
+  ; Signed. A group is the last when what is left is all zeroes after a group whose sign
+  ; bit is clear, or all ones after one whose sign bit is set. Ten groups cover 64 bits.
+  (fn sleb_to ((w I64) (left U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (let part (bit.and w (i64.of 127))
+      (let rest (down7 w)
+        (if (or (<= left (u32.of 0)) (if (<= (i64.of 64) part) (= rest (i64.of -1)) (= rest (i64.of 0))))
+          (Chunks (byte (group64 part false)) tail)
+          (Chunks (byte (group64 part true)) (sleb_to rest (- left (u32.of 1)) tail))))))
+
+  (fn sleb ((w I64)) Bytes
+    (uses Alloc)
+    (joined (sleb_to w (u32.of 10) (NoChunks))))
+
+  ; A length in front of what it measures.
+  (fn sized ((b Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (uleb (octets b)) b))
+
+  ; The length of a byte string as a `U32`; a module of four gigabytes could not be built
+  ; in memory here, so the other branch is not a fallback anything relies on.
+  (fn octets ((b Bytes)) U32
+    (let n (unwrap (bytes.len b)) (if (<= n 4294967295) (u32.of n) (u32.of 0))))
+
+  (fn name_bytes ((text Str)) Bytes
+    (uses Alloc)
+    (sized (str.encode text)))
+
+  (fn section ((id U8) (payload Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (byte id) (sized payload)))
+
+  ; A vector is its element count and then the elements.
+  (fn vector ((count U32) (payload Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (uleb count) payload))
+
+  ; --- instructions to bytes -------------------------------------------------------
+  (fn block_type ((value Bool)) Bytes
+    (uses Alloc)
+    (if value (byte (u8.of 126)) (byte (u8.of 64))))
+
+  ; The pieces of an instruction list, ahead of whatever follows them.
+  (fn inss_to ((is Inss) (shift U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match is ((NoInss) tail) ((Inss h rest) (ins_to h shift (inss_to rest shift tail)))))
+
+  (fn ins_to ((i Ins) (shift U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match i
+      ((WConst n) (Chunks (byte (u8.of 66)) (Chunks (sleb n) tail)))
+      ((WLocalGet x) (Chunks (byte (u8.of 32)) (Chunks (uleb x) tail)))
+      ((WLocalSet x) (Chunks (byte (u8.of 33)) (Chunks (uleb x) tail)))
+      ((WLocalTee x) (Chunks (byte (u8.of 34)) (Chunks (uleb x) tail)))
+      ((WGlobalGet x) (Chunks (byte (u8.of 35)) (Chunks (uleb x) tail)))
+      ((WGlobalSet x) (Chunks (byte (u8.of 36)) (Chunks (uleb x) tail)))
+      ((WOp code) (Chunks (byte code) tail))
+      ((WLoad code align offset) (Chunks (byte code) (Chunks (byte align) (Chunks (uleb offset) tail))))
+      ((WStore code align offset) (Chunks (byte code) (Chunks (byte align) (Chunks (uleb offset) tail))))
+      ((WCall f) (Chunks (byte (u8.of 16)) (Chunks (uleb (wrap.add f shift)) tail)))
+      ((WHost slot) (Chunks (byte (u8.of 16)) (Chunks (uleb slot) tail)))
+      ((WIf value then other) (Chunks (byte (u8.of 4)) (Chunks (block_type value) (inss_to then shift (Chunks (byte (u8.of 5)) (inss_to other shift (Chunks (byte (u8.of 11)) tail)))))))
+      ((WBlock value body) (Chunks (byte (u8.of 2)) (Chunks (block_type value) (inss_to body shift (Chunks (byte (u8.of 11)) tail)))))
+      ((WLoop value body) (Chunks (byte (u8.of 3)) (Chunks (block_type value) (inss_to body shift (Chunks (byte (u8.of 11)) tail)))))
+      ((WBr depth) (Chunks (byte (u8.of 12)) (Chunks (uleb depth) tail)))
+      ((WBrIf depth) (Chunks (byte (u8.of 13)) (Chunks (uleb depth) tail)))
+      ((WCopy) (Chunks (byte (u8.of 252)) (Chunks (byte (u8.of 10)) (Chunks (byte (u8.of 0)) (Chunks (byte (u8.of 0)) tail)))))
+      ((WFill) (Chunks (byte (u8.of 252)) (Chunks (byte (u8.of 11)) (Chunks (byte (u8.of 0)) tail))))
+      ((WMemSize) (Chunks (byte (u8.of 63)) (Chunks (byte (u8.of 0)) tail)))
+      ((WMemGrow) (Chunks (byte (u8.of 64)) (Chunks (byte (u8.of 0)) tail)))))
+
+  ; --- sections ---------------------------------------------------------------------
+  ; A function type is 0x60 and then its parameters and results, each an i64 (0x7e).
+  (fn i64s ((count U32)) Bytes
+    (uses Alloc)
+    (bytes.concat (uleb count) (repeated (u8.of 126) count)))
+
+  (fn repeated ((b U8) (count U32)) Bytes
+    (uses Alloc)
+    (joined (repeated_to b count (NoChunks))))
+
+  (fn repeated_to ((b U8) (count U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (if (<= count (u32.of 0))
+      tail
+      (Chunks (byte b) (repeated_to b (- count (u32.of 1)) tail))))
+
+  (fn functype ((params U32) (results U32)) Bytes
+    (uses Alloc)
+    (bytes.concat (byte (u8.of 96)) (bytes.concat (i64s params) (i64s results))))
+
+  ; One type for each import and then one for each function, in that order, so that a
+  ; function's type index is its index among the functions plus the number of imports.
+  (fn import_types_to ((is Imports) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match is
+      ((NoImports) tail)
+      ((Imports h rest) (Chunks (functype (get h params) (get h results)) (import_types_to rest tail)))))
+
+  (fn func_types_to ((fs Funcs) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) tail)
+      ((Funcs h rest) (Chunks (functype (get h params) (get h results)) (func_types_to rest tail)))))
+
+  (fn type_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 1)
+      (vector (wrap.add (imports_count (get m imports)) (funcs_count (get m funcs)))
+        (joined (import_types_to (get m imports) (func_types_to (get m funcs) (NoChunks)))))))
+
+  ; Each import is its module, its name, a 0x00 for "a function" and its type index.
+  (fn import_entries_to ((is Imports) (at U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match is
+      ((NoImports) tail)
+      ((Imports h rest) (Chunks (name_bytes (get h from)) (Chunks (name_bytes (get h name)) (Chunks (byte (u8.of 0)) (Chunks (uleb at) (import_entries_to rest (wrap.add at (u32.of 1)) tail))))))))
+
+  (fn import_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 2)
+      (vector (imports_count (get m imports))
+        (joined (import_entries_to (get m imports) (u32.of 0) (NoChunks))))))
+
+  (fn type_indices_to ((at U32) (count U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (if (<= count (u32.of 0))
+      tail
+      (Chunks (uleb at)
+        (type_indices_to (wrap.add at (u32.of 1)) (- count (u32.of 1)) tail))))
+
+  (fn function_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 3)
+      (vector (funcs_count (get m funcs))
+        (joined (type_indices_to (imports_count (get m imports)) (funcs_count (get m funcs)) (NoChunks))))))
+
+  ; One memory with the pages the module asks for and no upper bound.
+  (fn memory_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 5)
+      (vector (u32.of 1) (bytes.concat (byte (u8.of 0)) (uleb (get m pages))))))
+
+  ; One mutable i64 global: the heap pointer.
+  (fn global_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 6)
+      (vector (u32.of 1)
+        (bytes.concat (byte (u8.of 126))
+          (bytes.concat (byte (u8.of 1))
+            (bytes.concat (byte (u8.of 66))
+              (bytes.concat (sleb (get m heap)) (byte (u8.of 11)))))))))
+
+  ; The memory, and every function marked as exported. An export is its name, a kind
+  ; (0 function, 2 memory) and an index.
+  (fn export_entries_to ((fs Funcs) (at U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) tail)
+      ((Funcs h rest) (if (get h exported) (Chunks (name_bytes (get h name)) (Chunks (byte (u8.of 0)) (Chunks (uleb at) (export_entries_to rest (wrap.add at (u32.of 1)) tail)))) (export_entries_to rest (wrap.add at (u32.of 1)) tail)))))
+
+  (fn exported_count ((fs Funcs)) U32
+    (match fs
+      ((NoFuncs) (u32.of 0))
+      ((Funcs h rest) (if (get h exported) (wrap.add (u32.of 1) (exported_count rest)) (exported_count rest)))))
+
+  (fn export_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 7)
+      (vector (wrap.add (u32.of 1) (exported_count (get m funcs)))
+        (joined (Chunks (name_bytes "memory") (Chunks (byte (u8.of 2)) (Chunks (uleb (u32.of 0)) (export_entries_to (get m funcs) (imports_count (get m imports)) (NoChunks)))))))))
+
+  ; A function's code is the locals it declares beyond its parameters, as one group of
+  ; i64, and then its instructions and an `end`; and the whole of that behind its size.
+  (fn locals_bytes ((count U32)) Bytes
+    (uses Alloc)
+    (if (<= count (u32.of 0))
+      (uleb (u32.of 0))
+      (bytes.concat (uleb (u32.of 1)) (bytes.concat (uleb count) (byte (u8.of 126))))))
+
+  (fn code_entry ((f Func) (shift U32)) Bytes
+    (uses Alloc)
+    (sized (bytes.concat (locals_bytes (get f locals)) (joined (inss_to (get f body) shift (Chunks (byte (u8.of 11)) (NoChunks)))))))
+
+  (fn code_entries_to ((fs Funcs) (shift U32) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) tail)
+      ((Funcs h rest) (Chunks (code_entry h shift) (code_entries_to rest shift tail)))))
+
+  (fn code_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 10)
+      (vector (funcs_count (get m funcs))
+        (joined (code_entries_to (get m funcs) (imports_count (get m imports)) (NoChunks))))))
+
+  ; An active data segment: flag 0, the offset as a constant expression, the bytes.
+  (fn segment_entries_to ((ss Segments) (tail Chunks)) Chunks
+    (uses Alloc)
+    (match ss
+      ((NoSegments) tail)
+      ((Segments h rest) (Chunks (byte (u8.of 0)) (Chunks (byte (u8.of 65)) (Chunks (sleb (int64_of (get h offset))) (Chunks (byte (u8.of 11)) (Chunks (sized (get h bytes)) (segment_entries_to rest tail)))))))))
+
+  (fn int64_of ((n U32)) I64 (i64.of n))
+
+  (fn data_section ((m Module)) Bytes
+    (uses Alloc)
+    (section (u8.of 11)
+      (vector (segments_count (get m segments))
+        (joined (segment_entries_to (get m segments) (NoChunks))))))
+
+  ; --- the module -------------------------------------------------------------------
+  (fn preamble () Bytes
+    (uses Alloc)
+    (joined (Chunks (byte (u8.of 0)) (Chunks (byte (u8.of 97)) (Chunks (byte (u8.of 115)) (Chunks (byte (u8.of 109)) (Chunks (byte (u8.of 1)) (Chunks (byte (u8.of 0)) (Chunks (byte (u8.of 0)) (Chunks (byte (u8.of 0)) (NoChunks)))))))))))
+
+  ; Sections appear in the order the format lists them: type 1, import 2, function 3,
+  ; memory 5, global 6, export 7, code 10, data 11.
+  (fn encoded ((m Module)) Bytes
+    (uses Alloc)
+    (joined (Chunks (preamble) (Chunks (type_section m) (Chunks (import_section m) (Chunks (function_section m) (Chunks (memory_section m) (Chunks (global_section m) (Chunks (export_section m) (Chunks (code_section m) (Chunks (data_section m) (NoChunks))))))))))))
+
+  ; --- a sample, for the tests --------------------------------------------------------
+  ; sum_to(n) counts down in a loop, `store_and_read` writes a word to memory and reads
+  ; it back through the heap pointer, and `twice` calls another function.
+  (fn four ((a Ins) (b Ins) (c Ins) (d Ins)) Inss
+    (Inss a (Inss b (Inss c (Inss d (NoInss))))))
+
+  (fn two ((a Ins) (b Ins)) Inss (Inss a (Inss b (NoInss))))
+
+  (fn l ((i U32)) Ins (local_get i))
+
+  (fn sum_to_body () Inss
+    (inss_join (inss_one (WBlock false (inss_one (WLoop false (inss_join (four (l (u32.of 0)) (i64_eqz) (WBrIf (u32.of 1)) (l (u32.of 1))) (inss_join (four (l (u32.of 0)) (i64_add) (local_set (u32.of 1)) (l (u32.of 0))) (four (const (i64.of 1)) (i64_sub) (local_set (u32.of 0)) (WBr (u32.of 0)))))))))
+      (inss_one (l (u32.of 1)))))
+
+  (fn store_and_read_body () Inss
+    (inss_join (inss_join (two (WGlobalGet (u32.of 0)) (i32_wrap)) (inss_one (l (u32.of 0))))
+      (inss_join (store64 (u32.of 8))
+        (inss_join (inss_one (WGlobalGet (u32.of 0))) (load64 (u32.of 8))))))
+
+  (fn twice_body () Inss
+    (four (l (u32.of 0)) (WCall (u32.of 0)) (const (i64.of 2)) (i64_mul)))
+
+  (fn sample () Module
+    (make Module
+      (imports (NoImports))
+      (funcs (Funcs (make Func (name "sum_to") (params (u32.of 1)) (results (u32.of 1)) (locals (u32.of 1)) (body (sum_to_body)) (exported true)) (Funcs (make Func (name "store_and_read") (params (u32.of 1)) (results (u32.of 1)) (locals (u32.of 0)) (body (store_and_read_body)) (exported true)) (Funcs (make Func (name "twice") (params (u32.of 1)) (results (u32.of 1)) (locals (u32.of 0)) (body (twice_body)) (exported true)) (NoFuncs)))))
+      (segments (NoSegments))
+      (pages (u32.of 1))
+      (heap (i64.of 1024))))
+
+  (fn sample_bytes () Bytes
+    (uses Alloc)
+    (encoded (sample)))
+
+  (fn describe ((m Module)) Str
+    (uses Alloc)
+    (concat "emitted " (concat (num.to_str (unwrap (bytes.len (encoded m)))) " bytes")))
+
+  (test "a module is a preamble and its sections" (str.eq "emitted 162 bytes" (describe (sample))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (describe (sample)))))

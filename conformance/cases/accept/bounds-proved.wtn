@@ -1,0 +1,8 @@
+(module m
+  (fn leaf ((n U32)) U32
+    (bounds (depth 1) (alloc 0))
+    (wrap.add n (u32.of 1)))
+
+  (fn twice ((n U32)) U32
+    (bounds (depth 2) (alloc 0))
+    (leaf (leaf n))))

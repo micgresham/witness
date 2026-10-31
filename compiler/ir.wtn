@@ -1,0 +1,1471 @@
+; An intermediate representation with effects and ownership written down.
+;
+; compiler/lower.wtn goes from the tree straight to instructions, so what a call performs and
+; who owns what it allocates are written nowhere a pass could read them. This is the form in
+; between: every intermediate value is named (A-normal form), every call and primitive carries
+; the effects it performs, and every heap value is owned by exactly one variable until it is
+; moved or dropped, with the `retain` and `drop` that make that true written out.
+;
+; The rules, for the part of the language it reads -- `Int`, `Bool`, `Str`, `let`, `if`,
+; arithmetic and comparison, `concat`, `num.to_str`, `str.eq`, `print`, calls to other
+; functions of the module, and records and enums declared in it, built with `make` or a
+; constructor, read with `get` and taken apart by `match`:
+;
+;   * a `Str`, a record and an enum value are heap values; a literal allocates, as does
+;     `concat`, `num.to_str`, `make` and a constructor, which hold a reference to each heap
+;     value they are given;
+;   * `get` and the binders of a `match` arm answer a reference of their own to the field,
+;     so they are owned like anything else and nothing dangles when the record is dropped;
+;   * a call or primitive *borrows* its arguments and answers an owned result;
+;   * a parameter is borrowed from the caller, so returning or binding one retains it;
+;   * `let y x` and `done x` *move* an owned variable, unless it is used again, when they
+;     retain first;
+;   * an owned variable is dropped right after its last use, on every path; a branch that
+;     does not use one drops it on entry.
+;
+; Nothing else is read: it is refused by name. The report is the module as s-expressions, so
+; that a test (or a later pass) can run it and check that no value is used after its drop,
+; dropped twice, or left behind.
+;
+;   witness run compiler/ir.wtn --grant Alloc,Console
+(module ir
+  (use "wtn:2e64e968936f7da539d1dce2e098f924336d66f3e7379192a90ef252057106f4" as word_number)
+
+  (use "wtn:a1aba08aa579f12756c8339d06dbb065d6abfba9115ad5a84cf90b51f49b4602" as text_of_literal)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  (use "wtn:341db8e3e6f1bc39d35ed90f4c8e78b275e1270bc6bb95034c49e3233d7b280c" as word_of)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  (use "wtn:0ea36c877618cc86be2bef4b0173f77bbb8fb09bee708ab4918e31c9ccb519f7" as digits)
+
+  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+
+  ; --- the representation ---------------------------------------------------------------------------
+  (enum Atom (AVar (name Str)) (AInt (n Int)) (ABool (b Bool)))
+
+  (enum Atoms (NoAtoms) (Atoms (head Atom) (rest Atoms)))
+
+  (enum Rhs
+    (RAtom (a Atom))
+    (RLit (s Str))
+    (RPrim (op Str) (args Atoms) (effects Str))
+    (RCall (fname Str) (args Atoms) (effects Str))
+    (RIf (cond Atom) (then Ir) (other Ir))
+    (RMake (ctor Str) (args Atoms))
+    (RField (of Atom) (field Str))
+    (RMatch (scrut Atom) (arms Arms)))
+
+  (enum Ir
+    (Let (name Str) (ty Str) (rhs Rhs) (rest Ir))
+    (Done (a Atom))
+    (Drop (name Str) (rest Ir))
+    (Retain (name Str) (rest Ir)))
+
+  (enum Arms (NoArms) (Arms (ctor Str) (binders TEnv) (body Ir) (rest Arms)))
+
+  (enum Strs (NoStrs) (Strs (head Str) (rest Strs)))
+
+  (enum TEnv (NoTEnv) (TEnv (name Str) (ty Str) (rest TEnv)))
+
+  (record Sig (name Str) (params TEnv) (ret Str) (effects Str) (kind Str) (tparams TEnv))
+
+  (enum Sigs (NoSigs) (Sigs (head Sig) (rest Sigs)))
+
+  ; Bindings made on the way to a value, in the order they happen.
+  (enum Pend (NoPend) (Pend (name Str) (ty Str) (rhs Rhs) (rest Pend)))
+
+  (record Conv (pend Pend) (atom Atom) (ty Str) (next Int))
+
+  (record ConvAll (pend Pend) (atoms Atoms) (tys Strs) (next Int))
+
+  (record ArmConv (ctor Str) (binders TEnv) (body Ir) (ty Str) (next Int))
+
+  (record ArmsConv (arms Arms) (ty Str) (next Int))
+
+  ; --- small helpers --------------------------------------------------------------------------------
+  (fn pend_join ((a Pend) (b Pend)) Pend
+    (match a ((NoPend) b) ((Pend n t r rest) (Pend n t r (pend_join rest b)))))
+
+  (fn wrap ((p Pend) (body Ir)) Ir
+    (match p ((NoPend) body) ((Pend n t r rest) (Let n t r (wrap rest body)))))
+
+  (fn lookup_ty ((vars TEnv) (v Str)) (Option Str)
+    (match vars ((NoTEnv) (None)) ((TEnv n t rest) (if (str.eq n v) (Some t) (lookup_ty rest v)))))
+
+  (fn find_sig ((ss Sigs) (name Str)) (Option Sig)
+    (match ss ((NoSigs) (None)) ((Sigs h rest) (if (str.eq (get h name) name) (Some h) (find_sig rest name)))))
+
+  (fn fresh ((n Int)) Str
+    (uses Alloc)
+    (concat "%t" (num.to_str n)))
+
+  (fn unsupported ((why Str)) (Result Conv Fault) (Err (fault "ir" why)))
+
+  (fn unsupported_all ((why Str)) (Result ConvAll Fault) (Err (fault "ir" why)))
+
+  (fn nth ((ts Trees) (i Int)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees h rest) (if (= i 0) (Some h) (nth rest (- i 1))))))
+
+  (fn trees_len ((ts Trees)) Int (match ts ((NoTrees) 0) ((Trees h rest) (+ 1 (trees_len rest)))))
+
+  (fn byte_at ((b Bytes) (at Int)) Int
+    (match (bytes.at b (Octets at)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn budget ((n Int)) Int
+    (ensures (<= 0 result))
+    (if (< n 0) 0 n))
+
+  (fn digit_byte ((d Int)) Bool (and (<= 48 d) (<= d 57)))
+
+  (fn is_number ((t Tree)) Bool
+    (match (leaf_text t)
+      ((None) false)
+      ((Some b) (or (digit_byte (byte_at b 0)) (and (= (byte_at b 0) 45) (digit_byte (byte_at b 1)))))))
+
+  ; Read as a word, wrapping, as compiler/lower.wtn reads it: a U64 above 2^63 is the I64 with
+  ; its bits, and the compiled compiler's checked Int never sees a number too big for a word.
+  (fn number_of ((t Tree)) Int
+    (match (leaf_text t)
+      ((None) 0)
+      ((Some b) (match (word_number b) ((None) 0) ((Some n) (int.of n))))))
+
+  ; --- A-normal form ------------------------------------------------------------------------------------
+  (fn type_word ((t Tree)) Str
+    (uses Alloc)
+    (match (node_items t) ((None) (word_of t)) ((Some items) (subst_ty t (NoTEnv) 400))))
+
+  ; --- types as text ---------------------------------------------------------------------------------
+  ; A type is written as it is in the source: `Str`, `(Option Str)`. A `?` stands where nothing
+  ; fixes it yet (the `T` of a bare `None`); the other side of a branch settles it.
+  (fn subst_ty ((t Tree) (m TEnv) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match (node_items t)
+        ((None) (match (lookup_ty m (word_of t)) ((Some r) r) ((None) (word_of t))))
+        ((Some items) (concat "(" (concat (subst_items items m (- left 1)) ")"))))))
+
+  (fn subst_items ((ts Trees) (m TEnv) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      "?"
+      (match ts
+        ((NoTrees) "")
+        ((Trees h rest) (concat (subst_ty h m (- left 1)) (match rest ((NoTrees) "") ((Trees x y) (concat " " (subst_items rest m (- left 1))))))))))
+
+  (fn ty_tree ((ty Str)) (Option Tree)
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode ty))) ((Err f) (None)) ((Ok t) (Some t))))
+
+  (fn subst_str ((ty Str) (m TEnv)) Str
+    (uses Alloc)
+    (match m
+      ((NoTEnv) ty)
+      ((TEnv a b c) (match (ty_tree ty) ((None) ty) ((Some t) (subst_ty t m 400))))))
+
+  (fn ty_items ((ty Str)) Trees
+    (uses Alloc)
+    (match (ty_tree ty) ((None) (NoTrees)) ((Some t) (match (node_items t) ((None) (NoTrees)) ((Some items) items)))))
+
+  (fn ty_head ((ty Str)) Str
+    (uses Alloc)
+    (match (ty_items ty) ((NoTrees) ty) ((Trees h rest) (word_of h))))
+
+  (fn ty_args ((ty Str)) Trees
+    (uses Alloc)
+    (match (ty_items ty) ((NoTrees) (NoTrees)) ((Trees h rest) rest)))
+
+  (fn unknown_ty ((ty Str)) Bool
+    (uses Alloc)
+    (not (str.eq (subst_str ty (TEnv "?" "!" (NoTEnv))) ty)))
+
+  ; Two types for one value, from the two sides of a branch: each part that one leaves as `?`
+  ; is taken from the other.
+  (fn join_ty ((a Str) (b Str)) Str
+    (uses Alloc)
+    (if (str.eq a "") b
+      (if (str.eq b "") a
+        (if (unknown_ty a)
+          (match (ty_tree a)
+            ((None) b)
+            ((Some ta) (match (ty_tree b)
+              ((None) a)
+              ((Some tb) (join_tree ta tb 400)))))
+          a))))
+
+  (fn join_tree ((a Tree) (b Tree) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (subst_ty a (NoTEnv) 400)
+      (match (node_items a)
+        ((None) (if (str.eq (word_of a) "?") (subst_ty b (NoTEnv) 400) (word_of a)))
+        ((Some ai) (match (node_items b)
+          ((None) (if (str.eq (word_of b) "?") (subst_ty a (NoTEnv) 400) (subst_ty a (NoTEnv) 400)))
+          ((Some bi) (concat "(" (concat (join_items ai bi (- left 1)) ")"))))))))
+
+  (fn join_items ((as Trees) (bs Trees) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      ""
+      (match as
+        ((NoTrees) "")
+        ((Trees a arest) (match bs
+          ((NoTrees) (subst_items as (NoTEnv) 400))
+          ((Trees b brest) (concat (join_tree a b (- left 1)) (match arest ((NoTrees) "") ((Trees x y) (concat " " (join_items arest brest (- left 1))))))))))))
+
+  ; The type parameters of an enum, bound in order to the arguments of a type (or to `?`).
+  (fn bind_targs ((ps TEnv) (args Trees)) TEnv
+    (uses Alloc)
+    (match ps
+      ((NoTEnv) (NoTEnv))
+      ((TEnv n t rest) (match args
+        ((NoTrees) (TEnv n "?" (bind_targs rest args)))
+        ((Trees a more) (TEnv n (subst_ty a (NoTEnv) 400) (bind_targs rest more)))))))
+
+  (fn set_ty ((m TEnv) (n Str) (t Str)) TEnv
+    (match m ((NoTEnv) m) ((TEnv k v rest) (if (str.eq k n) (TEnv k t rest) (TEnv k v (set_ty rest n t))))))
+
+  ; A parameter that is the type of a field is the type of the value given for it.
+  (fn infer_tys ((m TEnv) (fields TEnv) (tys Strs)) TEnv
+    (uses Alloc)
+    (match fields
+      ((NoTEnv) m)
+      ((TEnv f ft rest) (match tys
+        ((NoStrs) m)
+        ((Strs at more) (infer_tys (match (lookup_ty m ft) ((Some cur) (if (str.eq cur "?") (set_ty m ft at) m)) ((None) m)) rest more))))))
+
+  (fn tparams_of ((ps Trees)) TEnv
+    (uses Alloc)
+    (match ps ((NoTrees) (NoTEnv)) ((Trees p rest) (TEnv (word_of p) "" (tparams_of rest)))))
+
+  (fn names_text ((n Names)) Str
+    (uses Alloc)
+    (match n ((NoNames) "") ((Names e more) (concat e (match more ((NoNames) "") ((Names x y) (concat " " (names_text more))))))))
+
+  ; A primitive that answers a number of its operand's kind answers the first operand's type.
+  (fn answered ((b Builtin) (tys Strs)) Str
+    (uses Alloc)
+    (match (get b ret)
+      ((RetNumber) (match tys ((NoStrs) "Int") ((Strs t rest) t)))
+      ((RetBase n) (if (str.eq n "Octets") "Int" n))
+      ((RetOptionOfNumber) (match tys ((NoStrs) "?") ((Strs t rest) (concat "(Option " (concat t ")")))))
+      ((RetWritten t) (if (str.eq (get b name) "bytes.at") "(Option U8)" "?"))))
+
+  ; The type a primitive answers, in the part of the language read here.
+  (fn answer_ty ((b Builtin)) Str
+    (match (get b ret) ((RetBase n) n) ((RetNumber) "Int") ((RetOptionOfNumber) "?") ((RetWritten t) "?")))
+
+  (fn conv ((sigs Sigs) (vars TEnv) (e Tree) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match e
+        ((Leaf text quoted) (conv_leaf vars e text quoted n))
+        ((Node items) (match items
+          ((NoTrees) (unsupported "an empty list"))
+          ((Trees h args) (conv_form sigs vars (word_of h) args n (- left 1))))))))
+
+  (fn conv_leaf ((vars TEnv) (e Tree) (text Bytes) (quoted Bool) (n Int)) (Result Conv Fault)
+    (uses Alloc)
+    (if quoted
+      (let t (fresh n)
+        (Ok (make Conv (pend (Pend t "Str" (RLit (match (bytes.decode (text_of_literal text)) ((Ok s) s) ((Err f) ""))) (NoPend))) (atom (AVar t)) (ty "Str") (next (+ n 1)))))
+      (if (is_number e)
+        (Ok (make Conv (pend (NoPend)) (atom (AInt (number_of e))) (ty "Int") (next n)))
+        (let w (word_of e)
+          (if (str.eq w "true")
+            (Ok (make Conv (pend (NoPend)) (atom (ABool true)) (ty "Bool") (next n)))
+            (if (str.eq w "false")
+              (Ok (make Conv (pend (NoPend)) (atom (ABool false)) (ty "Bool") (next n)))
+            (if (str.eq w "unit")
+              (Ok (make Conv (pend (NoPend)) (atom (AInt 0)) (ty "Unit") (next n)))
+              (match (lookup_ty vars w)
+                ((Some t) (Ok (make Conv (pend (NoPend)) (atom (AVar w)) (ty t) (next n))))
+                ((None) (unsupported (concat "a name that is not bound: " w)))))))))))
+
+  (fn conv_form ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (if (str.eq name "let")
+      (conv_let sigs vars args n (- left 1))
+      (if (str.eq name "if")
+        (conv_if sigs vars args n (- left 1))
+        (if (str.eq name "seq")
+          (conv_seq sigs vars args n (- left 1))
+          (conv_named sigs vars name args n (- left 1)))))))
+
+  ; match, make and get, a constructor or a function of the module, or a primitive.
+  (fn conv_named ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (if (str.eq name "match")
+        (conv_match sigs vars args n (- left 1))
+        (if (str.eq name "make")
+          (conv_make sigs vars args n (- left 1))
+          (if (str.eq name "get")
+            (conv_get sigs vars args n (- left 1))
+            (if (str.eq name "and")
+              (conv_if sigs vars (both_args args (Leaf (str.encode "false") false) false) n (- left 1))
+            (if (str.eq name "or")
+              (conv_if sigs vars (both_args args (Leaf (str.encode "true") false) true) n (- left 1))
+            (if (str.eq name "with")
+              (conv_with sigs vars args n (- left 1))
+            (if (str.eq name "bytes.decode")
+              (conv_decode sigs vars args n (- left 1))
+            (if (or (or (str.eq name "Count") (str.eq name "Octets")) (str.eq name "unwrap"))
+              (conv_erased sigs vars args n (- left 1))
+              (match (find_sig sigs name)
+                ((Some sig) (conv_sig sigs vars sig args n (- left 1)))
+                ((None) (conv_prim sigs vars name args n (- left 1))))))))))))))
+
+  ; `bytes.decode` is the check rtlib.wtn has, and then the same octets read as text or the
+  ; reason Python's decoder gives -- written out as the code it is.
+  (fn conv_decode ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a bytes.decode needs bytes"))
+        ((Trees b rest) (conv sigs vars (decode_tree b) n (- left 1))))))
+
+  (fn word_leaf ((w Str)) Tree (uses Alloc) (Leaf (str.encode w) false))
+
+  (fn text_leaf ((w Str)) Tree (uses Alloc) (Leaf (str.encode w) true))
+
+  (fn form ((ts Trees)) Tree (Node ts))
+
+  (fn two ((a Tree) (b Tree)) Trees (Trees a (Trees b (NoTrees))))
+
+  (fn three ((a Tree) (b Tree) (c Tree)) Trees (Trees a (Trees b (Trees c (NoTrees)))))
+
+  (fn four ((a Tree) (b Tree) (c Tree) (d Tree)) Trees (Trees a (Trees b (Trees c (Trees d (NoTrees))))))
+
+  ; (let %db b (let %dk (rt_utf8_check %db) (if (= %dk 0) (Ok (bytes.as_text %db)) (Err (fault ...)))))
+  (fn decode_tree ((b Tree)) Tree
+    (uses Alloc)
+    (form (four (word_leaf "let") (word_leaf "%db") b
+      (form (four (word_leaf "let") (word_leaf "%dk") (form (two (word_leaf "rt_utf8_check") (word_leaf "%db")))
+        (form (four (word_leaf "if") (form (three (word_leaf "=") (word_leaf "%dk") (word_leaf "0")))
+          (form (two (word_leaf "Ok") (form (two (word_leaf "bytes.as_text") (word_leaf "%db")))))
+          (form (two (word_leaf "Err") (form (three (word_leaf "fault") (text_leaf "bytes.decode")
+            (form (four (word_leaf "if") (form (three (word_leaf "=") (word_leaf "%dk") (word_leaf "1"))) (text_leaf "not valid UTF-8: invalid start byte")
+              (form (four (word_leaf "if") (form (three (word_leaf "=") (word_leaf "%dk") (word_leaf "2"))) (text_leaf "not valid UTF-8: invalid continuation byte")
+                (text_leaf "not valid UTF-8: unexpected end of data"))))))))))))))))
+
+  ; `(with r (f v) ...)` is a `make` of r's record: the fields given, and `(get r f)` for the
+  ; rest, with r worked out once and named.
+  (fn conv_with ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a with needs a record"))
+        ((Trees r given) (match (conv sigs vars r n (- left 1))
+          ((Err f) (Err f))
+          ((Ok c) (match (get c atom)
+            ((AVar x) (match (find_sig sigs (ty_head (get c ty)))
+              ((None) (unsupported "a with of something that is not a record"))
+              ((Some sig) (match (conv_fields sigs (TEnv x (get c ty) vars) (get sig params) (with_pairs (get sig params) given x) (get c next) (- left 1))
+                ((Err f) (Err f))
+                ((Ok all) (let m (made sig all)
+                  (Ok (make Conv (pend (pend_join (get c pend) (get m pend))) (atom (get m atom)) (ty (get m ty)) (next (get m next))))))))))
+            ((AInt k) (unsupported "a with of a number"))
+            ((ABool k) (unsupported "a with of a truth value")))))))))
+
+  (fn with_pairs ((fields TEnv) (given Trees) (x Str)) Trees
+    (uses Alloc)
+    (match fields
+      ((NoTEnv) (NoTrees))
+      ((TEnv f t rest) (Trees
+        (match (pair_value given f)
+          ((Some v) (Node (Trees (Leaf (str.encode f) false) (Trees v (NoTrees)))))
+          ((None) (Node (Trees (Leaf (str.encode f) false) (Trees (Node (Trees (Leaf (str.encode "get") false) (Trees (Leaf (str.encode x) false) (Trees (Leaf (str.encode f) false) (NoTrees))))) (NoTrees))))))
+        (with_pairs rest given x)))))
+
+  ; `and` and `or` decide on the first and look at the second only when they must:
+  ; `(and x y)` is `(if x y false)` and `(or x y)` is `(if x true y)`.
+  (fn both_args ((args Trees) (fixed Tree) (first Bool)) Trees
+    (match args
+      ((NoTrees) args)
+      ((Trees x more) (match more
+        ((NoTrees) args)
+        ((Trees y none) (if first
+          (Trees x (Trees fixed (Trees y (NoTrees))))
+          (Trees x (Trees y (Trees fixed (NoTrees))))))))))
+
+  ; `Count` and its `unwrap` are a number at run time; the newtype is the checker's business.
+  (fn conv_erased ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a Count needs a number"))
+        ((Trees h rest) (match (conv sigs vars h n (- left 1))
+          ((Err f) (Err f))
+          ((Ok c) (Ok (make Conv (pend (get c pend)) (atom (get c atom)) (ty "Int") (next (get c next))))))))))
+
+  (fn conv_sig ((sigs Sigs) (vars TEnv) (sig Sig) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (str.eq (get sig kind) "fn")
+      (conv_call sigs vars sig args n left)
+      (if (str.eq (get sig kind) "ctor")
+        (match (conv_args sigs vars args n left)
+          ((Err f) (Err f))
+          ((Ok all) (Ok (made sig all))))
+        (unsupported "a record is built with make"))))
+
+  ; A value built from its fields, in the order they are declared.
+  (fn made ((sig Sig) (all ConvAll)) Conv
+    (uses Alloc)
+    (let t (fresh (get all next))
+      (let ty (subst_str (get sig ret) (infer_tys (bind_targs (get sig tparams) (NoTrees)) (get sig params) (get all tys)))
+        (make Conv
+          (pend (pend_join (get all pend) (Pend t ty (RMake (get sig name) (get all atoms)) (NoPend))))
+          (atom (AVar t))
+          (ty ty)
+          (next (+ (get all next) 1))))))
+
+  (fn conv_make ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a make needs a type"))
+        ((Trees r pairs) (match (find_sig sigs (word_of r))
+          ((None) (unsupported (concat "no record named " (word_of r))))
+          ((Some sig) (if (str.eq (get sig kind) "record")
+            (match (conv_fields sigs vars (get sig params) pairs n (- left 1))
+              ((Err f) (Err f))
+              ((Ok all) (Ok (made sig all))))
+            (unsupported (concat "not a record: " (word_of r))))))))))
+
+  (fn pair_value ((pairs Trees) (field Str)) (Option Tree)
+    (uses Alloc)
+    (match pairs
+      ((NoTrees) (None))
+      ((Trees p rest) (match (node_items p)
+        ((None) (pair_value rest field))
+        ((Some parts) (match parts
+          ((NoTrees) (pair_value rest field))
+          ((Trees k more) (if (str.eq (word_of k) field) (nth more 0) (pair_value rest field)))))))))
+
+  (fn conv_fields ((sigs Sigs) (vars TEnv) (fields TEnv) (pairs Trees) (n Int) (left Int)) (Result ConvAll Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported_all "the expression is nested too deeply")
+      (match fields
+        ((NoTEnv) (Ok (make ConvAll (pend (NoPend)) (atoms (NoAtoms)) (tys (NoStrs)) (next n))))
+        ((TEnv f t rest) (match (pair_value pairs f)
+          ((None) (unsupported_all (concat "no value for the field " f)))
+          ((Some v) (match (conv sigs vars v n (- left 1))
+            ((Err e) (Err e))
+            ((Ok c) (match (conv_fields sigs vars rest pairs (get c next) (- left 1))
+              ((Err e) (Err e))
+              ((Ok more) (Ok (make ConvAll (pend (pend_join (get c pend) (get more pend))) (atoms (Atoms (get c atom) (get more atoms))) (tys (Strs (get c ty) (get more tys))) (next (get more next))))))))))))))
+
+  (fn conv_get ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match (nth args 0)
+        ((None) (unsupported "a get needs a value"))
+        ((Some e) (match (nth args 1)
+          ((None) (unsupported "a get needs a field"))
+          ((Some f) (match (conv sigs vars e n (- left 1))
+            ((Err x) (Err x))
+            ((Ok c) (get_field sigs c (word_of f))))))))))
+
+  (fn get_field ((sigs Sigs) (c Conv) (f Str)) (Result Conv Fault)
+    (uses Alloc)
+    (match (find_sig sigs (ty_head (get c ty)))
+      ((None) (unsupported "a get on something that is not a record"))
+      ((Some sig) (match (lookup_ty (get sig params) f)
+        ((None) (unsupported (concat "no field named " f)))
+        ((Some ft) (let t (fresh (get c next))
+          (Ok (make Conv
+            (pend (pend_join (get c pend) (Pend t ft (RField (get c atom) f) (NoPend))))
+            (atom (AVar t))
+            (ty ft)
+            (next (+ (get c next) 1))))))))))
+
+  (fn conv_match ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a match needs a value"))
+        ((Trees e arms) (match (conv sigs vars e n (- left 1))
+          ((Err f) (Err f))
+          ((Ok c) (match (conv_arms sigs vars arms (get c ty) (get c next) (- left 1))
+            ((Err f) (Err f))
+            ((Ok all) (let t (fresh (get all next))
+              (Ok (make Conv
+                (pend (pend_join (get c pend) (Pend t (get all ty) (RMatch (get c atom) (get all arms)) (NoPend))))
+                (atom (AVar t))
+                (ty (get all ty))
+                (next (+ (get all next) 1)))))))))))))
+
+  (fn conv_arms ((sigs Sigs) (vars TEnv) (arms Trees) (sty Str) (n Int) (left Int)) (Result ArmsConv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "ir" "the expression is nested too deeply"))
+      (match arms
+        ((NoTrees) (Ok (make ArmsConv (arms (NoArms)) (ty "") (next n))))
+        ((Trees a rest) (match (conv_arm sigs vars a sty n (- left 1))
+          ((Err f) (Err f))
+          ((Ok one) (match (conv_arms sigs vars rest sty (get one next) (- left 1))
+            ((Err f) (Err f))
+            ((Ok more) (Ok (make ArmsConv
+              (arms (Arms (get one ctor) (get one binders) (get one body) (get more arms)))
+              (ty (join_ty (get one ty) (get more ty)))
+              (next (get more next))))))))))))
+
+  ; ((Ctor x y) body): the names are bound to the constructor's fields in order.
+  (fn conv_arm ((sigs Sigs) (vars TEnv) (arm Tree) (sty Str) (n Int) (left Int)) (Result ArmConv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "ir" "the expression is nested too deeply"))
+      (match (node_items arm)
+        ((None) (Err (fault "ir" "an arm that is not a pattern and a body")))
+        ((Some parts) (match (nth parts 0)
+          ((None) (Err (fault "ir" "an empty arm")))
+          ((Some pattern) (match (nth parts 1)
+            ((None) (Err (fault "ir" "an arm needs a body")))
+            ((Some body) (conv_arm_body sigs vars pattern body sty n (- left 1))))))))))
+
+  (fn conv_arm_body ((sigs Sigs) (vars TEnv) (pattern Tree) (body Tree) (sty Str) (n Int) (left Int)) (Result ArmConv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "ir" "the expression is nested too deeply"))
+    (match (node_items pattern)
+      ((None) (Err (fault "ir" "a pattern that is not a constructor is not read yet")))
+      ((Some ps) (match ps
+        ((NoTrees) (Err (fault "ir" "an empty pattern")))
+        ((Trees c names) (match (find_sig sigs (word_of c))
+          ((None) (Err (fault "ir" (concat "no constructor named " (word_of c)))))
+          ((Some sig) (let binders (bind_names names (get sig params) (bind_targs (get sig tparams) (ty_args sty)))
+            (match (conv sigs (tenv_join binders vars) body n (- left 1))
+              ((Err f) (Err f))
+              ((Ok cb) (Ok (make ArmConv (ctor (get sig name)) (binders binders) (body (wrap (get cb pend) (Done (get cb atom)))) (ty (get cb ty)) (next (get cb next)))))))))))))))
+
+  (fn bind_names ((names Trees) (fields TEnv) (m TEnv)) TEnv
+    (uses Alloc)
+    (match names
+      ((NoTrees) (NoTEnv))
+      ((Trees x more) (match fields
+        ((NoTEnv) (NoTEnv))
+        ((TEnv f t rest) (TEnv (word_of x) (subst_str t m) (bind_names more rest m)))))))
+
+  (fn tenv_join ((a TEnv) (b TEnv)) TEnv
+    (match a ((NoTEnv) b) ((TEnv n t rest) (TEnv n t (tenv_join rest b)))))
+
+  ; Each in turn; the last one is the value.
+  (fn conv_seq ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match args
+      ((NoTrees) (unsupported "a seq needs an expression"))
+      ((Trees h rest) (match (conv sigs vars h n (- left 1))
+        ((Err f) (Err f))
+        ((Ok c) (match rest
+          ((NoTrees) (Ok c))
+          ((Trees x y) (conv_seq_more sigs vars c rest (- left 1))))))))))
+
+  (fn conv_seq_more ((sigs Sigs) (vars TEnv) (c Conv) (rest Trees) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (conv_seq sigs vars rest (get c next) (- left 1))
+      ((Err f) (Err f))
+      ((Ok more) (Ok (make Conv (pend (pend_join (get c pend) (get more pend))) (atom (get more atom)) (ty (get more ty)) (next (get more next))))))))
+
+  (fn conv_let ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (nth args 0)
+      ((None) (unsupported "a let needs a name"))
+      ((Some x) (match (nth args 1)
+        ((None) (unsupported "a let needs a value"))
+        ((Some v) (match (nth args 2)
+          ((None) (unsupported "a let needs a body"))
+          ((Some b) (conv_let_bound sigs vars (word_of x) v b n (- left 1))))))))))
+
+  (fn conv_let_bound ((sigs Sigs) (vars TEnv) (x Str) (v Tree) (b Tree) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (conv sigs vars v n (- left 1))
+      ((Err f) (Err f))
+      ((Ok cv) (match (conv sigs (TEnv x (get cv ty) vars) b (get cv next) (- left 1))
+        ((Err f) (Err f))
+        ((Ok cb) (Ok (make Conv
+          (pend (pend_join (get cv pend) (Pend x (get cv ty) (RAtom (get cv atom)) (get cb pend))))
+          (atom (get cb atom))
+          (ty (get cb ty))
+          (next (get cb next))))))))))
+
+  (fn conv_if ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (nth args 0)
+      ((None) (unsupported "an if needs a condition"))
+      ((Some c) (match (nth args 1)
+        ((None) (unsupported "an if needs a then"))
+        ((Some a) (match (nth args 2)
+          ((None) (unsupported "an if needs an else"))
+          ((Some b) (match (conv sigs vars c n (- left 1))
+            ((Err f) (Err f))
+            ((Ok cc) (conv_branches sigs vars cc a b (- left 1))))))))))))
+
+  (fn conv_branches ((sigs Sigs) (vars TEnv) (cc Conv) (a Tree) (b Tree) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (conv sigs vars a (get cc next) (- left 1))
+      ((Err f) (Err f))
+      ((Ok ca) (match (conv sigs vars b (get ca next) (- left 1))
+        ((Err f) (Err f))
+        ((Ok cb) (let t (fresh (get cb next))
+          (Ok (make Conv
+            (pend (pend_join (get cc pend) (Pend t (join_ty (get ca ty) (get cb ty)) (RIf (get cc atom) (wrap (get ca pend) (Done (get ca atom))) (wrap (get cb pend) (Done (get cb atom)))) (NoPend))))
+            (atom (AVar t))
+            (ty (join_ty (get ca ty) (get cb ty)))
+            (next (+ (get cb next) 1)))))))))))
+
+  ; The arguments, left to right.
+  (fn conv_args ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result ConvAll Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported_all "the expression is nested too deeply")
+    (match args
+      ((NoTrees) (Ok (make ConvAll (pend (NoPend)) (atoms (NoAtoms)) (tys (NoStrs)) (next n))))
+      ((Trees h rest) (match (conv sigs vars h n (- left 1))
+        ((Err f) (Err f))
+        ((Ok c) (match (conv_args sigs vars rest (get c next) (- left 1))
+          ((Err f) (Err f))
+          ((Ok more) (Ok (make ConvAll (pend (pend_join (get c pend) (get more pend))) (atoms (Atoms (get c atom) (get more atoms))) (tys (Strs (get c ty) (get more tys))) (next (get more next))))))))))))
+
+  (fn conv_call ((sigs Sigs) (vars TEnv) (sig Sig) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (match (conv_args sigs vars args n (- left 1))
+      ((Err f) (Err f))
+      ((Ok all) (let t (fresh (get all next))
+        (let m (infer_fn (get sig tparams) (get sig params) (get all tys))
+          (let ret (subst_str (get sig ret) m)
+            (Ok (make Conv
+              (pend (pend_join (get all pend) (Pend t ret (RCall (mangled (get sig name) (get sig tparams) m) (get all atoms) (get sig effects)) (NoPend))))
+              (atom (AVar t))
+              (ty ret)
+              (next (+ (get all next) 1)))))))))))
+
+  (fn conv_prim ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+    (if (not (read_prim name))
+      (unsupported (concat "the form `" (concat name "` is not read yet")))
+      (if (is_array_op name)
+        (conv_array sigs vars name args n (- left 1))
+      (match (primitive name)
+        ((None) (unsupported (concat "no primitive named " name)))
+        ((Some b) (match (conv_args sigs vars args n (- left 1))
+          ((Err f) (Err f))
+          ((Ok all) (let t (fresh (get all next))
+            (Ok (make Conv
+              (pend (pend_join (get all pend) (Pend t (answered b (get all tys)) (RPrim name (get all atoms) (names_text (get b effects))) (NoPend))))
+              (atom (AVar t))
+              (ty (answered b (get all tys)))
+              (next (+ (get all next) 1)))))))))))))
+
+  (fn is_array_op ((op Str)) Bool
+    (or (or (or (str.eq op "array.empty") (str.eq op "array.push")) (or (str.eq op "array.len") (str.eq op "array.at")))
+      (str.eq op "bytes.as_text")))
+
+  (fn conv_array ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (conv_args sigs vars args n left)
+      ((Err f) (Err f))
+      ((Ok all) (let t (fresh (get all next))
+        (let ty (array_ty name (get all tys))
+          (Ok (make Conv
+            (pend (pend_join (get all pend) (Pend t ty (RPrim name (get all atoms) (if (or (str.eq name "array.empty") (str.eq name "array.push")) "Alloc" "")) (NoPend))))
+            (atom (AVar t))
+            (ty ty)
+            (next (+ (get all next) 1)))))))))
+
+  ; What a primitive answers. An array's is taken from what it is given: `array.empty` holds
+  ; `?` until a push or the other side of a branch says what.
+  (fn array_ty ((name Str) (tys Strs)) Str
+    (uses Alloc)
+    (if (str.eq name "bytes.as_text")
+      "Str"
+    (if (str.eq name "array.empty")
+      "(Array ?)"
+      (if (str.eq name "array.len")
+        "Int"
+        (if (str.eq name "array.push")
+          (match tys
+            ((NoStrs) "?")
+            ((Strs at more) (match more
+              ((NoStrs) at)
+              ((Strs xt none) (join_ty at (concat "(Array " (concat xt ")")))))))
+          (if (str.eq name "array.at")
+            (match tys
+              ((NoStrs) "?")
+              ((Strs at more) (concat "(Option " (concat (elem_of at) ")"))))
+            "?"))))))
+
+  (fn elem_of ((ty Str)) Str
+    (uses Alloc)
+    (match (ty_args ty) ((NoTrees) "?") ((Trees h rest) (subst_ty h (NoTEnv) 400))))
+
+  ; The primitives of the part of the language this reads.
+  (fn read_prim ((op Str)) Bool
+    (or (or (or (str.eq op "+") (str.eq op "-")) (or (str.eq op "*") (str.eq op "<")))
+      (or (or (or (str.eq op "<=") (str.eq op "=")) (or (str.eq op "not") (str.eq op "concat")))
+        (or (or (or (str.eq op "str.eq") (str.eq op "num.to_str")) (str.eq op "print"))
+          (or (or (or (str.eq op "array.empty") (str.eq op "array.push")) (or (str.eq op "array.len") (str.eq op "array.at")))
+            (or (or (width_prim op) (bytes_prim op)) (or (is_array_op op) (host_prim op))))))))
+
+  ; What the host is asked for, and the arithmetic on the times it answers.
+  (fn host_prim ((op Str)) Bool
+    (or (or (or (str.eq op "log") (str.eq op "clock.now")) (or (str.eq op "clock.wall") (str.eq op "clock.ticks")))
+      (or (or (or (str.eq op "instant.since") (str.eq op "wall.since")) (or (str.eq op "ticks.since") (str.eq op "instant.plus")))
+        (or (str.eq op "wall.plus") (or (str.eq op "duration.of_ms") (str.eq op "duration.ms"))))))
+
+  (fn bytes_prim ((op Str)) Bool
+    (or (or (or (str.eq op "str.encode") (str.eq op "bytes.concat")) (or (str.eq op "bytes.len") (str.eq op "bytes.of")))
+        (or (or (str.eq op "bytes.at") (str.eq op "bytes.eq")) (or (str.eq op "bytes.slice") (str.eq op "num.div")))))
+
+  ; The numbers of a fixed width: kept in a word, pulled back into the width by the lowering.
+  (fn width_prim ((op Str)) Bool
+    (or (or (or (or (str.eq op "wrap.add") (str.eq op "wrap.sub")) (or (str.eq op "wrap.mul") (str.eq op "int.of")))
+            (or (or (str.eq op "bit.and") (str.eq op "bit.or")) (or (str.eq op "bit.xor") (str.eq op "bit.not"))))
+        (or (or (or (str.eq op "bit.shl") (str.eq op "bit.shr")) (or (str.eq op "bit.sar") (str.eq op "u8.of")))
+            (or (or (or (str.eq op "u16.of") (str.eq op "u32.of")) (or (str.eq op "u64.of") (str.eq op "i8.of")))
+                (or (or (str.eq op "i16.of") (str.eq op "i32.of")) (str.eq op "i64.of"))))))
+
+  ; --- ownership ------------------------------------------------------------------------------------------------
+  (fn has ((xs Strs) (x Str)) Bool
+    (match xs ((NoStrs) false) ((Strs h rest) (or (str.eq h x) (has rest x)))))
+
+  (fn without ((xs Strs) (x Str)) Strs
+    (uses Alloc)
+    (match xs ((NoStrs) xs) ((Strs h rest) (if (str.eq h x) (without rest x) (Strs h (without rest x))))))
+
+  (fn strs_join ((a Strs) (b Strs)) Strs
+    (uses Alloc)
+    (match a ((NoStrs) b) ((Strs h rest) (Strs h (strs_join rest b)))))
+
+  (fn atom_is ((a Atom) (v Str)) Bool
+    (match a ((AVar n) (str.eq n v)) ((AInt k) false) ((ABool b) false)))
+
+  (fn atoms_has ((as Atoms) (v Str)) Bool
+    (match as ((NoAtoms) false) ((Atoms h rest) (or (atom_is h v) (atoms_has rest v)))))
+
+  (fn mentions ((ir Ir) (v Str)) Bool
+    (match ir
+      ((Let x ty rhs rest) (or (rhs_mentions rhs v) (mentions rest v)))
+      ((Done a) (atom_is a v))
+      ((Drop x rest) (or (str.eq x v) (mentions rest v)))
+      ((Retain x rest) (or (str.eq x v) (mentions rest v)))))
+
+  (fn rhs_mentions ((rhs Rhs) (v Str)) Bool
+    (match rhs
+      ((RAtom a) (atom_is a v))
+      ((RLit s) false)
+      ((RPrim op args fx) (atoms_has args v))
+      ((RCall f args fx) (atoms_has args v))
+      ((RIf c t e) (or (atom_is c v) (or (mentions t v) (mentions e v))))
+      ((RMake k args) (atoms_has args v))
+      ((RField o f) (atom_is o v))
+      ((RMatch c arms) (or (atom_is c v) (arms_mention arms v)))))
+
+  (fn arms_mention ((arms Arms) (v Str)) Bool
+    (match arms
+      ((NoArms) false)
+      ((Arms c bs body more) (or (mentions body v) (arms_mention more v)))))
+
+  (fn atom_names ((a Atom)) Strs (match a ((AVar n) (Strs n (NoStrs))) ((AInt k) (NoStrs)) ((ABool b) (NoStrs))))
+
+  (fn atoms_names ((as Atoms)) Strs
+    (uses Alloc)
+    (match as ((NoAtoms) (NoStrs)) ((Atoms h rest) (strs_join (atom_names h) (atoms_names rest)))))
+
+  (fn names_of ((ir Ir)) Strs
+    (uses Alloc)
+    (match ir
+      ((Let x ty rhs rest) (strs_join (rhs_names rhs) (names_of rest)))
+      ((Done a) (atom_names a))
+      ((Drop x rest) (Strs x (names_of rest)))
+      ((Retain x rest) (Strs x (names_of rest)))))
+
+  (fn rhs_names ((rhs Rhs)) Strs
+    (uses Alloc)
+    (match rhs
+      ((RAtom a) (atom_names a))
+      ((RLit s) (NoStrs))
+      ((RPrim op args fx) (atoms_names args))
+      ((RCall f args fx) (atoms_names args))
+      ((RIf c t e) (strs_join (atom_names c) (strs_join (names_of t) (names_of e))))
+      ((RMake k args) (atoms_names args))
+      ((RField o f) (atom_names o))
+      ((RMatch c arms) (strs_join (atom_names c) (arms_names arms)))))
+
+  (fn arms_names ((arms Arms)) Strs
+    (uses Alloc)
+    (match arms
+      ((NoArms) (NoStrs))
+      ((Arms c bs body more) (strs_join (names_of body) (arms_names more)))))
+
+  ; A heap value is a string, or a record or enum value, which the type environment marks
+  ; with an entry named `%heap:` and the type.
+  (fn heap_ty ((tys TEnv) (ty Str)) Bool
+    (uses Alloc)
+    (or (or (or (str.eq ty "Str") (str.eq ty "Bytes")) (str.eq (ty_head ty) "Array")) (match (lookup_ty tys (concat "%heap:" (ty_head ty))) ((Some m) true) ((None) false))))
+
+  (fn is_str ((tys TEnv) (v Str)) Bool
+    (uses Alloc)
+    (match (lookup_ty tys v) ((Some t) (heap_ty tys t)) ((None) false)))
+
+  ; Owned variables that nothing reads again, in a block, nor after it.
+  (fn dead_in ((held Strs) (ir Ir) (later Strs)) Strs
+    (uses Alloc)
+    (match held
+      ((NoStrs) held)
+      ((Strs v rest) (if (or (mentions ir v) (has later v)) (dead_in rest ir later) (Strs v (dead_in rest ir later))))))
+
+  (fn keep_live ((held Strs) (ir Ir) (later Strs)) Strs
+    (uses Alloc)
+    (match held
+      ((NoStrs) held)
+      ((Strs v rest) (if (or (mentions ir v) (has later v)) (Strs v (keep_live rest ir later)) (keep_live rest ir later)))))
+
+  (fn drops ((vs Strs) (body Ir)) Ir
+    (match vs ((NoStrs) body) ((Strs v rest) (Drop v (drops rest body)))))
+
+  (fn own ((tys TEnv) (ir Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) ir
+    (drops (dead_in held ir later) (own_live tys ir (keep_live held ir later) later (- left 1)))))
+
+  (fn own_live ((tys TEnv) (ir Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match ir
+      ((Done a) (own_done tys a held later))
+      ((Let x ty rhs rest) (own_let tys x ty rhs rest held later left))
+      ((Drop x rest) ir)
+      ((Retain x rest) ir)))
+
+  ; The block's value is moved out; a variable still wanted after, or one borrowed, is retained first.
+  (fn own_done ((tys TEnv) (a Atom) (held Strs) (later Strs)) Ir
+    (uses Alloc)
+    (match a
+      ((AVar v) (if (is_str tys v)
+        (if (and (has held v) (not (has later v))) (Done a) (Retain v (Done a)))
+        (Done a)))
+      ((AInt k) (Done a))
+      ((ABool b) (Done a))))
+
+  (record IfParts (cond Atom) (then Ir) (other Ir))
+
+  (fn as_atom ((rhs Rhs)) (Option Atom)
+    (match rhs ((RAtom a) (Some a)) ((RLit s) (None)) ((RPrim op args fx) (None)) ((RCall f args fx) (None)) ((RIf c t e) (None)) ((RMake k args) (None)) ((RField o f) (None)) ((RMatch c arms) (None))))
+
+  (fn as_if ((rhs Rhs)) (Option IfParts)
+    (match rhs ((RIf c t e) (Some (make IfParts (cond c) (then t) (other e)))) ((RAtom a) (None)) ((RLit s) (None)) ((RPrim op args fx) (None)) ((RCall f args fx) (None)) ((RMake k args) (None)) ((RField o f) (None)) ((RMatch c arms) (None))))
+
+  (record MatchParts (scrut Atom) (arms Arms))
+
+  (fn as_match ((rhs Rhs)) (Option MatchParts)
+    (match rhs ((RMatch c arms) (Some (make MatchParts (scrut c) (arms arms)))) ((RAtom a) (None)) ((RLit s) (None)) ((RPrim op args fx) (None)) ((RCall f args fx) (None)) ((RIf c t e) (None)) ((RMake k args) (None)) ((RField o f) (None))))
+
+  (fn own_let ((tys TEnv) (x Str) (ty Str) (rhs Rhs) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (as_atom rhs)
+      ((Some a) (own_alias tys x ty a rest held later left))
+      ((None) (own_not_atom tys x ty rhs rest held later left))))
+
+  (fn own_not_atom ((tys TEnv) (x Str) (ty Str) (rhs Rhs) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (as_if rhs)
+      ((Some parts) (own_branches tys x ty (get parts cond) (get parts then) (get parts other) rest held later left))
+      ((None) (own_not_if tys x ty rhs rest held later left))))
+
+  (fn own_not_if ((tys TEnv) (x Str) (ty Str) (rhs Rhs) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (as_match rhs)
+      ((Some parts) (own_match tys x ty (get parts scrut) (get parts arms) rest held later left))
+      ((None) (Let x ty rhs (own (TEnv x ty tys) rest (grown tys x ty held) later left)))))
+
+  (fn grown ((tys TEnv) (x Str) (ty Str) (held Strs)) Strs
+    (uses Alloc)
+    (if (heap_ty tys ty) (Strs x held) held))
+
+  ; Each arm is its own block, holding the references its binders took.
+  (fn own_match ((tys TEnv) (x Str) (ty Str) (c Atom) (arms Arms) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let after (strs_join later (names_of rest))
+      (Let x ty (RMatch c (own_arms tys arms held after left))
+        (own (TEnv x ty tys) rest (grown tys x ty (keep_after held after)) later left))))
+
+  (fn own_arms ((tys TEnv) (arms Arms) (held Strs) (after Strs) (left Int)) Arms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) arms
+    (match arms
+      ((NoArms) (NoArms))
+      ((Arms c bs body more) (Arms c bs (own (tenv_join bs tys) body (heap_binders tys bs held) after left) (own_arms tys more held after (- left 1)))))))
+
+  (fn heap_binders ((tys TEnv) (bs TEnv) (held Strs)) Strs
+    (uses Alloc)
+    (match bs
+      ((NoTEnv) held)
+      ((TEnv n t rest) (if (heap_ty tys t) (Strs n (heap_binders tys rest held)) (heap_binders tys rest held)))))
+
+  (fn as_var ((a Atom)) (Option Str)
+    (match a ((AVar v) (Some v)) ((AInt k) (None)) ((ABool b) (None))))
+
+  ; `let x v`: a string is moved from v when nothing reads v again, and copied (retained) otherwise.
+  (fn own_alias ((tys TEnv) (x Str) (ty Str) (a Atom) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (heap_ty tys ty)
+      (match (as_var a)
+        ((Some v) (own_move tys x ty a v rest held later left))
+        ((None) (Let x ty (RAtom a) (own (TEnv x ty tys) rest held later left))))
+      (Let x ty (RAtom a) (own (TEnv x ty tys) rest held later left))))
+
+  (fn own_move ((tys TEnv) (x Str) (ty Str) (a Atom) (v Str) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (and (has held v) (not (or (mentions rest v) (has later v))))
+      (Let x ty (RAtom a) (own (TEnv x ty tys) rest (Strs x (without held v)) later left))
+      (Retain v (Let x ty (RAtom a) (own (TEnv x ty tys) rest (Strs x held) later left)))))
+
+  ; Each branch is its own block: what is wanted after the `if` is later for both.
+  (fn own_branches ((tys TEnv) (x Str) (ty Str) (c Atom) (t Ir) (e Ir) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let after (strs_join later (names_of rest))
+      (Let x ty (RIf c (own tys t held after left) (own tys e held after left))
+        (own (TEnv x ty tys) rest (grown tys x ty (keep_after held after)) later left))))
+
+  (fn keep_after ((held Strs) (after Strs)) Strs
+    (uses Alloc)
+    (match held ((NoStrs) held) ((Strs v rest) (if (has after v) (Strs v (keep_after rest after)) (keep_after rest after)))))
+
+  ; --- printing ---------------------------------------------------------------------------------------------------
+  (fn atom_text ((a Atom)) Str
+    (uses Alloc)
+    (match a ((AVar n) n) ((AInt k) (num.to_str k)) ((ABool b) (if b "true" "false"))))
+
+  (fn atoms_text ((as Atoms)) Str
+    (uses Alloc)
+    (match as ((NoAtoms) "") ((Atoms h rest) (concat (atom_text h) (match rest ((NoAtoms) "") ((Atoms x y) (concat " " (atoms_text rest))))))))
+
+  (fn rhs_text ((rhs Rhs)) Str
+    (uses Alloc)
+    (match rhs
+      ((RAtom a) (concat "(atom " (concat (atom_text a) ")")))
+      ((RLit s) (concat "(lit \"" (concat s "\")")))
+      ((RPrim op args fx) (concat "(prim " (concat op (concat " (" (concat (atoms_text args) (concat ") (" (concat fx "))")))))))
+      ((RCall f args fx) (concat "(call " (concat f (concat " (" (concat (atoms_text args) (concat ") (" (concat fx "))")))))))
+      ((RIf c t e) (concat "(if " (concat (atom_text c) (concat " " (concat (ir_text t) (concat " " (concat (ir_text e) ")")))))))
+      ((RMake k args) (concat "(make " (concat k (concat " (" (concat (atoms_text args) "))")))))
+      ((RField o f) (concat "(field " (concat (atom_text o) (concat " " (concat f ")")))))
+      ((RMatch c arms) (concat "(match " (concat (atom_text c) (concat (arms_text arms) ")"))))))
+
+  (fn arms_text ((arms Arms)) Str
+    (uses Alloc)
+    (match arms
+      ((NoArms) "")
+      ((Arms c bs body more) (concat " (arm " (concat c (concat " (" (concat (params_text bs) (concat ") " (concat (ir_text body) (concat ")" (arms_text more)))))))))))
+
+  (fn ir_text ((ir Ir)) Str
+    (uses Alloc)
+    (match ir
+      ((Let x ty rhs rest) (concat "(let " (concat x (concat " " (concat ty (concat " " (concat (rhs_text rhs) (concat " " (concat (ir_text rest) ")")))))))))
+      ((Done a) (concat "(done " (concat (atom_text a) ")")))
+      ((Drop x rest) (concat "(drop " (concat x (concat " " (concat (ir_text rest) ")")))))
+      ((Retain x rest) (concat "(retain " (concat x (concat " " (concat (ir_text rest) ")")))))))
+
+  ; --- a module -----------------------------------------------------------------------------------------------------
+  (fn params_of ((ps Trees)) TEnv
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (NoTEnv))
+      ((Trees p rest) (match (node_items p)
+        ((None) (params_of rest))
+        ((Some parts) (match parts
+          ((NoTrees) (params_of rest))
+          ((Trees n more) (match more
+            ((NoTrees) (params_of rest))
+            ((Trees t none) (TEnv (word_of n) (type_word t) (params_of rest)))))))))))
+
+  (fn params_text ((vars TEnv)) Str
+    (uses Alloc)
+    (match vars
+      ((NoTEnv) "")
+      ((TEnv n t rest) (concat "(" (concat n (concat " " (concat t (concat ")" (match rest ((NoTEnv) "") ((TEnv a b c) (concat " " (params_text rest))))))))))))
+
+  (fn uses_text ((clauses Trees)) Str
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) "")
+      ((Trees c rest) (if (head_is c "uses")
+        (join_words (after_head c))
+        (uses_text rest)))))
+
+  (fn join_words ((ts Trees)) Str
+    (uses Alloc)
+    (match ts ((NoTrees) "") ((Trees h rest) (concat (word_of h) (match rest ((NoTrees) "") ((Trees x y) (concat " " (join_words rest))))))))
+
+  (fn middle ((ts Trees)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (match rest ((NoTrees) (NoTrees)) ((Trees n more) (Trees h (middle rest)))))))
+
+  (fn last_of ((ts Trees)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees h rest) (match rest ((NoTrees) (Some h)) ((Trees n more) (last_of rest))))))
+
+  (fn sig_of ((h Tree)) (Option Sig)
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) (None))
+      ((Trees n rest) (match rest
+        ((NoTrees) (None))
+        ((Trees params more) (match more
+          ((NoTrees) (None))
+          ((Trees ret clauses) (Some (make Sig (name (fn_name n)) (params (params_of (match (node_items params) ((None) (NoTrees)) ((Some ps) ps)))) (ret (type_word ret)) (effects (uses_text (middle clauses))) (kind "fn") (tparams (fn_tparams n)))))))))))
+
+  (fn sigs_of ((items Trees)) Sigs
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoSigs))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (sig_of h) ((None) (sigs_of rest)) ((Some s) (Sigs s (sigs_of rest))))
+        (if (head_is h "record")
+          (match (record_sig h) ((None) (sigs_of rest)) ((Some s) (Sigs s (sigs_of rest))))
+          (if (head_is h "enum")
+            (sigs_join (enum_sigs h) (sigs_of rest))
+            (sigs_of rest)))))))
+
+  (fn sigs_join ((a Sigs) (b Sigs)) Sigs
+    (match a ((NoSigs) b) ((Sigs h rest) (Sigs h (sigs_join rest b)))))
+
+  (fn record_sig ((h Tree)) (Option Sig)
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) (None))
+      ((Trees n fields) (Some (make Sig (name (word_of n)) (params (params_of fields)) (ret (word_of n)) (effects "") (kind "record") (tparams (NoTEnv)))))))
+
+  (fn enum_sigs ((h Tree)) Sigs
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) (NoSigs))
+      ((Trees n ctors) (match (node_items n)
+        ((None) (ctor_sigs (word_of n) (NoTEnv) ctors))
+        ((Some ns) (match ns
+          ((NoTrees) (NoSigs))
+          ((Trees nm ps) (ctor_sigs (subst_ty n (NoTEnv) 400) (tparams_of ps) ctors))))))))
+
+  (fn ctor_sigs ((en Str) (tp TEnv) (ctors Trees)) Sigs
+    (uses Alloc)
+    (match ctors
+      ((NoTrees) (NoSigs))
+      ((Trees c rest) (match (node_items c)
+        ((None) (Sigs (make Sig (name (word_of c)) (params (NoTEnv)) (ret en) (effects "") (kind "ctor") (tparams tp)) (ctor_sigs en tp rest)))
+        ((Some parts) (match parts
+          ((NoTrees) (ctor_sigs en tp rest))
+          ((Trees cn fields) (Sigs (make Sig (name (word_of cn)) (params (params_of fields)) (ret en) (effects "") (kind "ctor") (tparams tp)) (ctor_sigs en tp rest)))))))))
+
+  ; Every record and enum type is a heap type, whatever the function.
+  (fn heap_marks ((sigs Sigs) (tys TEnv)) TEnv
+    (uses Alloc)
+    (match sigs
+      ((NoSigs) tys)
+      ((Sigs h rest) (if (str.eq (get h kind) "fn")
+        (heap_marks rest tys)
+        (TEnv (concat "%heap:" (ty_head (get h ret))) "yes" (heap_marks rest tys))))))
+
+  (fn lower_fn ((sigs Sigs) (h Tree)) FnOut
+    (uses Alloc)
+    (match (sig_of h)
+      ((None) (no_out))
+      ((Some sig) (match (get sig tparams)
+        ((TEnv a b c) (no_out))
+        ((NoTEnv) (match (body_of h)
+          ((None) (no_out))
+          ((Some body) (lowered_parts sigs sig body))))))))
+
+  (fn no_out () FnOut (make FnOut (text "") (calls (NoStrs))))
+
+  (fn body_of ((h Tree)) (Option Tree)
+    (match (after_head h)
+      ((NoTrees) (None))
+      ((Trees n rest) (match rest
+        ((NoTrees) (None))
+        ((Trees params more) (match more
+          ((NoTrees) (None))
+          ((Trees ret clauses) (last_of clauses))))))))
+
+  ; --- generic functions -----------------------------------------------------------------------------
+  ; A generic function is written out once for each set of types it is called with. A call names
+  ; the copy `id@Int`: the types follow the name, `(` written `[`, `)` written `]` and a space
+  ; `,`. Each copy is read with those types in place of the parameters, so what it owns is
+  ; known, and a copy that calls another generic function asks for that one too.
+  (record FnOut (text Str) (calls Strs))
+
+  (fn fn_name ((n Tree)) Str
+    (uses Alloc)
+    (match (node_items n)
+      ((None) (word_of n))
+      ((Some ns) (match ns ((NoTrees) "") ((Trees nm ps) (word_of nm))))))
+
+  (fn fn_tparams ((n Tree)) TEnv
+    (uses Alloc)
+    (match (node_items n)
+      ((None) (NoTEnv))
+      ((Some ns) (match ns ((NoTrees) (NoTEnv)) ((Trees nm ps) (tparams_of ps))))))
+
+  ; Solve the type parameters by walking a parameter's type and the argument's together.
+  (fn unify_list ((m TEnv) (ps Trees) (as Trees) (left Int)) TEnv
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      m
+      (match ps
+        ((NoTrees) m)
+        ((Trees p prest) (match as
+          ((NoTrees) m)
+          ((Trees a arest) (unify_list (unify_pair m p a (- left 1)) prest arest (- left 1))))))))
+
+  (fn bind_leaf ((m TEnv) (p Tree) (a Tree)) TEnv
+    (uses Alloc)
+    (match (lookup_ty m (word_of p))
+      ((Some cur) (if (or (str.eq cur "") (str.eq cur "?")) (set_ty m (word_of p) (subst_ty a (NoTEnv) 400)) m))
+      ((None) m)))
+
+  (fn unify_pair ((m TEnv) (p Tree) (a Tree) (left Int)) TEnv
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      m
+      (match (node_items p)
+        ((None) (bind_leaf m p a))
+        ((Some pitems) (match (node_items a)
+          ((None) m)
+          ((Some aitems) (unify_list m pitems aitems (- left 1))))))))
+
+  (fn infer_fn ((m TEnv) (params TEnv) (tys Strs)) TEnv
+    (uses Alloc)
+    (match params
+      ((NoTEnv) m)
+      ((TEnv n pt rest) (match tys
+        ((NoStrs) m)
+        ((Strs at more) (infer_fn (match (ty_tree pt) ((None) m) ((Some p) (match (ty_tree at) ((None) m) ((Some a) (unify_pair m p a 400))))) rest more))))))
+
+  (fn recode_byte ((b Bytes) (i Int) (to Bool)) Bytes
+    (uses Alloc)
+    (let c (byte_at b i)
+      (if to
+        (if (= c 40) (bytes.of (u8.of 91)) (if (= c 41) (bytes.of (u8.of 93)) (if (= c 32) (bytes.of (u8.of 44)) (bytes.slice b (Octets i) (Octets (+ i 1))))))
+        (if (= c 91) (bytes.of (u8.of 40)) (if (= c 93) (bytes.of (u8.of 41)) (if (= c 44) (bytes.of (u8.of 32)) (bytes.slice b (Octets i) (Octets (+ i 1)))))))))
+
+  (fn recode_from ((b Bytes) (i Int) (out Bytes) (to Bool) (left Int)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (< (byte_at b i) 0))
+      out
+      (recode_from b (+ i 1) (bytes.concat out (recode_byte b i to)) to (- left 1))))
+
+  (fn recode ((s Str) (to Bool)) Str
+    (uses Alloc)
+    (match (bytes.decode (recode_from (str.encode s) 0 (str.encode "") to 400))
+      ((Ok r) r)
+      ((Err f) s)))
+
+  (fn mangled ((name Str) (tps TEnv) (m TEnv)) Str
+    (uses Alloc)
+    (match tps
+      ((NoTEnv) name)
+      ((TEnv t x rest) (mangled (concat name (concat "@" (recode (match (lookup_ty m t) ((Some v) v) ((None) "?")) true))) rest m))))
+
+  (fn is_instance ((f Str)) Bool
+    (uses Alloc)
+    (has_at (str.encode f) 0 400))
+
+  (fn has_at ((b Bytes) (i Int) (left Int)) Bool
+    (requires (<= 0 left))
+    (if (or (<= left 0) (< (byte_at b i) 0))
+      false
+      (if (= (byte_at b i) 64) true (has_at b (+ i 1) (- left 1)))))
+
+  ; The generic calls an Ir makes.
+  (fn ir_calls ((ir Ir)) Strs
+    (uses Alloc)
+    (match ir
+      ((Let x ty rhs rest) (strs_join (rhs_calls rhs) (ir_calls rest)))
+      ((Done a) (NoStrs))
+      ((Drop x rest) (ir_calls rest))
+      ((Retain x rest) (ir_calls rest))))
+
+  (fn rhs_calls ((rhs Rhs)) Strs
+    (uses Alloc)
+    (match rhs
+      ((RIf c t e) (strs_join (ir_calls t) (ir_calls e)))
+      ((RMatch c arms) (arms_calls arms))
+      ((RCall f args fx) (if (is_instance f) (Strs f (NoStrs)) (NoStrs)))
+      ((RMake k args) (NoStrs))
+      ((RField o f) (NoStrs))
+      ((RAtom a) (NoStrs))
+      ((RLit s) (NoStrs))
+      ((RPrim op args fx) (NoStrs))))
+
+  (fn arms_calls ((arms Arms)) Strs
+    (uses Alloc)
+    (match arms
+      ((NoArms) (NoStrs))
+      ((Arms c bs body more) (strs_join (ir_calls body) (arms_calls more)))))
+
+  ; `id@Int@[Option,Str]` as its parts.
+  (fn parts_from ((b Bytes) (i Int) (cur Bytes) (left Int)) Strs
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (< (byte_at b i) 0))
+      (Strs (text_of cur) (NoStrs))
+      (if (= (byte_at b i) 64)
+        (Strs (text_of cur) (parts_from b (+ i 1) (str.encode "") (- left 1)))
+        (parts_from b (+ i 1) (bytes.concat cur (bytes.slice b (Octets i) (Octets (+ i 1)))) (- left 1)))))
+
+  (fn text_of ((b Bytes)) Str
+    (uses Alloc)
+    (match (bytes.decode b) ((Ok s) s) ((Err f) "")))
+
+  (fn bind_inst ((tps TEnv) (parts Strs)) TEnv
+    (uses Alloc)
+    (match tps
+      ((NoTEnv) (NoTEnv))
+      ((TEnv t x rest) (match parts
+        ((NoStrs) (TEnv t "?" (bind_inst rest parts)))
+        ((Strs f more) (TEnv t (recode f false) (bind_inst rest more)))))))
+
+  (fn subst_params ((ps TEnv) (m TEnv)) TEnv
+    (uses Alloc)
+    (match ps
+      ((NoTEnv) ps)
+      ((TEnv n t rest) (TEnv n (subst_str t m) (subst_params rest m)))))
+
+  (fn fn_tree ((items Trees) (name Str)) (Option Tree)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (None))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (sig_of h) ((Some s) (if (str.eq (get s name) name) (Some h) (fn_tree rest name))) ((None) (fn_tree rest name)))
+        (fn_tree rest name)))))
+
+  (fn instance_out ((sigs Sigs) (items Trees) (inst Str)) (Option FnOut)
+    (uses Alloc)
+    (match (parts_from (str.encode inst) 0 (str.encode "") 400)
+      ((NoStrs) (None))
+      ((Strs base targs) (match (find_sig sigs base)
+        ((None) (None))
+        ((Some sig) (match (fn_tree items base)
+          ((None) (None))
+          ((Some h) (match (body_of h)
+            ((None) (None))
+            ((Some body) (let m (bind_inst (get sig tparams) targs)
+              (Some (lowered_parts sigs (make Sig (name inst) (params (subst_params (get sig params) m)) (ret (subst_str (get sig ret) m)) (effects (get sig effects)) (kind "fn") (tparams (NoTEnv))) body))))))))))))
+
+  ; Every copy asked for, and the copies those ask for, within a limit on how many.
+  (fn instances ((sigs Sigs) (items Trees) (pending Strs) (done Strs) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      ""
+      (match pending
+        ((NoStrs) "")
+        ((Strs p rest) (if (has done p)
+          (instances sigs items rest done (- left 1))
+          (match (instance_out sigs items p)
+            ((None) (instances sigs items rest (Strs p done) (- left 1)))
+            ((Some out) (concat (get out text) (instances sigs items (strs_join rest (get out calls)) (Strs p done) (- left 1))))))))))
+
+  (fn owned_body ((tys TEnv) (body Ir)) Ir
+    (uses Alloc)
+    (own tys body (NoStrs) (NoStrs) (budget (+ 2 (ir_size body)))))
+
+  (fn ir_size ((ir Ir)) Int
+    (match ir
+      ((Let x ty rhs rest) (+ 1 (+ (rhs_size rhs) (ir_size rest))))
+      ((Done a) 1)
+      ((Drop x rest) (+ 1 (ir_size rest)))
+      ((Retain x rest) (+ 1 (ir_size rest)))))
+
+  (fn arms_size ((arms Arms)) Int
+    (match arms ((NoArms) 0) ((Arms c bs body more) (+ 1 (+ (ir_size body) (arms_size more))))))
+
+  (fn rhs_size ((rhs Rhs)) Int
+    (match rhs
+      ((RIf c t e) (+ (ir_size t) (ir_size e)))
+      ((RMake k args) 0)
+      ((RField o f) 0)
+      ((RMatch c arms) (+ 1 (arms_size arms)))
+      ((RAtom a) 0)
+      ((RLit s) 0)
+      ((RPrim op args fx) 0)
+      ((RCall f args fx) 0)))
+
+  (fn lowered_parts ((sigs Sigs) (sig Sig) (body Tree)) FnOut
+    (uses Alloc)
+    (match (conv sigs (get sig params) body 0 400)
+      ((Err f) (make FnOut (text (concat ";; " (concat (get sig name) (concat ": not read yet: " (concat (get f why) "\n"))))) (calls (NoStrs))))
+      ((Ok c) (let ir (wrap (get c pend) (Done (get c atom)))
+        (make FnOut
+          (text (concat "(fn " (concat (get sig name) (concat " (" (concat (params_text (get sig params)) (concat ") " (concat (get sig ret) (concat " (" (concat (get sig effects) (concat ") " (concat (ir_text (owned_body (heap_marks sigs (get sig params)) ir)) ")\n")))))))))))
+          (calls (ir_calls ir)))))))
+
+  (fn out_join ((a FnOut) (b FnOut)) FnOut
+    (uses Alloc)
+    (make FnOut (text (concat (get a text) (get b text))) (calls (strs_join (get a calls) (get b calls)))))
+
+  (fn lower_plain ((sigs Sigs) (items Trees)) FnOut
+    (uses Alloc)
+    (match items
+      ((NoTrees) (no_out))
+      ((Trees h rest) (out_join (if (head_is h "fn") (lower_fn sigs h) (no_out)) (lower_plain sigs rest)))))
+
+  (fn lower_items ((sigs Sigs) (items Trees)) Str
+    (uses Alloc)
+    (let first (lower_plain sigs items)
+      (concat (get first text) (instances sigs items (get first calls) (NoStrs) 200))))
+
+  (fn lower_source ((src Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (concat ";; not a form: " (get f why)))
+      ((Ok tree) (let items (with_prelude (module_items tree))
+        (lower_items (sigs_join (prelude_sigs) (sigs_of items)) items)))))
+
+  ; A module's items and the prelude's functions it does not define itself.
+  (fn with_prelude ((items Trees)) Trees
+    (uses Alloc)
+    (if (and (wants_fault items) (lacks_fault items)) (trees_join items (prelude_items)) items))
+
+  (fn lacks_fault ((items Trees)) Bool
+    (uses Alloc)
+    (match (fn_tree items "fault") ((Some h) false) ((None) true)))
+
+  (fn wants_fault ((items Trees)) Bool
+    (uses Alloc)
+    (or (names_word items "fault" 100000) (names_word items "bytes.decode" 100000)))
+
+  ; Whether a word is written anywhere in these trees.
+  (fn names_word ((ts Trees) (w Str) (left Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      false
+      (match ts
+        ((NoTrees) false)
+        ((Trees h rest) (or
+          (match (node_items h)
+            ((None) (str.eq (word_of h) w))
+            ((Some items) (names_word items w (- left 1))))
+          (names_word rest w (- left 1)))))))
+
+  (fn trees_join ((a Trees) (b Trees)) Trees
+    (match a ((NoTrees) b) ((Trees h rest) (Trees h (trees_join rest b)))))
+
+  ; Option and Result, which every module has.
+  (fn prelude_sigs () Sigs
+    (uses Alloc)
+    (sigs_from (prelude_text)))
+
+  (fn prelude_text () Str
+    "(module p (enum (Option T) (None) (Some (value T))) (enum (Result T E) (Ok (value T)) (Err (error E))) (record Fault (op Str) (why Str) (cause (Option Fault))))")
+
+  (fn prelude_fns_text () Str
+    "(module p (fn fault ((op Str) (why Str)) Fault (make Fault (op op) (why why) (cause (None)))))")
+
+  ; The prelude's functions, written out with any module that calls them.
+  (fn prelude_items () Trees
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode (prelude_fns_text))))
+      ((Err f) (NoTrees))
+      ((Ok tree) (module_items tree))))
+
+  (fn sigs_from ((src Str)) Sigs
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (NoSigs))
+      ((Ok tree) (sigs_of (module_items tree)))))
+
+  (test "a string made and bound is moved into the binding and dropped after its last use"
+    (str.eq "(fn f ((s Str)) Int () (let %t0 Str (prim concat (s s) (Alloc)) (let t Str (atom %t0) (drop t (done 0)))))\n"
+      (lower_source "(module m (fn f ((s Str)) Int (let t (concat s s) 0)))")))
+
+  (test "a parameter that is returned is retained"
+    (str.eq "(fn f ((s Str)) Str () (retain s (done s)))\n" (lower_source "(module m (fn f ((s Str)) Str s))")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (lower_source "(module m (fn f ((s Str)) Str (uses Alloc) (concat s s)))"))))

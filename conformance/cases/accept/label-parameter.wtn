@@ -1,0 +1,4 @@
+(module m
+  (fn (shout (label L)) ((s (label L Str))) (label L Str)
+    (uses Alloc)
+    (concat s "!")))

@@ -1,0 +1,517 @@
+; The few functions every compiled program needs and WebAssembly does not have.
+;
+; The backend's values are 64-bit integers, and a string, a byte string or a variant is
+; the address of words in linear memory. Making one, copying one and comparing two takes
+; code that is not any function of the program being compiled, so it is written here once,
+; as instructions, and put at the front of every module. There are seven:
+;
+;   alloc(n)            a block of n bytes, rounded up to a word, from a bump pointer;
+;                       it grows the memory when the pointer passes the end
+;   new(len)            a Str or Bytes of that length, its length word written
+;   concat(a, b)        a new one holding a then b
+;   eq(a, b)            1 when both have the same bytes, else 0
+;   at(b, i)            `(Some byte)` or `(None)`, which is `bytes.at`
+;   slice(b, from, to)  `bytes.slice`: clamped, and empty when from reaches to
+;   of(n)               a one-byte string of n's low byte
+;
+; A function's index among the module's own functions is fixed here: these come first and the
+; program's own functions follow. Imports are numbered before all of them; the encoder adds
+; their count to every call, so nothing here depends on how many there are. `first_user` is the first index
+; the backend may give out.
+;
+; Two things differ per program and so are not fixed: which cell is `(None)`, and what id
+; `(Some ...)` has. They are the program's own numbering of its variants, so the lowering
+; passes them in.
+;
+; Text and number conversion that is easier to write in Witness than in instructions is in
+; compiler/rtlib.wtn, which is compiled along with the program like any other source.
+;
+;   witness test compiler/runtime.wtn
+(module runtime
+  (use "wtn:69c006565365c0bc7ae87e10a0994f95bdce248a12b8d5c9a0ae0fed68c4840f" as i64_rem_u)
+
+  (use "wtn:08e0439aa38af9ddf0cc1fdc98a91472cc2be0713e490ae56cb74e978aea2496"
+    as
+    unreachable)
+
+  (use "wtn:2809e729af0a73196cbc9bc8808cc0927fbea36df0caf9a6ea763c4e61da4b60" as i64_xor)
+
+  (use "wtn:c0960fa9c3eeea46acf3004b39016b7dd9ee2e751bf123d451e0e055659f7198" as i64_mul)
+
+  (use "wtn:b58d6e14d598fb77cc542c47a927239eac9d720ff370d57dde6a5eba4d5d1d31" as i64_div_s)
+
+  (use "wtn:3557da48bed6a9408b4749d49514d5f2e13e37defd37ef61eda3fb33bd04d101" as i64_div_u)
+
+  (use "wtn:2e72a0f48c6cd5f0e08d28b55d6e48bc9c399ae3f2c1695ab41f749eff5d140d" as i64_rem_s)
+
+  (use "wtn:984c550c73e730d53e2a1befcf24950d5d37f25efb7501504a67cbe5b0b7dd4c" as i64_eqz)
+
+  (use "wtn:aaa5788594cd2f68165abd0f2e6560c4aa6aaf92e09822948cc887f7cd927be5" as Module)
+
+  (use "wtn:2246c36031ae9d98c0dcb67dfc9591483d4b9f520cbeedf2355dd9208a84d3ea" as Import)
+
+  (use "wtn:746b7af1483e2ad3bac5bd48a927f405dda763ad2e13285b41298d2d268a366f" as Imports)
+
+  (use "wtn:320dada2f786552b556d4d808782f8a42778e0dff5bd32206bfb6fd346fa5791" as encoded)
+
+  (use "wtn:a21c39d745ed071e8a191a37f70dd1779e3f66cef78971e75cc5db8d15985d3a" as Ins)
+
+  (use "wtn:1073bcf7f2ec07adcc09eb7c2e8fe48e9f9e9761a767076f6172edba3db8cde8" as Inss)
+
+  (use "wtn:780cd5f1caffd09ae27df62731b93b0f47c18f7b93487643ce22510a7c5f029b" as Func)
+
+  (use "wtn:3e591891f9cf54232e04bb14b46fe1ad8efe8c82e1ddad2a481589bba3844f43" as Funcs)
+
+  (use "wtn:dc64f3a1e2454c942a39c661654b712edf5608405a2ecfd55e7fbd8528fffffc" as inss_join)
+
+  (use "wtn:b39ace52277dbf2d77bb138be2fa632f7a4fd0334d24f209d9bbe1bcfc1bc7f8" as inss_one)
+
+  (use "wtn:e4c149ba3f059c4ca4c1315a32cc797ea261b37ca748c63d8fdeffa4d99f805c" as const)
+
+  (use "wtn:bb0f678baeea7519218f358553ead8eb2d912e89f25ccd92149e48c4becd55a8" as local_get)
+
+  (use "wtn:c78c468a3c6b87cafc6941344f76922c8acef37928bc2aa1295c2928bc2d52ca" as local_set)
+
+  (use "wtn:2f6e6fb9ae2b985873e1da37a007a2de5c00aebd0f4b9e10f26f4364348a3ec9" as i32_wrap)
+
+  (use "wtn:96de543fd141647b7f39a730a0f5a12bd7b355c6d14b8a5837b812f6d32b1879" as i64_add)
+
+  (use "wtn:57fb329d056c439d3cd4e002778ced72febf70629673bbcedbfe7bb56d734368" as i64_sub)
+
+  (use "wtn:fed19b07b6d484a2e7ad581a15e660ed30bbb5d78d0c39fa3b27259c488ac176" as i64_and)
+
+  (use "wtn:9bebcaef44ec0c28e1641464cfe242e9c90aa105c6a9b2df703789529d456f88" as i64_shl)
+
+  (use "wtn:f184a43aa12a21c423b7798eea27065a8f039808515bc576be6670b9b76280f9" as i64_shr_u)
+
+  (use "wtn:7eabcc9f94d563ca363e2b4362c2fd951fc4b074530fc82f672c84f22186d262" as i64_ne)
+
+  (use "wtn:faa84aa5a0431aeaf44ec05e82d426c9e74bccdc1716450153cf0fad9b82069c" as i64_lt_s)
+
+  (use "wtn:f0eb010458ad86a88b42b80e17a552a87604c922a6e9e1feacda314d87c34e0a" as i64_ge_s)
+
+  (use "wtn:d263c2bbb3df950712f2142bff2ac515308767aa9dd03a891d9afc081d71adde" as i64_gt_s)
+
+  (use "wtn:254e03ce5b17d2ed6ea9d02563b68e9d259c2515162944eb53a5d94a3477e366" as i64_gt_u)
+
+  (use "wtn:1a8836b61bfb81713af0d1dc5e1dc7cc2be04ea7c7b935e241a79742fbfde7b2" as i64_ge_u)
+
+  (use "wtn:60e04221f55a81090a4ec27166c65de3808c91db99bd66ce95b8f46aa739fcaa"
+    as
+    i64_extend_u)
+
+  (use "wtn:7f605767659cf91d13d37c9c4a00f74ccb3f54984f19f8a705c4f0eafcbf8235" as drop)
+
+  (use "wtn:18fcc84ef46d2f09f164ebc00ab25c001f7522068318c730ffa48d06d901e11e" as select)
+
+  ; --- the layout of the module ------------------------------------------------------
+  (fn index_alloc () U32 (u32.of 0))
+
+  (fn index_new () U32 (u32.of 1))
+
+  (fn index_concat () U32 (u32.of 2))
+
+  (fn index_eq () U32 (u32.of 3))
+
+  (fn index_at () U32 (u32.of 4))
+
+  (fn index_slice () U32 (u32.of 5))
+
+  (fn index_of () U32 (u32.of 6))
+
+  (fn index_add () U32 (u32.of 7))
+
+  (fn index_sub () U32 (u32.of 8))
+
+  (fn index_mul () U32 (u32.of 9))
+
+  (fn index_div () U32 (u32.of 10))
+
+  (fn index_to_str () U32 (u32.of 11))
+
+  (fn index_make () U32 (u32.of 12))
+
+  (fn index_retain () U32 (u32.of 13))
+
+  (fn index_release () U32 (u32.of 14))
+
+  (fn first_user () U32 (u32.of 15))
+
+  ; --- small constructors ---------------------------------------------------------------
+  (fn lget ((i U32)) Ins (local_get i))
+
+  (fn lset ((i U32)) Ins (local_set i))
+
+  (fn lit ((n I64)) Ins (const n))
+
+  (fn one ((a Ins)) Inss (inss_one a))
+
+  (fn two ((a Ins) (b Ins)) Inss (Inss a (inss_one b)))
+
+  (fn three ((a Ins) (b Ins) (c Ins)) Inss (Inss a (two b c)))
+
+  (fn four ((a Ins) (b Ins) (c Ins) (d Ins)) Inss (Inss a (three b c d)))
+
+  (fn five ((a Ins) (b Ins) (c Ins) (d Ins) (e Ins)) Inss (Inss a (four b c d e)))
+
+  (fn cat ((p Inss) (q Inss)) Inss (inss_join p q))
+
+  (fn cat3 ((p Inss) (q Inss) (r Inss)) Inss (inss_join p (inss_join q r)))
+
+  (fn call ((f U32)) Ins (WCall f))
+
+  ; The same word offset a variant's or a record's field is read at: field n of a block
+  ; whose address is on the stack. Fields are 8 bytes.
+  (fn word ((n U32)) U32 (wrap.mul n (u32.of 8)))
+
+  ; A byte is stored with an address beneath it, as an i32.
+  (fn store8 ((at U32)) Ins (WStore (u8.of 60) (u8.of 0) at))
+
+  (fn i32_or () Ins (WOp (u8.of 114)))
+
+  (fn i32_eqz () Ins (WOp (u8.of 69)))
+
+  (fn i32_and () Ins (WOp (u8.of 113)))
+
+  (fn mem_copy () Ins (WCopy))
+
+  ; --- alloc(n) -----------------------------------------------------------------------------
+  ; locals: 0 n, 1 start, 2 end
+  (fn alloc_body () Inss
+    (cat (four (WGlobalGet (u32.of 0)) (lset (u32.of 1)) (lget (u32.of 1)) (lget (u32.of 0)))
+      (cat (five (lit (i64.of 7)) (i64_add) (lit (i64.of -8)) (i64_and) (i64_add))
+        (cat (four (lset (u32.of 2)) (lget (u32.of 2)) (WGlobalSet (u32.of 0)) (lget (u32.of 2)))
+          (cat (five (WMemSize) (i64_extend_u) (lit (i64.of 16)) (i64_shl) (i64_gt_u))
+            (cat (one (WIf false (cat (five (lget (u32.of 2)) (lit (i64.of 65535)) (i64_add) (lit (i64.of 16)) (i64_shr_u)) (cat (four (WMemSize) (i64_extend_u) (i64_sub) (i32_wrap)) (two (WMemGrow) (drop)))) (NoInss)))
+              (one (lget (u32.of 1)))))))))
+
+  ; --- reference counts --------------------------------------------------------------------------
+  ; A block that is counted has two words in front of the address it is known by: the count at
+  ; -16, and at -8 the size in words (high half) and a mask (low half) with a bit set for each
+  ; of its first 32 words that holds another counted block. `make(n, mask)` answers one with a
+  ; count of 1; `retain` adds one; `release` takes one away and, at 0, releases the blocks the
+  ; mask names and puts the block on a list for its size, where the next `make` of that size
+  ; finds it. Anything below the heap's start -- the static cells and strings -- is never
+  ; counted, so retaining or releasing it does nothing. The heads of the lists are a table whose
+  ; address is the word at address 0, made the first time a block is freed; blocks of 64 words
+  ; or more are not reused.
+  (fn i64_lt_u_op () Ins (WOp (u8.of 84)))
+
+  (fn i64_or_op () Ins (WOp (u8.of 132)))
+
+  ; The word at the address on the stack.
+  (fn rt_load ((off U32)) Inss (two (i32_wrap) (WLoad (u8.of 41) (u8.of 3) off)))
+
+  ; Store `value` at `addr`.
+  (fn rt_store ((addr Inss) (value Inss)) Inss
+    (cat addr (cat (one (i32_wrap)) (cat value (one (WStore (u8.of 55) (u8.of 3) (u32.of 0)))))))
+
+  (fn rt_local ((i U32)) Inss (one (lget i)))
+
+  (fn rt_set ((i U32)) Inss (one (lset i)))
+
+  (fn rt_num ((n I64)) Inss (one (lit n)))
+
+  (fn rt_plus () Inss (one (i64_add)))
+
+  (fn rt_when ((then Inss)) Inss (one (WIf false then (NoInss))))
+
+  ; locals: 0 n, 1 mask, 2 words, 3 block, 4 table, 5 slot
+  (fn make_words () Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 7)) (cat (rt_plus) (cat (rt_num (i64.of 3)) (cat (one (i64_shr_u))
+      (cat (rt_set (u32.of 2)) (cat (rt_local (u32.of 2)) (cat (one (i64_eqz)) (rt_when (cat (rt_num (i64.of 1)) (rt_set (u32.of 2)))))))))))))
+
+  ; Take the first block off the list for this size, if there is one.
+  (fn make_reuse () Inss
+    (cat (rt_table) (cat (rt_set (u32.of 4)) (cat (rt_local (u32.of 4)) (cat (rt_num (i64.of 0)) (cat (one (i64_ne)) (rt_when (make_pop))))))))
+
+  (fn rt_table () Inss (cat (rt_num (i64.of 0)) (rt_load (u32.of 0))))
+
+  (fn make_pop () Inss
+    (cat (rt_local (u32.of 4)) (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 8)) (cat (one (i64_mul)) (cat (rt_plus)
+      (cat (rt_set (u32.of 5)) (cat (rt_local (u32.of 5)) (cat (rt_load (u32.of 0)) (cat (rt_set (u32.of 3))
+        (cat (rt_local (u32.of 3)) (cat (rt_num (i64.of 0)) (cat (one (i64_ne)) (rt_when (make_unlink)))))))))))))))
+
+  (fn make_unlink () Inss
+    (rt_store (rt_local (u32.of 5)) (cat (rt_local (u32.of 3)) (rt_load (u32.of 0)))))
+
+  (fn make_fresh () Inss
+    (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 8)) (cat (one (i64_mul)) (cat (rt_num (i64.of 16)) (cat (rt_plus)
+      (cat (one (call (index_alloc))) (cat (rt_num (i64.of 16)) (cat (rt_plus) (rt_set (u32.of 3)))))))))))
+
+  (fn make_header () Inss
+    (cat (rt_store (cat (rt_local (u32.of 3)) (cat (rt_num (i64.of 16)) (one (i64_sub)))) (rt_num (i64.of 1)))
+      (cat (rt_store (cat (rt_local (u32.of 3)) (cat (rt_num (i64.of 8)) (one (i64_sub))))
+          (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 32)) (cat (one (i64_shl)) (cat (rt_local (u32.of 1)) (one (i64_or_op)))))))
+        (rt_local (u32.of 3)))))
+
+  (fn make_body () Inss
+    (cat (make_words)
+      (cat (rt_num (i64.of 0)) (cat (rt_set (u32.of 3))
+        (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 64)) (cat (one (i64_lt_u_op)) (cat (rt_when (make_reuse))
+          (cat (rt_local (u32.of 3)) (cat (one (i64_eqz)) (cat (rt_when (make_fresh)) (make_header))))))))))))
+
+  ; locals: 0 block
+  (fn retain_body ((base I64)) Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u))
+      (cat (rt_when (rt_store (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (one (i64_sub))))
+                          (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (cat (one (i64_sub)) (cat (rt_load (u32.of 0)) (cat (rt_num (i64.of 1)) (rt_plus))))))))
+        (rt_local (u32.of 0)))))))
+
+  ; locals: 0 block, 1 count, 2 meta, 3 index, 4 mask, 5 table, 6 slot
+  (fn release_body ((base I64)) Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u)) (cat (rt_when (release_counted)) (rt_num (i64.of 0)))))))
+
+  (fn release_counted () Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (cat (one (i64_sub)) (cat (rt_load (u32.of 0)) (cat (rt_num (i64.of 1)) (cat (one (i64_sub))
+      (cat (rt_set (u32.of 1)) (cat (rt_store (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (one (i64_sub)))) (rt_local (u32.of 1)))
+        (cat (rt_local (u32.of 1)) (cat (one (i64_eqz)) (rt_when (release_freed)))))))))))))
+
+  (fn release_freed () Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 8)) (cat (one (i64_sub)) (cat (rt_load (u32.of 0)) (cat (rt_set (u32.of 2))
+      (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 4294967295)) (cat (one (i64_and)) (cat (rt_set (u32.of 4))
+        (cat (rt_num (i64.of 0)) (cat (rt_set (u32.of 3)) (cat (release_all) (cat (one (WBlock false (one (WLoop false (release_step)))))
+          (release_list)))))))))))))))
+
+  ; With the top bit of the meta word set, every word after the first holds a counted block:
+  ; an array of them, whose first word is its length.
+  (fn release_all () Inss
+    (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 0)) (cat (one (i64_lt_s))
+      (rt_when (cat (rt_num (i64.of -1)) (cat (rt_set (u32.of 4)) (cat (rt_num (i64.of 1)) (rt_set (u32.of 3))))))))))
+
+  ; One word of the mask: stop at the end of the block or when no bits are left, release the
+  ; block if the bit is set.
+  (fn release_step () Inss
+    (cat (rt_local (u32.of 3)) (cat (meta_words) (cat (one (i64_ge_u)) (cat (one (WBrIf (u32.of 1)))
+    (cat (rt_local (u32.of 4)) (cat (rt_local (u32.of 3)) (cat (one (i64_shr_u)) (cat (one (i64_eqz)) (cat (one (WBrIf (u32.of 1)))
+      (cat (rt_local (u32.of 4)) (cat (rt_local (u32.of 3)) (cat (one (i64_shr_u)) (cat (rt_num (i64.of 1)) (cat (one (i64_and)) (cat (rt_num (i64.of 0)) (cat (one (i64_ne))
+        (cat (rt_when (release_child))
+          (cat (rt_local (u32.of 3)) (cat (rt_num (i64.of 1)) (cat (rt_plus) (cat (rt_set (u32.of 3)) (one (WBr (u32.of 0)))))))))))))))))))))))))
+
+  (fn release_child () Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_local (u32.of 3)) (cat (rt_num (i64.of 8)) (cat (one (i64_mul)) (cat (rt_plus) (cat (rt_load (u32.of 0)) (cat (one (call (index_release))) (one (drop))))))))))
+
+  ; The size in words, the top bit of the meta word aside.
+  (fn meta_words () Inss
+    (cat (rt_local (u32.of 2)) (cat (rt_num (i64.of 32)) (cat (one (i64_shr_u)) (cat (rt_num (i64.of 2147483647)) (one (i64_and)))))))
+
+  ; Put the block on the list for its size (not for 64 words or more): its first word links.
+  (fn release_list () Inss
+    (cat (meta_words) (cat (rt_num (i64.of 64)) (cat (one (i64_lt_u_op)) (rt_when (release_push))))))
+
+  (fn release_push () Inss
+    (cat (rt_table) (cat (rt_set (u32.of 5)) (cat (rt_local (u32.of 5)) (cat (one (i64_eqz)) (cat (rt_when (release_table))
+      (cat (rt_local (u32.of 5)) (cat (meta_words) (cat (rt_num (i64.of 8)) (cat (one (i64_mul)) (cat (rt_plus)
+        (cat (rt_set (u32.of 6)) (cat (rt_store (rt_local (u32.of 0)) (cat (rt_local (u32.of 6)) (rt_load (u32.of 0))))
+          (rt_store (rt_local (u32.of 6)) (rt_local (u32.of 0))))))))))))))))
+
+  (fn release_table () Inss
+    (cat (rt_num (i64.of 512)) (cat (one (call (index_alloc))) (cat (rt_set (u32.of 5)) (rt_store (rt_num (i64.of 0)) (rt_local (u32.of 5)))))))
+
+  ; --- new(len) -------------------------------------------------------------------------------
+  ; locals: 0 len, 1 block
+  (fn new_body () Inss
+    (cat (five (lget (u32.of 0)) (lit (i64.of 8)) (i64_add) (lit (i64.of 0)) (call (index_make)))
+      (cat (five (lset (u32.of 1)) (lget (u32.of 1)) (i32_wrap) (lget (u32.of 0)) (WStore (u8.of 55) (u8.of 3) (u32.of 0)))
+        (one (lget (u32.of 1))))))
+
+  ; --- concat(a, b) ---------------------------------------------------------------------------
+  ; locals: 0 a, 1 b, 2 length of a, 3 length of b, 4 result
+  (fn concat_body () Inss
+    (cat (five (lget (u32.of 0)) (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (lset (u32.of 2)) (lget (u32.of 1)))
+      (cat (five (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (lset (u32.of 3)) (lget (u32.of 2)) (lget (u32.of 3)))
+        (cat (five (i64_add) (call (index_new)) (lset (u32.of 4)) (lget (u32.of 4)) (lit (i64.of 8)))
+          (cat (five (i64_add) (i32_wrap) (lget (u32.of 0)) (lit (i64.of 8)) (i64_add))
+            (cat (five (i32_wrap) (lget (u32.of 2)) (i32_wrap) (mem_copy) (lget (u32.of 4)))
+              (cat (five (lit (i64.of 8)) (i64_add) (lget (u32.of 2)) (i64_add) (i32_wrap))
+                (cat (five (lget (u32.of 1)) (lit (i64.of 8)) (i64_add) (i32_wrap) (lget (u32.of 3)))
+                  (three (i32_wrap) (mem_copy) (lget (u32.of 4)))))))))))
+
+  ; --- eq(a, b) ---------------------------------------------------------------------------------
+  ; locals: 0 a, 1 b, 2 length, 3 index. Unequal lengths are unequal; otherwise the bytes are
+  ; compared one at a time, and the first difference answers 0 and the end answers 1. The
+  ; answer leaves through the block, two labels out of an `if` inside the loop.
+  (fn eq_at_end () Inss
+    (four (lget (u32.of 3))
+      (lget (u32.of 2))
+      (i64_ge_u)
+      (WIf false (two (lit (i64.of 1)) (WBr (u32.of 2))) (NoInss))))
+
+  ; The byte of parameter `which` at the index, as an i64.
+  (fn eq_byte ((which U32)) Inss
+    (five (lget which)
+      (lget (u32.of 3))
+      (i64_add)
+      (i32_wrap)
+      (WLoad (u8.of 49) (u8.of 0) (u32.of 8))))
+
+  (fn eq_loop_body () Inss
+    (cat (eq_at_end)
+      (cat (eq_byte (u32.of 0))
+        (cat (eq_byte (u32.of 1))
+          (cat (two (i64_ne) (WIf false (two (lit (i64.of 0)) (WBr (u32.of 2))) (NoInss)))
+            (five (lget (u32.of 3))
+              (lit (i64.of 1))
+              (i64_add)
+              (lset (u32.of 3))
+              (WBr (u32.of 0))))))))
+
+  (fn eq_compare () Inss
+    (cat (two (lit (i64.of 0)) (lset (u32.of 3)))
+      (one (WBlock true (cat (one (WLoop false (eq_loop_body))) (one (lit (i64.of 0))))))))
+
+  (fn eq_body () Inss
+    (cat (five (lget (u32.of 0)) (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (lset (u32.of 2)) (lget (u32.of 2)))
+      (cat (four (lget (u32.of 1)) (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (i64_ne))
+        (one (WIf true (one (lit (i64.of 0))) (eq_compare))))))
+
+  ; --- at(b, i) ---------------------------------------------------------------------------------
+  ; locals: 0 b, 1 index, 2 the `Some`. `none` is the address of the cell for `(None)` and
+  ; `some` the id of `(Some ...)`.
+  (fn at_body ((none I64) (some I64)) Inss
+    (cat (five (lget (u32.of 1)) (lit (i64.of 0)) (i64_lt_s) (lget (u32.of 1)) (lget (u32.of 0)))
+      (cat (four (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (i64_ge_s) (i32_or))
+        (one (WIf true (one (lit none)) (cat (four (lit (i64.of 16)) (call (index_alloc)) (lset (u32.of 2)) (lget (u32.of 2))) (cat (four (i32_wrap) (lit some) (WStore (u8.of 55) (u8.of 3) (u32.of 0)) (lget (u32.of 2))) (cat (five (i32_wrap) (lget (u32.of 0)) (lget (u32.of 1)) (i64_add) (i32_wrap)) (three (WLoad (u8.of 49) (u8.of 0) (u32.of 8)) (WStore (u8.of 55) (u8.of 3) (u32.of 8)) (lget (u32.of 2)))))))))))
+
+  ; --- slice(b, from, to) -----------------------------------------------------------------------
+  ; locals: 0 b, 1 from, 2 to, 3 length, 4 result. from and to are clamped into 0..length.
+  (fn slice_body () Inss
+    (cat (five (lget (u32.of 0)) (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (lset (u32.of 3)) (lget (u32.of 1)))
+      (cat (five (lit (i64.of 0)) (lget (u32.of 1)) (lit (i64.of 0)) (i64_gt_s) (select))
+        (cat (five (lset (u32.of 1)) (lget (u32.of 2)) (lit (i64.of 0)) (lget (u32.of 2)) (lit (i64.of 0)))
+          (cat (five (i64_gt_s) (select) (lset (u32.of 2)) (lget (u32.of 2)) (lget (u32.of 3)))
+            (cat (five (lget (u32.of 2)) (lget (u32.of 3)) (i64_lt_s) (select) (lset (u32.of 2)))
+              (cat (three (lget (u32.of 1)) (lget (u32.of 2)) (i64_ge_s))
+                (one (WIf true (two (lit (i64.of 0)) (call (index_new))) (cat (five (lget (u32.of 2)) (lget (u32.of 1)) (i64_sub) (call (index_new)) (lset (u32.of 4))) (cat (five (lget (u32.of 4)) (lit (i64.of 8)) (i64_add) (i32_wrap) (lget (u32.of 0))) (cat (five (lit (i64.of 8)) (i64_add) (lget (u32.of 1)) (i64_add) (i32_wrap)) (cat (five (lget (u32.of 2)) (lget (u32.of 1)) (i64_sub) (i32_wrap) (mem_copy)) (one (lget (u32.of 4))))))))))))))))
+
+  ; --- of(n) ------------------------------------------------------------------------------------
+  ; locals: 0 n, 1 result
+  (fn of_body () Inss
+    (cat (five (lit (i64.of 1)) (call (index_new)) (lset (u32.of 1)) (lget (u32.of 1)) (i32_wrap))
+      (cat (five (lget (u32.of 0)) (lit (i64.of 255)) (i64_and) (store8 (u32.of 8)) (lget (u32.of 1)))
+        (NoInss))))
+
+  ; --- add(a, b), sub(a, b), mul(a, b) on an Int ----------------------------------------------------------
+  ; An `Int` has no width, and a machine word has one. These are the instruction and then a
+  ; test for having left the word, which traps: an Int computation either gives the number
+  ; the interpreter gives or stops. locals: 0 a, 1 b, 2 result.
+  (fn trap_if ((cond Inss)) Inss (cat cond (one (WIf false (one (unreachable)) (NoInss)))))
+
+  (fn add_body () Inss
+    (cat (five (lget (u32.of 0)) (lget (u32.of 1)) (i64_add) (lset (u32.of 2)) (lget (u32.of 0)))
+      (cat (five (lget (u32.of 2)) (i64_xor) (lget (u32.of 1)) (lget (u32.of 2)) (i64_xor))
+        (cat (trap_if (three (i64_and) (lit (i64.of 0)) (i64_lt_s)))
+          (one (lget (u32.of 2)))))))
+
+  (fn sub_body () Inss
+    (cat (five (lget (u32.of 0)) (lget (u32.of 1)) (i64_sub) (lset (u32.of 2)) (lget (u32.of 0)))
+      (cat (five (lget (u32.of 1)) (i64_xor) (lget (u32.of 0)) (lget (u32.of 2)) (i64_xor))
+        (cat (trap_if (three (i64_and) (lit (i64.of 0)) (i64_lt_s)))
+          (one (lget (u32.of 2)))))))
+
+  (fn mul_body () Inss
+    (cat (five (lget (u32.of 0)) (lget (u32.of 1)) (i64_mul) (lset (u32.of 2)) (lget (u32.of 0)))
+      (cat (two (lit (i64.of 0)) (i64_ne))
+        (cat (one (WIf false (cat (trap_if (five (lget (u32.of 2)) (lget (u32.of 0)) (i64_div_s) (lget (u32.of 1)) (i64_ne))) (NoInss)) (NoInss)))
+          (one (lget (u32.of 2)))))))
+
+  ; --- div(a, b, unsigned) -----------------------------------------------------------------------------------
+  ; `num.div`: nothing on a zero divisor, otherwise `(Some quotient)` rounded down, as the
+  ; interpreter's `//` does. locals: 0 a, 1 b, 2 unsigned, 3 quotient, 4 remainder, 5 block.
+  (fn floor_quotient () Inss
+    (cat (five (lget (u32.of 0)) (lget (u32.of 1)) (i64_div_s) (lset (u32.of 3)) (lget (u32.of 0)))
+      (cat (five (lget (u32.of 1)) (i64_rem_s) (lset (u32.of 4)) (lget (u32.of 4)) (lit (i64.of 0)))
+        (cat (four (i64_ne) (lget (u32.of 4)) (lget (u32.of 1)) (i64_xor))
+          (cat (three (lit (i64.of 0)) (i64_lt_s) (WOp (u8.of 113)))
+            (one (WIf false (four (lget (u32.of 3)) (lit (i64.of 1)) (i64_sub) (lset (u32.of 3))) (NoInss))))))))
+
+  (fn div_body ((none I64) (some I64)) Inss
+    (cat (two (lget (u32.of 1)) (i64_eqz))
+      (one (WIf true (one (lit none)) (cat (two (lget (u32.of 2)) (i32_wrap)) (cat (one (WIf false (four (lget (u32.of 0)) (lget (u32.of 1)) (i64_div_u) (lset (u32.of 3))) (floor_quotient))) (cat (four (lit (i64.of 16)) (call (index_alloc)) (lset (u32.of 5)) (lget (u32.of 5))) (cat (four (i32_wrap) (lit some) (WStore (u8.of 55) (u8.of 3) (u32.of 0)) (lget (u32.of 5))) (cat (four (i32_wrap) (lget (u32.of 3)) (WStore (u8.of 55) (u8.of 3) (u32.of 8)) (lget (u32.of 5))) (NoInss))))))))))
+
+  ; --- to_str(n, unsigned) ---------------------------------------------------------------------------------
+  ; `num.to_str`: the decimal digits of n, with a sign, read as unsigned when the flag is set.
+  ; The digits are written backwards into a scratch block and copied out.
+  ; locals: 0 n, 1 unsigned, 2 scratch, 3 position, 4 negative, 5 magnitude, 6 result.
+  (fn to_str_negative () Inss
+    (cat (five (lget (u32.of 1)) (i64_eqz) (lget (u32.of 0)) (lit (i64.of 0)) (i64_lt_s))
+      (three (i32_and) (i64_extend_u) (lset (u32.of 4)))))
+
+  (fn to_str_magnitude () Inss
+    (cat (five (lit (i64.of 0)) (lget (u32.of 0)) (i64_sub) (lget (u32.of 0)) (lget (u32.of 4)))
+      (three (i32_wrap) (select) (lset (u32.of 5)))))
+
+  (fn to_str_scratch () Inss
+    (cat (four (lit (i64.of 24)) (lit (i64.of 0)) (call (index_make)) (lset (u32.of 2)))
+      (two (lit (i64.of 24)) (lset (u32.of 3)))))
+
+  (fn to_str_digits () Inss
+    (one (WLoop false (cat (five (lget (u32.of 3)) (lit (i64.of 1)) (i64_sub) (lset (u32.of 3)) (lget (u32.of 2))) (cat (five (lget (u32.of 3)) (i64_add) (i32_wrap) (lget (u32.of 5)) (lit (i64.of 10))) (cat (five (i64_rem_u) (lit (i64.of 48)) (i64_add) (store8 (u32.of 0)) (lget (u32.of 5))) (cat (five (lit (i64.of 10)) (i64_div_u) (lset (u32.of 5)) (lget (u32.of 5)) (lit (i64.of 0))) (two (i64_ne) (WBrIf (u32.of 0))))))))))
+
+  (fn to_str_sign () Inss
+    (cat (two (lget (u32.of 4)) (i32_wrap))
+      (one (WIf false (cat (five (lget (u32.of 3)) (lit (i64.of 1)) (i64_sub) (lset (u32.of 3)) (lget (u32.of 2))) (five (lget (u32.of 3)) (i64_add) (i32_wrap) (lit (i64.of 45)) (store8 (u32.of 0)))) (NoInss)))))
+
+  (fn to_str_result () Inss
+    (cat (five (lit (i64.of 24)) (lget (u32.of 3)) (i64_sub) (call (index_new)) (lset (u32.of 6)))
+      (cat (five (lget (u32.of 6)) (lit (i64.of 8)) (i64_add) (i32_wrap) (lget (u32.of 2)))
+        (cat (five (lget (u32.of 3)) (i64_add) (i32_wrap) (lit (i64.of 24)) (lget (u32.of 3)))
+          (cat (three (i64_sub) (i32_wrap) (mem_copy))
+            (cat (three (lget (u32.of 2)) (call (index_release)) (drop)) (one (lget (u32.of 6)))))))))
+
+  (fn to_str_body () Inss
+    (cat (to_str_negative)
+      (cat (to_str_magnitude)
+        (cat (to_str_scratch) (cat (to_str_digits) (cat (to_str_sign) (to_str_result)))))))
+
+  ; --- the module's runtime -----------------------------------------------------------------------
+  (fn function ((name Str) (params U32) (locals U32) (body Inss) (exported Bool)) Func
+    (make Func
+      (name name)
+      (params params)
+      (results (u32.of 1))
+      (locals locals)
+      (body body)
+      (exported exported)))
+
+  ; In index order. `none` and `some` are the program's own numbering of those variants.
+  (fn runtime ((none I64) (some I64) (base I64)) Funcs
+    (Funcs (function "rt_alloc" (u32.of 1) (u32.of 2) (alloc_body) true)
+      (Funcs (function "rt_new" (u32.of 1) (u32.of 1) (new_body) false)
+        (Funcs (function "rt_concat" (u32.of 2) (u32.of 3) (concat_body) false)
+          (Funcs (function "rt_eq" (u32.of 2) (u32.of 2) (eq_body) false)
+            (Funcs (function "rt_at" (u32.of 2) (u32.of 1) (at_body none some) false)
+              (Funcs (function "rt_slice" (u32.of 3) (u32.of 2) (slice_body) false)
+                (Funcs (function "rt_of" (u32.of 1) (u32.of 1) (of_body) false)
+                  (Funcs (function "rt_add" (u32.of 2) (u32.of 1) (add_body) false)
+                    (Funcs (function "rt_sub" (u32.of 2) (u32.of 1) (sub_body) false)
+                      (Funcs (function "rt_mul" (u32.of 2) (u32.of 1) (mul_body) false)
+                        (Funcs (function "rt_div" (u32.of 3) (u32.of 3) (div_body none some) false)
+                          (Funcs (function "rt_to_str" (u32.of 2) (u32.of 5) (to_str_body) false)
+                            (Funcs (function "rt_make" (u32.of 2) (u32.of 4) (make_body) false)
+                              (Funcs (function "rt_retain" (u32.of 1) (u32.of 0) (retain_body base) false)
+                                (Funcs (function "rt_release" (u32.of 1) (u32.of 6) (release_body base) false)
+                                  (NoFuncs)))))))))))))))))
+
+  ; --- a module of nothing but the runtime, for the tests -------------------------------------------
+  ; Every function exported, so a test can call them; `print` is the one import.
+  (fn exposed ((fs Funcs)) Funcs
+    (match fs
+      ((NoFuncs) (NoFuncs))
+      ((Funcs h rest) (Funcs (with h (exported true)) (exposed rest)))))
+
+  (fn standalone ((none I64) (some I64)) Module
+    (make Module
+      (imports (Imports (make Import (from "host") (name "print") (params (u32.of 1)) (results (u32.of 0))) (NoImports)))
+      (funcs (exposed (runtime none some (i64.of 1024))))
+      (segments (NoSegments))
+      (pages (u32.of 1))
+      (heap (i64.of 1024))))
+
+  (fn standalone_bytes ((none I64) (some I64)) Bytes
+    (uses Alloc)
+    (encoded (standalone none some)))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/runtime.wtn is exercised by tests/test_runtime_wasm.py")))

@@ -1,0 +1,4 @@
+(module m
+  (enum E (A))
+
+  (fn f ((e E)) Int (get e field)))

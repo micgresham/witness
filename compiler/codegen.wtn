@@ -1,0 +1,416 @@
+; Witness to WebAssembly, written in Witness.
+;
+; Source in, the bytes of a loadable module out, for the part of the language that is
+; 32-bit integers and booleans: locals, `if`, `let`, calls between the functions of the
+; module, and the arithmetic, comparison and boolean primitives. The first three steps
+; are the ones a backend is made of -- read the program, lower it to a structured
+; intermediate representation, encode that for the target -- and each is its own function
+; rather than one pass, so that what is wrong can be said to be wrong in one place.
+;
+; Anything outside the subset is refused by name, with no output: a compiler that
+; guessed would be a source of programs that run and are wrong. The evidence is
+; tests/test_codegen.py, which compiles programs, hands the bytes to a real WebAssembly
+; runtime, and compares every answer with the interpreter's over a spread of inputs.
+;
+;   witness run compiler/codegen.wtn --grant Alloc,Console
+(module codegen
+  (use "wtn:42f8a84470880863b32d12d5349dc9a5081b053e5c035182b6bc3514bea00ca1" as preamble)
+
+  (use "wtn:6297f7f9ebb254193d3fb8e7dc983d925c4d4290af99290f54d49a0de5670f93" as section)
+
+  (use "wtn:9fb83ee59644e5a4554488495fa0d3524014291d5f6694589430d76573ca959d" as vector)
+
+  (use "wtn:51bb0fbcfa8b0293ae115d0d031f3216b132d69df3f4203ebcc0c5c754f12db0" as varint)
+
+  (use "wtn:f456678d962242b49e9d58c7679b5b010f15dd40bdbbfd7c1c3bfaa5b70b44a6" as sleb128)
+
+  (use "wtn:6a99692547d9859b91171d82712e10ec62b7eda03aefc22ffea37ada75418d6e" as wire_name)
+
+  (use "wtn:a2de002fc26dc11d863a66ca005684a630e9e917401a8cc4ecbbd1121fceb0a5" as no_bytes)
+
+  (use "wtn:42b4ccfa1dfd980872f5b7d61cea430d7a963973d64fb38f0bbb8c4cf1b8581b" as repeated)
+
+  (use "wtn:899e21eb94eb82caaa0d2a3ac52dccd80eb8c4e238c6aa55cd5b7c73f92faad1" as type_of)
+
+  (use "wtn:8b21cf36641449b0189337a07c77f45c96aee5f01ac1b4bea685eccc7b7b07f5" as named)
+
+  (use "wtn:005b734fa344ec5d8501fe8b91eaaeca68ae600bebf49c44660fbf7d11429b05" as digits)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
+
+  (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:8f001b8eb331c35b82070b925765a08ae8e67c3f0971edbcf672934f1e75dea3" as Trees)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
+
+  (use "wtn:315e70b0830671f92192b9b7cff60d910b683354fdc3c37bb8da01d8eec89674" as is_digit)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b"
+    as
+    module_items)
+
+  ; --- the intermediate representation ------------------------------------------
+  ; What a function compiles to before it is bytes: a structured sequence of operations
+  ; over 32-bit values, which is exactly what WebAssembly is, so lowering and encoding are
+  ; two steps rather than one only because the first is about Witness and the second about
+  ; the target. `Bool` is a 32-bit 0 or 1.
+  ;
+  ; What this compiles is a subset, and says so by refusing the rest by name: `I32` and
+  ; `Bool` values, locals, `if`, `let`, calls to other functions of the module, and the
+  ; arithmetic, comparison and boolean primitives. Arithmetic needs no overflow check
+  ; here: a checked `+` was proved not to overflow before this ever sees it, and `wrap.*`
+  ; wraps by definition, so both are the plain instruction. An `Int` is unbounded and has
+  ; no place in a 32-bit value, so it is compiled only where it is a literal converted at
+  ; once by `(i32.of ...)`.
+  (enum Kind (KI32) (KBool))
+
+  (enum Op
+    (OConst (n Int))
+    (OGet (index Int))
+    (OSet (index Int))
+    (OAdd)
+    (OSub)
+    (OMul)
+    (OEq)
+    (OLt)
+    (OLe)
+    (OAnd)
+    (OOr)
+    (ONot)
+    (OIf (then Ops) (other Ops))
+    (OCall (func Int)))
+
+  (enum Ops (NoOps) (Ops (head Op) (rest Ops)))
+
+  (fn ops_join ((p Ops) (q Ops)) Ops
+    (match p ((NoOps) q) ((Ops h rest) (Ops h (ops_join rest q)))))
+
+  (fn ops_one ((o Op)) Ops (Ops o (NoOps)))
+
+  ; The names in scope and the local each is kept in. A parameter is the local of its
+  ; position; a `let` takes the next one after those already used.
+  (enum Slots (NoSlots) (Slot (name Str) (index Int) (kind Kind) (rest Slots)))
+
+  (fn slot_of ((ss Slots) (name Str)) (Option Slots)
+    (match ss
+      ((NoSlots) (None))
+      ((Slot n i k rest) (if (str.eq n name) (Some ss) (slot_of rest name)))))
+
+  ; The functions of the module, in order: a call is the index of its callee.
+  (enum Kinds (NoKinds) (Kinds (head Kind) (rest Kinds)))
+
+  (fn kinds_count ((ks Kinds)) Int
+    (match ks ((NoKinds) 0) ((Kinds h rest) (+ 1 (kinds_count rest)))))
+
+  (enum Sigs (NoSigs) (Sig (name Str) (params Kinds) (ret Kind) (rest Sigs)))
+
+  (fn sigs_count ((ss Sigs)) Int
+    (match ss ((NoSigs) 0) ((Sig n p r rest) (+ 1 (sigs_count rest)))))
+
+  ; The position of a function by name, or -1.
+  (fn sig_index ((ss Sigs) (name Str) (at Int)) Int
+    (match ss
+      ((NoSigs) -1)
+      ((Sig n p r rest) (if (str.eq n name) at (sig_index rest name (+ at 1))))))
+
+  (fn sig_named ((ss Sigs) (name Str)) (Option Sigs)
+    (match ss
+      ((NoSigs) (None))
+      ((Sig n p r rest) (if (str.eq n name) (Some ss) (sig_named rest name)))))
+
+  (record Lowered (ops Ops) (kind Kind) (next Int))
+
+  (fn refused ((what Str)) Fault
+    (uses Alloc)
+    (fault "codegen" (concat what " is not compiled yet")))
+
+  ; --- lowering --------------------------------------------------------------------
+  (fn kind_of ((t Ty)) (Result Kind Fault)
+    (uses Alloc)
+    (if (str.eq (get t base) "I32")
+      (Ok (KI32))
+      (if (str.eq (get t base) "Bool")
+        (Ok (KBool))
+        (Err (refused (concat "the type " (get t base)))))))
+
+  (fn same_kind ((a Kind) (b Kind)) Bool
+    (match a
+      ((KI32) (match b ((KI32) true) ((KBool) false)))
+      ((KBool) (match b ((KI32) false) ((KBool) true)))))
+
+  ; A decimal integer, with its sign, out of the bytes of a word.
+  (fn int_of ((text Bytes)) (Option Int)
+    (if (= (byte_at text 0) 45)
+      (match (digits text 1 (unwrap (bytes.len text)) 0)
+        ((None) (None))
+        ((Some n) (Some (- 0 n))))
+      (digits text 0 (unwrap (bytes.len text)) 0)))
+
+  (fn lower ((sigs Sigs) (slots Slots) (next Int) (t Tree)) (Result Lowered Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (if quoted (Err (refused "a string")) (match (named text) ((Err f) (Err f)) ((Ok word) (if (str.eq word "true") (Ok (make Lowered (ops (ops_one (OConst 1))) (kind (KBool)) (next next))) (if (str.eq word "false") (Ok (make Lowered (ops (ops_one (OConst 0))) (kind (KBool)) (next next))) (match (slot_of slots word) ((Some found) (match found ((NoSlots) (Err (refused "a name"))) ((Slot n i k rest) (Ok (make Lowered (ops (ops_one (OGet i))) (kind k) (next next)))))) ((None) (if (is_digit (byte_at text 0)) (Err (refused "an Int outside (i32.of ...)")) (Err (fault "codegen" (concat "no name `" (concat word "` is in scope")))))))))))))
+      ((Node items) (match items ((NoTrees) (Err (refused "an empty list"))) ((Trees head rest) (match head ((Node inner) (Err (refused "a call through a list"))) ((Leaf htext hquoted) (match (named htext) ((Err f) (Err f)) ((Ok name) (lower_form sigs slots next name rest))))))))))
+
+  (fn lower_form ((sigs Sigs) (slots Slots) (next Int) (name Str) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (if (str.eq name "if")
+      (lower_if sigs slots next rest)
+      (if (str.eq name "let")
+        (lower_let sigs slots next rest)
+        (if (str.eq name "i32.of")
+          (lower_literal rest next)
+          (match (binary_op name)
+            ((Some op) (lower_binary sigs slots next op rest))
+            ((None) (if (str.eq name "not") (lower_not sigs slots next rest) (lower_call sigs slots next name rest))))))))
+
+  ; The operators that take two operands, with what they want and what they give.
+  (record Operator (op Op) (wants Kind) (gives Kind))
+
+  (fn binary_op ((name Str)) (Option Operator)
+    (if (or (str.eq name "+") (str.eq name "wrap.add"))
+      (Some (make Operator (op (OAdd)) (wants (KI32)) (gives (KI32))))
+      (if (or (str.eq name "-") (str.eq name "wrap.sub"))
+        (Some (make Operator (op (OSub)) (wants (KI32)) (gives (KI32))))
+        (if (or (str.eq name "*") (str.eq name "wrap.mul"))
+          (Some (make Operator (op (OMul)) (wants (KI32)) (gives (KI32))))
+          (if (str.eq name "=")
+            (Some (make Operator (op (OEq)) (wants (KI32)) (gives (KBool))))
+            (if (str.eq name "<")
+              (Some (make Operator (op (OLt)) (wants (KI32)) (gives (KBool))))
+              (if (str.eq name "<=")
+                (Some (make Operator (op (OLe)) (wants (KI32)) (gives (KBool))))
+                (if (str.eq name "and")
+                  (Some (make Operator (op (OAnd)) (wants (KBool)) (gives (KBool))))
+                  (if (str.eq name "or")
+                    (Some (make Operator (op (OOr)) (wants (KBool)) (gives (KBool))))
+                    (None))))))))))
+
+  (fn lower_binary ((sigs Sigs) (slots Slots) (next Int) (o Operator) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "codegen" "an operator takes two operands")))
+      ((Trees a more) (match more ((NoTrees) (Err (fault "codegen" "an operator takes two operands"))) ((Trees b none) (match none ((Trees extra others) (Err (fault "codegen" "an operator takes two operands"))) ((NoTrees) (match (lower sigs slots next a) ((Err f) (Err f)) ((Ok left) (match (lower sigs slots (get left next) b) ((Err f) (Err f)) ((Ok right) (if (and (same_kind (get left kind) (get o wants)) (same_kind (get right kind) (get o wants))) (Ok (make Lowered (ops (ops_join (get left ops) (ops_join (get right ops) (ops_one (get o op))))) (kind (get o gives)) (next (get right next)))) (Err (fault "codegen" "an operand is not the kind the operator wants"))))))))))))))
+
+  (fn lower_not ((sigs Sigs) (slots Slots) (next Int) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "codegen" "a not takes one operand")))
+      ((Trees a more) (match more ((Trees extra others) (Err (fault "codegen" "a not takes one operand"))) ((NoTrees) (match (lower sigs slots next a) ((Err f) (Err f)) ((Ok inner) (match (get inner kind) ((KI32) (Err (fault "codegen" "a not takes a Bool"))) ((KBool) (Ok (make Lowered (ops (ops_join (get inner ops) (ops_one (ONot)))) (kind (KBool)) (next (get inner next)))))))))))))
+
+  ; `(i32.of n)` on a literal: the conversion is checked where the literal is written, so
+  ; here it is just the constant. Anything but a literal would need a range proof the
+  ; compiler does not carry yet.
+  (fn lower_literal ((rest Trees) (next Int)) (Result Lowered Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "codegen" "an i32.of takes one value")))
+      ((Trees a more) (match more ((Trees extra others) (Err (fault "codegen" "an i32.of takes one value"))) ((NoTrees) (match a ((Node inner) (Err (refused "an i32.of of something that is not a literal"))) ((Leaf text quoted) (if quoted (Err (refused "an i32.of of a string")) (match (int_of text) ((None) (Err (refused "an i32.of of something that is not a literal"))) ((Some n) (if (and (<= -2147483648 n) (<= n 2147483647)) (Ok (make Lowered (ops (ops_one (OConst n))) (kind (KI32)) (next next))) (Err (fault "codegen" "a literal does not fit an I32")))))))))))))
+
+  (fn lower_if ((sigs Sigs) (slots Slots) (next Int) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "codegen" "an if takes a condition and two branches")))
+      ((Trees c more) (match more ((NoTrees) (Err (fault "codegen" "an if takes a condition and two branches"))) ((Trees a others) (match others ((NoTrees) (Err (fault "codegen" "an if takes a condition and two branches"))) ((Trees b none) (match none ((Trees extra tail) (Err (fault "codegen" "an if takes a condition and two branches"))) ((NoTrees) (match (lower sigs slots next c) ((Err f) (Err f)) ((Ok cond) (match (lower sigs slots (get cond next) a) ((Err f) (Err f)) ((Ok then) (match (lower sigs slots (get then next) b) ((Err f) (Err f)) ((Ok other) (if (same_kind (get cond kind) (KBool)) (if (same_kind (get then kind) (get other kind)) (Ok (make Lowered (ops (ops_join (get cond ops) (ops_one (OIf (get then ops) (get other ops))))) (kind (get then kind)) (next (get other next)))) (Err (fault "codegen" "the branches of an if are different kinds"))) (Err (fault "codegen" "the condition of an if is a Bool"))))))))))))))))))
+
+  (fn lower_let ((sigs Sigs) (slots Slots) (next Int) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "codegen" "a let takes a name, a value and a body")))
+      ((Trees n more) (match n ((Node inner) (Err (fault "codegen" "a let binds a name"))) ((Leaf ntext nquoted) (match more ((NoTrees) (Err (fault "codegen" "a let takes a name, a value and a body"))) ((Trees v tail) (match tail ((NoTrees) (Err (fault "codegen" "a let takes a name, a value and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "codegen" "a let takes a name, a value and a body"))) ((NoTrees) (match (named ntext) ((Err f) (Err f)) ((Ok name) (match (lower sigs slots next v) ((Err f) (Err f)) ((Ok bound) (match (lower sigs (Slot name (get bound next) (get bound kind) slots) (+ (get bound next) 1) body) ((Err f) (Err f)) ((Ok inside) (Ok (make Lowered (ops (ops_join (get bound ops) (Ops (OSet (get bound next)) (get inside ops)))) (kind (get inside kind)) (next (get inside next)))))))))))))))))))))
+
+  ; A call to a function of the module: its arguments in order, then the call.
+  (fn lower_call ((sigs Sigs) (slots Slots) (next Int) (name Str) (rest Trees)) (Result Lowered Fault)
+    (uses Alloc)
+    (match (sig_named sigs name)
+      ((None) (Err (refused (concat "the call `" (concat name "`")))))
+      ((Some found) (match found ((NoSigs) (Err (refused "a call"))) ((Sig n params ret more) (match (lower_args sigs slots next rest params) ((Err f) (Err f)) ((Ok args) (Ok (make Lowered (ops (ops_join (get args ops) (ops_one (OCall (sig_index sigs name 0))))) (kind ret) (next (get args next)))))))))))
+
+  ; Each argument against the kind of the parameter in its place.
+  (fn lower_args ((sigs Sigs) (slots Slots) (next Int) (args Trees) (want Kinds)) (Result Lowered Fault)
+    (uses Alloc)
+    (match args
+      ((NoTrees) (match want ((NoKinds) (Ok (make Lowered (ops (NoOps)) (kind (KI32)) (next next)))) ((Kinds k more) (Err (fault "codegen" "a call has fewer arguments than the function takes")))))
+      ((Trees a others) (match want ((NoKinds) (Err (fault "codegen" "a call has more arguments than the function takes"))) ((Kinds k more) (match (lower sigs slots next a) ((Err f) (Err f)) ((Ok first) (if (same_kind (get first kind) k) (match (lower_args sigs slots (get first next) others more) ((Err f) (Err f)) ((Ok rest) (Ok (make Lowered (ops (ops_join (get first ops) (get rest ops))) (kind k) (next (get rest next)))))) (Err (fault "codegen" "an argument is not the kind its parameter wants"))))))))))
+
+  ; --- encoding -------------------------------------------------------------------
+  ; Opcodes, from the WebAssembly 1.0 binary format section 5.4: local.get 0x20,
+  ; local.set 0x21, i32.const 0x41, i32.eqz 0x45, i32.eq 0x46, i32.lt_s 0x48,
+  ; i32.le_s 0x4c, i32.add 0x6a, i32.sub 0x6b, i32.mul 0x6c, i32.and 0x71, i32.or 0x72;
+  ; control: if 0x04, else 0x05, end 0x0b, call 0x10. A block type of 0x7f says the `if`
+  ; leaves an i32.
+  (fn byte ((n Int)) Bytes
+    (uses Alloc)
+    (if (and (<= 0 n) (<= n 255)) (bytes.of (u8.of n)) (bytes.of (u8.of 0))))
+
+  (fn plain_op ((code Int)) Bytes
+    (uses Alloc)
+    (byte code))
+
+  ; i32.const and its signed varint operand. The lowering has already refused a constant
+  ; that does not fit, so the guard is for the prover, not a second check.
+  (fn const_bytes ((n Int)) Bytes
+    (uses Alloc)
+    (if (and (<= -2147483648 n) (<= n 2147483647))
+      (bytes.concat (byte 65) (sleb128 (i32.of n)))
+      (byte 0)))
+
+  (fn op_bytes ((o Op)) Bytes
+    (uses Alloc)
+    (match o
+      ((OConst n) (const_bytes n))
+      ((OGet i) (bytes.concat (byte 32) (varint i)))
+      ((OSet i) (bytes.concat (byte 33) (varint i)))
+      ((OAdd) (byte 106))
+      ((OSub) (byte 107))
+      ((OMul) (byte 108))
+      ((OEq) (byte 70))
+      ((OLt) (byte 72))
+      ((OLe) (byte 76))
+      ((OAnd) (byte 113))
+      ((OOr) (byte 114))
+      ((ONot) (byte 69))
+      ((OIf then other) (bytes.concat (byte 4) (bytes.concat (byte 127) (bytes.concat (ops_bytes then (no_bytes)) (bytes.concat (byte 5) (bytes.concat (ops_bytes other (no_bytes)) (byte 11)))))))
+      ((OCall f) (bytes.concat (byte 16) (varint f)))))
+
+  (fn ops_bytes ((os Ops) (out Bytes)) Bytes
+    (uses Alloc)
+    (match os ((NoOps) out) ((Ops h rest) (ops_bytes rest (bytes.concat out (op_bytes h))))))
+
+  ; A function's body: the locals beyond its parameters, as one group of i32, then the
+  ; operations, then `end`.
+  (fn body_bytes ((extra Int) (os Ops)) Bytes
+    (uses Alloc)
+    (bytes.concat (if (< 0 extra) (vector 1 (bytes.concat (varint extra) (byte 127))) (byte 0))
+      (bytes.concat (ops_bytes os (no_bytes)) (byte 11))))
+
+  (fn sized ((payload Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (varint (unwrap (bytes.len payload))) payload))
+
+  ; --- one compiled function ---------------------------------------------------------
+  (record Compiled (name Str) (params Int) (code Bytes))
+
+  (enum Compileds (NoCompileds) (Compileds (head Compiled) (rest Compileds)))
+
+  (fn compileds_count ((cs Compileds)) Int
+    (match cs ((NoCompileds) 0) ((Compileds h rest) (+ 1 (compileds_count rest)))))
+
+  ; The parameter list as the scope the body is read in: each parameter is the local of
+  ; its position.
+  (fn param_slots ((ps Trees) (at Int) (acc Slots)) (Result Slots Fault)
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (Ok acc))
+      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "codegen" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "codegen" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "codegen" "a parameter is (name Type)"))) ((Trees written none) (match n ((Node inner) (Err (fault "codegen" "a parameter is (name Type)"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok name) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (match (kind_of ty) ((Err f) (Err f)) ((Ok k) (param_slots more (+ at 1) (Slot name at k acc)))))))))))))))))))
+
+  (fn param_kinds ((ps Trees)) (Result Kinds Fault)
+    (uses Alloc)
+    (match ps
+      ((NoTrees) (Ok (NoKinds)))
+      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "codegen" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "codegen" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "codegen" "a parameter is (name Type)"))) ((Trees written none) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (match (kind_of ty) ((Err f) (Err f)) ((Ok k) (match (param_kinds more) ((Err f) (Err f)) ((Ok others) (Ok (Kinds k others)))))))))))))))))
+
+  ; --- reading a module's functions -------------------------------------------------
+  ; The signature of every `fn`, in order, so that a call can name a function declared
+  ; later than the one calling it.
+  (fn sigs_of ((items Trees)) (Result Sigs Fault)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (Ok (NoSigs)))
+      ((Trees h more) (match (fn_parts h) ((None) (sigs_of more)) ((Some parts) (match parts ((NoTrees) (sigs_of more)) ((Trees name rest) (match name ((Node generic) (Err (refused "a generic fn"))) ((Leaf ntext nquoted) (match rest ((NoTrees) (Err (fault "codegen" "a fn needs a parameter list"))) ((Trees params after) (match after ((NoTrees) (Err (fault "codegen" "a fn needs a result type"))) ((Trees ret body) (match (named ntext) ((Err f) (Err f)) ((Ok fname) (match (param_kinds (param_trees params)) ((Err f) (Err f)) ((Ok kinds) (match (type_of ret) ((Err f) (Err f)) ((Ok rty) (match (kind_of rty) ((Err f) (Err f)) ((Ok rk) (match (sigs_of more) ((Err f) (Err f)) ((Ok others) (Ok (Sig fname kinds rk others)))))))))))))))))))))))))
+
+  (fn param_trees ((t Tree)) Trees
+    (match t ((Leaf text quoted) (NoTrees)) ((Node items) items)))
+
+  ; The parts after `fn` of a `(fn ...)` form, or nothing if the form is something else.
+  (fn fn_parts ((t Tree)) (Option Trees)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (None))
+      ((Node items) (match items ((NoTrees) (None)) ((Trees head rest) (if (is_word head "fn") (Some rest) (None)))))))
+
+  (fn compile_fns ((sigs Sigs) (items Trees)) (Result Compileds Fault)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (Ok (NoCompileds)))
+      ((Trees h more) (match (fn_parts h) ((None) (compile_fns sigs more)) ((Some parts) (match parts ((NoTrees) (compile_fns sigs more)) ((Trees name rest) (match name ((Node generic) (Err (refused "a generic fn"))) ((Leaf ntext nquoted) (match rest ((NoTrees) (Err (fault "codegen" "a fn needs a parameter list"))) ((Trees params after) (match after ((NoTrees) (Err (fault "codegen" "a fn needs a result type"))) ((Trees ret body) (match (named ntext) ((Err f) (Err f)) ((Ok fname) (match (param_slots (param_trees params) 0 (NoSlots)) ((Err f) (Err f)) ((Ok slots) (match (last_of body) ((None) (Err (fault "codegen" "a fn needs a body"))) ((Some b) (match (lower sigs slots (slots_count slots) b) ((Err f) (Err f)) ((Ok done) (match (compile_fns sigs more) ((Err f) (Err f)) ((Ok others) (Ok (Compileds (make Compiled (name fname) (params (slots_count slots)) (code (sized (body_bytes (- (get done next) (slots_count slots)) (get done ops))))) others)))))))))))))))))))))))))
+
+  (fn slots_count ((ss Slots)) Int
+    (match ss ((NoSlots) 0) ((Slot n i k rest) (+ 1 (slots_count rest)))))
+
+  ; --- the sections -----------------------------------------------------------------
+  (fn i32s ((how_many Int)) Bytes
+    (uses Alloc)
+    (if (<= 0 how_many) (repeated (u8.of 127) how_many (no_bytes)) (no_bytes)))
+
+  ; A function type is 0x60, its parameters and its one result, all of them i32.
+  (fn type_entries ((cs Compileds) (out Bytes)) Bytes
+    (uses Alloc)
+    (match cs
+      ((NoCompileds) out)
+      ((Compileds h rest) (type_entries rest (bytes.concat out (bytes.concat (byte 96) (bytes.concat (vector (get h params) (i32s (get h params))) (vector 1 (i32s 1)))))))))
+
+  (fn type_indices ((i Int) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) out (type_indices (+ i 1) (- left 1) (bytes.concat out (varint i)))))
+
+  (fn export_entries ((cs Compileds) (at Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (match cs
+      ((NoCompileds) out)
+      ((Compileds h rest) (export_entries rest (+ at 1) (bytes.concat out (bytes.concat (wire_name (get h name)) (bytes.concat (byte 0) (varint at))))))))
+
+  (fn code_entries ((cs Compileds) (out Bytes)) Bytes
+    (uses Alloc)
+    (match cs
+      ((NoCompileds) out)
+      ((Compileds h rest) (code_entries rest (bytes.concat out (get h code))))))
+
+  (fn indices_for ((n Int)) Bytes
+    (uses Alloc)
+    (if (<= 0 n) (type_indices 0 n (no_bytes)) (no_bytes)))
+
+  (fn module_bytes ((cs Compileds)) Bytes
+    (uses Alloc)
+    (let n (compileds_count cs)
+      (bytes.concat (preamble)
+        (bytes.concat (section (u8.of 1) (vector n (type_entries cs (no_bytes))))
+          (bytes.concat (section (u8.of 3) (vector n (indices_for n)))
+            (bytes.concat (section (u8.of 7) (vector n (export_entries cs 0 (no_bytes))))
+              (section (u8.of 10) (vector n (code_entries cs (no_bytes))))))))))
+
+  ; --- the compiler -------------------------------------------------------------------
+  ; Witness source in, the bytes of a WebAssembly module out, or the first thing that
+  ; could not be compiled and why. The source is expected to have been checked: this reads
+  ; what a checked program looks like, and does not repeat the checks.
+  (fn compile_source ((src Str)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (Err f))
+      ((Ok tree) (match (sigs_of (module_items tree)) ((Err f) (Err f)) ((Ok sigs) (match (compile_fns sigs (module_items tree)) ((Err f) (Err f)) ((Ok compiled) (Ok (module_bytes compiled)))))))))
+
+  (fn describe ((r (Result Bytes Fault))) Str
+    (uses Alloc)
+    (match r
+      ((Ok wasm) (concat "compiled " (concat (num.to_str (unwrap (bytes.len wasm))) " bytes")))
+      ((Err f) (concat "not compiled: " (get f why)))))
+
+  (test "an empty module is the preamble and four empty sections" (str.eq "compiled 20 bytes" (describe (compile_source "(module m)"))))
+
+  (test "a function with a string is refused by name" (str.eq "not compiled: the type Str is not compiled yet" (describe (compile_source "(module m (fn f ((s Str)) Str s))"))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (describe (compile_source "(module m (fn double ((x I32)) I32 (wrap.add x x)))")))))

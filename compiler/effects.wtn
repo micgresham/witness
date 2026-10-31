@@ -1,0 +1,394 @@
+; The effect rules that need more than a body: what a definition declares against what the
+; target provides, what it declares against what it performs, and where work is placed.
+;
+; `profile-effect` is a definition declaring an effect the profile does not provide;
+; `profile-type` a definition writing down `Int`, `I64` or `U64` for a 32-bit profile;
+; `unused-effect` a function declaring one it never performs (or a foreign one declaring
+; the `Foreign` it already has); `placement` work placed further away than the profile
+; reaches. What a body performs is the expression typer's own walk (`effects_in`), so the
+; two passes cannot disagree about it. The placement rule for what crosses to a place with
+; memory of its own needs the type of what is carried, so the expression typer reads it
+; (compiler/expr.wtn, `placed`).
+;
+; The report is one line per finding, `error NAME RULE` or `warning NAME RULE`.
+;
+;   witness run compiler/effects.wtn --grant Alloc,Console
+(module effects
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:341db8e3e6f1bc39d35ed90f4c8e78b275e1270bc6bb95034c49e3233d7b280c" as word_of)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  (use "wtn:98fea12a9af946d5c4ae7c3d12faf228d5a20503032413c6fe97f59e7f540375" as env_with_prelude)
+
+  (use "wtn:384de137737bbdb829e4c47d2b59dadd538f9d69e342e211f1c416ad1385eec0" as effects_in)
+
+  (use "wtn:576e185d796d2bc495dcd13ac5e662b7352fc09b2cfad7e8918a760f207d1c0f" as known_effect)
+
+  (enum Atoms (NoAtoms) (Atoms (head Str) (rest Atoms)))
+
+  ; --- the targets -----------------------------------------------------------------------------
+  ; The effects a profile provides. Anything that is not a profile is the host, which has them all.
+  (fn provides ((profile Str) (e Str)) Bool
+    (if (str.eq profile "mcu")
+      (or (str.eq e "Clock") (str.eq e "Log"))
+      (if (str.eq profile "embedded")
+        (or (or (str.eq e "Alloc") (str.eq e "Clock")) (or (str.eq e "Ipc") (or (str.eq e "Log") (str.eq e "Store"))))
+        (if (str.eq profile "esp32")
+          (or (or (str.eq e "Alloc") (str.eq e "Clock")) (or (str.eq e "Log") (str.eq e "Net")))
+          true))))
+
+  ; How far work may be placed: on the host any distance, on an RTOS not as far as another
+  ; machine, on a microcontroller not at all.
+  (fn reaches ((profile Str) (where Str)) Bool
+    (if (str.eq profile "mcu")
+      (str.eq where "inline")
+      (if (or (str.eq profile "embedded") (str.eq profile "esp32"))
+        (or (str.eq where "inline") (or (str.eq where "thread") (str.eq where "core")))
+        true)))
+
+  ; --- reading a definition -------------------------------------------------------------------
+  (fn has ((xs Atoms) (x Str)) Bool
+    (match xs ((NoAtoms) false) ((Atoms h rest) (or (str.eq h x) (has rest x)))))
+
+  (fn add_once ((xs Atoms) (x Str)) Atoms
+    (if (has xs x) xs (Atoms x xs)))
+
+  (fn words_of ((ts Trees)) Atoms
+    (uses Alloc)
+    (match ts ((NoTrees) (NoAtoms)) ((Trees h rest) (Atoms (word_of h) (words_of rest)))))
+
+  (fn join ((a Atoms) (b Atoms)) Atoms
+    (uses Alloc)
+    (match a ((NoAtoms) b) ((Atoms h rest) (add_once (join rest b) h))))
+
+  ; Every effect named by a `(uses ...)` among the items.
+  (fn uses_of ((items Trees)) Atoms
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoAtoms))
+      ((Trees h rest) (join (if (head_is h "uses") (words_of (after_head h)) (NoAtoms)) (uses_of rest)))))
+
+  (fn performed ((ns Names)) Atoms
+    (uses Alloc)
+    (match ns ((NoNames) (NoAtoms)) ((Names e more) (add_once (performed more) e))))
+
+  ; Only the names that are effects: the rest are another rule's business.
+  (fn effects_only ((xs Atoms)) Atoms
+    (uses Alloc)
+    (match xs ((NoAtoms) xs) ((Atoms h rest) (if (known_effect h) (add_once (effects_only rest) h) (effects_only rest)))))
+
+  (fn last_of ((ts Trees)) (Option Tree)
+    (match ts ((NoTrees) (None)) ((Trees h rest) (match rest ((NoTrees) (Some h)) ((Trees n more) (last_of rest))))))
+
+  ; Everything between the result type and the last item, which is the body.
+  (fn middle ((ts Trees)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (match rest ((NoTrees) (NoTrees)) ((Trees n more) (Trees h (middle rest)))))))
+
+  (fn declared_name ((t Tree)) Str
+    (uses Alloc)
+    (match (node_items t) ((None) (word_of t)) ((Some items) (match items ((NoTrees) "") ((Trees h more) (word_of h))))))
+
+  ; --- the findings ---------------------------------------------------------------------------------
+  (fn finding ((kind Str) (name Str) (rule Str)) Str
+    (uses Alloc)
+    (concat kind (concat " " (concat name (concat " " (concat rule "\n"))))))
+
+  (fn beyond ((profile Str) (declared Atoms) (name Str)) Str
+    (uses Alloc)
+    (match declared
+      ((NoAtoms) "")
+      ((Atoms e rest) (concat (if (provides profile e) "" (finding "error" name "profile-effect")) (beyond profile rest name)))))
+
+  (fn idle ((declared Atoms) (used Atoms) (name Str)) Str
+    (uses Alloc)
+    (match declared
+      ((NoAtoms) "")
+      ((Atoms e rest) (concat (if (has used e) "" (finding "warning" name "unused-effect")) (idle rest used name)))))
+
+  ; `(fn name (params) ret clause... body)`
+  (fn fn_findings ((profile Str) (decls Env) (fis FnItems) (h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (match rest
+        ((NoTrees) "")
+        ((Trees params more) (match more
+          ((NoTrees) "")
+          ((Trees ret clauses) (fn_clauses profile decls fis (declared_name n) (effects_only (uses_of (middle clauses))) (last_of clauses)))))))))
+
+  (fn fn_clauses ((profile Str) (decls Env) (fis FnItems) (name Str) (declared Atoms) (body (Option Tree))) Str
+    (uses Alloc)
+    (concat (beyond profile declared name)
+      (match body
+        ((None) "")
+        ((Some b) (concat (idle declared (used_by decls fis name b) name) (placements profile name b))))))
+
+  ; --- recursive groups -----------------------------------------------------------------------------
+  ; A call to a function of one's own recursive group is taken at its declared word, which is the
+  ; very declaration `unused-effect` asks about. Every member of a group reaches every other, so
+  ; what each can perform is what any of them performs other than by calling the group: the
+  ; bodies are read with the group's own functions declaring nothing, and their effects joined.
+  (record FnItem (name Str) (calls Atoms) (body Tree))
+
+  (enum FnItems (NoFnItems) (FnItems (head FnItem) (rest FnItems)))
+
+  (fn used_by ((decls Env) (fis FnItems) (name Str) (b Tree)) Atoms
+    (uses Alloc)
+    (let group (group_of fis name)
+      (match group
+        ((NoAtoms) (performed (effects_in decls b)))
+        ((Atoms g more) (group_direct (quiet decls group) fis group)))))
+
+  (fn group_direct ((decls Env) (fis FnItems) (group Atoms)) Atoms
+    (uses Alloc)
+    (match fis
+      ((NoFnItems) (NoAtoms))
+      ((FnItems f rest) (if (has group (get f name))
+        (join (performed (effects_in decls (get f body))) (group_direct decls rest group))
+        (group_direct decls rest group)))))
+
+  (fn quiet ((decls Env) (group Atoms)) Env
+    (with decls (fns (quiet_fns (get decls fns) group))))
+
+  (fn quiet_fns ((fs FnSignatures) (group Atoms)) FnSignatures
+    (match fs
+      ((NoFnSignatures) fs)
+      ((FnSignatures h rest) (FnSignatures (if (has group (get h name)) (with h (effects (NoNames))) h) (quiet_fns rest group)))))
+
+  ; The module's functions, each with the functions of the module its body calls.
+  (fn fn_items ((items Trees) (names Atoms)) FnItems
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoFnItems))
+      ((Trees h rest) (match (fn_item h names)
+        ((None) (fn_items rest names))
+        ((Some f) (FnItems f (fn_items rest names)))))))
+
+  (fn fn_item ((h Tree) (names Atoms)) (Option FnItem)
+    (uses Alloc)
+    (if (not (head_is h "fn"))
+      (None)
+      (match (after_head h)
+        ((NoTrees) (None))
+        ((Trees n rest) (match (last_of rest)
+          ((None) (None))
+          ((Some b) (Some (make FnItem (name (declared_name n)) (calls (heads_in b names (NoAtoms))) (body b)))))))))
+
+  (fn fn_names ((items Trees)) Atoms
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoAtoms))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (after_head h) ((NoTrees) (fn_names rest)) ((Trees n more) (Atoms (declared_name n) (fn_names rest))))
+        (fn_names rest)))))
+
+  (fn heads_in ((t Tree) (names Atoms) (acc Atoms)) Atoms
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) acc)
+      ((Node items) (heads_all items names (match items
+        ((NoTrees) acc)
+        ((Trees first more) (let w (word_of first) (if (has names w) (add_once acc w) acc))))))))
+
+  (fn heads_all ((ts Trees) (names Atoms) (acc Atoms)) Atoms
+    (uses Alloc)
+    (match ts ((NoTrees) acc) ((Trees h rest) (heads_all rest names (heads_in h names acc)))))
+
+  (fn calls_of ((fis FnItems) (name Str)) Atoms
+    (match fis ((NoFnItems) (NoAtoms)) ((FnItems f rest) (if (str.eq (get f name) name) (get f calls) (calls_of rest name)))))
+
+  (fn atoms_len ((xs Atoms)) Int
+    (ensures (<= 0 result))
+    (match xs ((NoAtoms) 0) ((Atoms h rest) (+ 1 (atoms_len rest)))))
+
+  (fn calls_total ((fis FnItems)) Int
+    (ensures (<= 0 result))
+    (match fis ((NoFnItems) 0) ((FnItems f rest) (+ (atoms_len (get f calls)) (calls_total rest)))))
+
+  ; Each step takes one name off the list, and names go on it only from a function seen for the
+  ; first time, so there are no more steps than twice the calls in the module.
+  (fn reached ((fis FnItems) (todo Atoms) (seen Atoms) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      seen
+      (match todo
+        ((NoAtoms) seen)
+        ((Atoms n rest) (if (has seen n)
+          (reached fis rest seen (- left 1))
+          (reached fis (join (calls_of fis n) rest) (Atoms n seen) (- left 1)))))))
+
+  (fn reach_of ((fis FnItems) (name Str)) Atoms
+    (uses Alloc)
+    (reached fis (calls_of fis name) (NoAtoms) (+ 1 (* 2 (calls_total fis)))))
+
+  ; The functions `name` shares a cycle of calls with, itself among them; none if it is on no cycle.
+  (fn group_of ((fis FnItems) (name Str)) Atoms
+    (uses Alloc)
+    (let mine (reach_of fis name)
+      (if (has mine name) (back_to fis mine name) (NoAtoms))))
+
+  (fn back_to ((fis FnItems) (xs Atoms) (name Str)) Atoms
+    (uses Alloc)
+    (match xs
+      ((NoAtoms) xs)
+      ((Atoms g rest) (if (has (reach_of fis g) name) (Atoms g (back_to fis rest name)) (back_to fis rest name)))))
+
+  ; `(foreign name (params) ret clause...)`: always `Foreign`, and saying so is redundant.
+  (fn foreign_findings ((profile Str) (h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (let declared (add_once (effects_only (uses_of rest)) "Foreign")
+        (concat (beyond profile declared (word_of n))
+          (if (has (uses_of rest) "Foreign") (finding "warning" (word_of n) "unused-effect") ""))))))
+
+  ; --- placement -------------------------------------------------------------------------------------
+  ; Every task and branch of every `scope` and `par` in a body is placed somewhere, `core` unless
+  ; it says otherwise.
+  (fn placements ((profile Str) (name Str) (t Tree)) Str
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) "")
+      ((Node items) (concat (if (or (head_is t "scope") (head_is t "par")) (members_placed profile name items) "") (placements_all profile name items)))))
+
+  (fn placements_all ((profile Str) (name Str) (ts Trees)) Str
+    (uses Alloc)
+    (match ts ((NoTrees) "") ((Trees h rest) (concat (placements profile name h) (placements_all profile name rest)))))
+
+  (fn members_placed ((profile Str) (name Str) (items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees keyword rest) (match rest
+        ((NoTrees) "")
+        ((Trees group more) (match (node_items group) ((None) "") ((Some members) (each_placed profile name members))))))))
+
+  (fn each_placed ((profile Str) (name Str) (members Trees)) Str
+    (uses Alloc)
+    (match members
+      ((NoTrees) "")
+      ((Trees m rest) (concat (if (reaches profile (place_of m)) "" (finding "error" name "placement")) (each_placed profile name rest)))))
+
+  (fn place_of ((m Tree)) Str
+    (uses Alloc)
+    (match (node_items m)
+      ((None) "core")
+      ((Some parts) (place_in parts))))
+
+  (fn place_in ((parts Trees)) Str
+    (uses Alloc)
+    (match parts
+      ((NoTrees) "core")
+      ((Trees h rest) (if (head_is h "on")
+        (match (after_head h) ((Trees w more) (word_of w)) ((NoTrees) "core"))
+        (place_in rest)))))
+
+  ; --- word size -------------------------------------------------------------------------------------
+  ; A 32-bit profile has no type wider than a word among the types a definition writes down.
+  (fn narrow ((profile Str)) Bool
+    (or (str.eq profile "mcu") (str.eq profile "esp32")))
+
+  (fn wide_word ((w Str)) Bool
+    (or (str.eq w "Int") (or (str.eq w "I64") (str.eq w "U64"))))
+
+  (fn wide_in ((t Tree)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (and (not quoted) (wide_word (word_of t))))
+      ((Node items) (wide_in_all items))))
+
+  (fn wide_in_all ((ts Trees)) Bool
+    (uses Alloc)
+    (match ts ((NoTrees) false) ((Trees h rest) (or (wide_in h) (wide_in_all rest)))))
+
+  (fn type_finding ((profile Str) (name Str) (wide Bool)) Str
+    (uses Alloc)
+    (if (and (narrow profile) wide) (finding "error" name "profile-type") ""))
+
+  ; `(fn name (params) ret ...)` and `(foreign name (params) ret ...)`
+  (fn signature_types ((profile Str) (h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (match rest
+        ((NoTrees) "")
+        ((Trees params more) (match more
+          ((NoTrees) "")
+          ((Trees ret clauses) (type_finding profile (declared_name n) (or (wide_in params) (wide_in ret))))))))))
+
+  ; `(record Name field...)` and `(enum Name variant...)`
+  (fn fields_types ((profile Str) (h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n fields) (type_finding profile (declared_name n) (wide_in_all fields)))))
+
+  ; `(newtype Name Inner ...)`: the base, and not the condition that refines it.
+  (fn newtype_types ((profile Str) (h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (match rest
+        ((NoTrees) "")
+        ((Trees inner more) (type_finding profile (declared_name n) (wide_in inner)))))))
+
+  (fn decl_types ((profile Str) (h Tree)) Str
+    (uses Alloc)
+    (if (or (head_is h "fn") (head_is h "foreign"))
+      (signature_types profile h)
+      (if (or (head_is h "record") (head_is h "enum"))
+        (fields_types profile h)
+        (if (head_is h "newtype") (newtype_types profile h) ""))))
+
+  ; --- a module ---------------------------------------------------------------------------------------
+  (fn items_findings ((profile Str) (decls Env) (fis FnItems) (items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees h rest) (concat
+        (concat (if (head_is h "fn") (fn_findings profile decls fis h) (if (head_is h "foreign") (foreign_findings profile h) ""))
+          (decl_types profile h))
+        (items_findings profile decls fis rest)))))
+
+  (fn report_source ((profile Str) (src Str)) Str
+    (uses Alloc)
+    (match (env_with_prelude src)
+      ((Err f) (concat "no environment: " (get f why)))
+      ((Ok decls) (match (parse (tokens_of (str.encode src)))
+        ((Err f) (concat "not a form: " (get f why)))
+        ((Ok tree) (items_findings profile decls (fn_items (module_items tree) (fn_names (module_items tree))) (module_items tree)))))))
+
+  (test "a profile that lacks an effect refuses a definition that declares it"
+    (str.eq "error f profile-effect\n" (report_source "mcu" "(module m (fn f ((a Str)) Str (uses Alloc) (concat a a)))")))
+
+  (test "a type wider than a word does not fit a 32-bit profile"
+    (str.eq "error f profile-type\n" (report_source "esp32" "(module m (fn f ((n Int)) Int n))")))
+
+  (test "and fits a profile with 64-bit words"
+    (str.eq "" (report_source "embedded" "(module m (fn f ((n Int)) Int n))")))
+
+  (test "an effect a recursive group only passes round among itself is not performed"
+    (str.eq "warning f unused-effect\nwarning g unused-effect\nwarning h unused-effect\n"
+      (report_source "host" "(module m (fn f ((n Int)) Int (uses Alloc) (requires (<= 0 n)) (if (<= n 0) 0 (f (- n 1)))) (fn g ((n Int)) Int (uses Console) (requires (<= 0 n)) (if (<= n 0) 0 (h (- n 1)))) (fn h ((n Int)) Int (uses Console) (requires (<= 0 n)) (if (<= n 0) 0 (g (- n 1)))) (fn k ((n Int)) Int (uses Console) (requires (<= 0 n)) (if (<= n 0) (seq (print \"x\") 0) (k (- n 1)))))")))
+
+  (test "an effect that is declared and never performed is a warning"
+    (str.eq "warning f unused-effect\n" (report_source "host" "(module m (fn f ((n Int)) Int (uses Console) n))")))
+
+  (test "work is placed on a core unless it says otherwise, and an mcu has only the one"
+    (str.eq "error f placement\nerror f profile-type\n" (report_source "mcu" "(module m (fn f ((d Duration)) Int (uses Clock) (scope ((one 1 (deadline d) (on-fail fail))) 1)))"))))

@@ -1,0 +1,4 @@
+(module m
+  (record R (a Str))
+
+  (channel C R))

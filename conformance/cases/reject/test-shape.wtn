@@ -1,0 +1,2 @@
+(module m
+  (test "reads the world" (str.eq (env.secret "KEY") "x")))

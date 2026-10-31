@@ -1,0 +1,867 @@
+; Witness to the ESP32 (Xtensa LX6), from the same instructions the other backends write.
+;
+; This is the RISC-V backend's walk with an Xtensa core behind it, as native_thumb.wtn is with
+; a Cortex-M: eight-byte slots on the operand stack and a 64-bit value as two registers (low
+; word first). There are no flags, so a carry is an unsigned comparison, and a 64-bit shift is
+; the funnel shift `src`. Calls use `call0`, without register windows: a0 holds the return
+; address and is saved in the frame, and every function starts on a word, as call0 needs.
+; There is no operating system: the wasm memory, the stacks and two words for the heap pointer
+; and page count are fixed places in the ESP32's data RAM, and the host's functions -- print,
+; the clock, exit -- are calls through fixed addresses that a board's support code supplies
+; (tests/emulate.py loads one into QEMU beside the program).
+;
+; Almost nothing here is written by hand: tools/gen_xtensa.py makes it from native_riscv.wtn,
+; xtensa.wtn and a table of what each 64-bit operation becomes. Edit that, not this.
+;
+; The evidence is tests/test_native_xtensa.py: the image is run on QEMU's model of the ESP32
+; core and what it prints is compared with the interpreter's.
+;
+;   witness test compiler/native_xtensa.wtn
+(module native_xtensa
+  (use "wtn:8be2edc17933e3f38aba6ee3bc6960aaa2e82f42c8b8022ec3d187702ed47a20" as imm64)
+
+  (use "wtn:30701617d68c3654a403fd5dedb917a11d116e4e5ce3d16cc8059f76e8f0b497" as imm32)
+
+  (use "wtn:3752be75d9b35195f27bce3966247382cbf1f4b367ca42472081c4579c41a784" as low8)
+
+  (use "wtn:a21c39d745ed071e8a191a37f70dd1779e3f66cef78971e75cc5db8d15985d3a" as Ins)
+
+  (use "wtn:1073bcf7f2ec07adcc09eb7c2e8fe48e9f9e9761a767076f6172edba3db8cde8" as Inss)
+
+  (use "wtn:6049eb96cd5bb0261e93f3b63d858e9295b28d4454c9d335d6fc6b7357255c97" as Segment)
+
+  (use "wtn:1d8850cc1eac3078061af0c4abac9ffb8c04c7f625724d647535443ad3cd3899" as Segments)
+
+  (use "wtn:746b7af1483e2ad3bac5bd48a927f405dda763ad2e13285b41298d2d268a366f" as Imports)
+
+  (use "wtn:780cd5f1caffd09ae27df62731b93b0f47c18f7b93487643ce22510a7c5f029b" as Func)
+
+  (use "wtn:3e591891f9cf54232e04bb14b46fe1ad8efe8c82e1ddad2a481589bba3844f43" as Funcs)
+
+  (use "wtn:aaa5788594cd2f68165abd0f2e6560c4aa6aaf92e09822948cc887f7cd927be5" as Module)
+
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((n I64)) U8 (u8.of (bit.and n (i64.of 255))))
+
+  (fn plus ((a I64) (b I64)) I64 (wrap.add a b))
+
+  (fn at ((n I64) (by U32)) I64 (bit.shl n (int.of by)))
+
+  (fn bits ((n I64) (from U32) (mask I64)) I64 (bit.and (bit.shr n (int.of from)) mask))
+
+  (fn rg ((r U32)) I64 (i64.of (bit.and r (u32.of 15))))
+
+  (fn field ((n I64)) I64 (bit.and n (i64.of 15)))
+
+  (fn word3 ((w I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (byte w)) (bytes.concat (bytes.of (byte (bit.shr w 8))) (bytes.of (byte (bit.shr w 16))))))
+
+  (fn rrr ((op2 I64) (op1 I64) (r I64) (s I64) (t I64) (op0 I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (field op2) (u32.of 20)) (plus (at (field op1) (u32.of 16))
+      (plus (at (field r) (u32.of 12)) (plus (at (field s) (u32.of 8)) (plus (at (field t) (u32.of 4)) (field op0))))))))
+
+  (fn reg3 ((op2 I64) (op1 I64) (d U32) (s U32) (t U32)) Bytes
+    (uses Alloc)
+    (rrr op2 op1 (rg d) (rg s) (rg t) (i64.of 0)))
+
+  (fn add_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 0) d s t))
+
+  (fn sub_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 12) (i64.of 0) d s t))
+
+  (fn and_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 1) (i64.of 0) d s t))
+
+  (fn or_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 2) (i64.of 0) d s t))
+
+  (fn xor_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 3) (i64.of 0) d s t))
+
+  (fn mull ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 2) d s t))
+
+  (fn muluh ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 10) (i64.of 2) d s t))
+
+  (fn mov_rr ((d U32) (s U32)) Bytes (uses Alloc) (or_rr d s s))
+
+  (fn neg_r ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 6) (i64.of 0) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+
+  (fn slli ((d U32) (s U32) (by U32)) Bytes
+    (uses Alloc)
+    (let f (wrap.sub (i64.of 32) (i64.of by))
+      (rrr (bits f (u32.of 4) (i64.of 1)) (i64.of 1) (rg d) (rg s) (field f) (i64.of 0))))
+
+  (fn srli ((d U32) (t U32) (by U32)) Bytes
+    (uses Alloc)
+    (rrr (i64.of 4) (i64.of 1) (rg d) (field (i64.of by)) (rg t) (i64.of 0)))
+
+  (fn srai ((d U32) (t U32) (by U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of by)
+      (rrr (plus (i64.of 2) (bits n (u32.of 4) (i64.of 1))) (i64.of 1) (rg d) (field n) (rg t) (i64.of 0))))
+
+  (fn extui ((d U32) (t U32) (shift U32) (width U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of shift)
+      (rrr (wrap.sub (i64.of width) (i64.of 1)) (plus (i64.of 4) (bits n (u32.of 4) (i64.of 1))) (rg d) (field n) (rg t) (i64.of 0))))
+
+  (fn ssl ((s U32)) Bytes (uses Alloc) (rrr (i64.of 4) (i64.of 0) (i64.of 1) (rg s) (i64.of 0) (i64.of 0)))
+
+  (fn ssr ((s U32)) Bytes (uses Alloc) (rrr (i64.of 4) (i64.of 0) (i64.of 0) (rg s) (i64.of 0) (i64.of 0)))
+
+  (fn ssai ((by U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of by) (rrr (i64.of 4) (i64.of 0) (i64.of 4) (field n) (bits n (u32.of 4) (i64.of 1)) (i64.of 0))))
+
+  (fn sll ((d U32) (s U32)) Bytes (uses Alloc) (rrr (i64.of 10) (i64.of 1) (rg d) (rg s) (i64.of 0) (i64.of 0)))
+
+  (fn srl ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 9) (i64.of 1) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+
+  (fn sra ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 11) (i64.of 1) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+
+  (fn src ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 1) d s t))
+
+  (fn rri8 ((imm I64) (r I64) (s U32) (t U32) (op0 I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and imm (i64.of 255)) (u32.of 16)) (plus (at r (u32.of 12)) (plus (at (rg s) (u32.of 8)) (plus (at (rg t) (u32.of 4)) op0))))))
+
+  (fn movi ((t U32) (imm I64)) Bytes
+    (uses Alloc)
+    (let v (bit.and imm (i64.of 4095))
+      (word3 (plus (at (bit.and v (i64.of 255)) (u32.of 16)) (plus (at (i64.of 10) (u32.of 12)) (plus (at (bits v (u32.of 8) (i64.of 15)) (u32.of 8)) (plus (at (rg t) (u32.of 4)) (i64.of 2))))))))
+
+  (fn addi8 ((t U32) (s U32) (imm I64)) Bytes (uses Alloc) (rri8 imm (i64.of 12) s t (i64.of 2)))
+
+  (fn l32i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 (bit.shr off 2) (i64.of 2) s t (i64.of 2)))
+
+  (fn s32i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 (bit.shr off 2) (i64.of 6) s t (i64.of 2)))
+
+  (fn l8ui ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 off (i64.of 0) s t (i64.of 2)))
+
+  (fn s8i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 off (i64.of 4) s t (i64.of 2)))
+
+  (fn bcmp ((cond U32) (s U32) (t U32) (off I64)) Bytes
+    (uses Alloc)
+    (rri8 (wrap.sub off (i64.of 4)) (i64.of (bit.and cond (u32.of 15))) s t (i64.of 7)))
+
+  (fn beq ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 1) s t off))
+
+  (fn bne ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 9) s t off))
+
+  (fn blt ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 2) s t off))
+
+  (fn bge ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 10) s t off))
+
+  (fn bltu ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 3) s t off))
+
+  (fn bgeu ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 11) s t off))
+
+  (fn bbi ((r I64) (s U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (let b (i64.of n) (rri8 (wrap.sub off (i64.of 4)) (plus r (bits b (u32.of 4) (i64.of 1))) s (bit.and n (u32.of 15)) (i64.of 7))))
+
+  (fn bbci ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (bbi (i64.of 6) s n off))
+
+  (fn bbsi ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (bbi (i64.of 14) s n off))
+
+  (fn bz ((m I64) (s U32) (off I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (wrap.sub off (i64.of 4)) (i64.of 4095)) (u32.of 12)) (plus (at (rg s) (u32.of 8)) (plus (at m (u32.of 6)) (i64.of 22))))))
+
+  (fn beqz ((s U32) (off I64)) Bytes (uses Alloc) (bz (i64.of 0) s off))
+
+  (fn bnez ((s U32) (off I64)) Bytes (uses Alloc) (bz (i64.of 1) s off))
+
+  (fn j ((off I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (wrap.sub off (i64.of 4)) (i64.of 262143)) (u32.of 6)) (i64.of 6))))
+
+  (fn call0 ((rel I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (bit.sar rel 2) (i64.of 262143)) (u32.of 6)) (i64.of 5))))
+
+  (fn call0_to ((target I64) (at I64)) Bytes
+    (uses Alloc)
+    (call0 (wrap.sub (wrap.sub target (bit.and at (i64.of -4))) (i64.of 4))))
+
+  (fn callx0 ((s U32)) Bytes (uses Alloc) (rrr (i64.of 0) (i64.of 0) (i64.of 0) (rg s) (i64.of 12) (i64.of 0)))
+
+  (fn jx ((s U32)) Bytes (uses Alloc) (rrr (i64.of 0) (i64.of 0) (i64.of 0) (rg s) (i64.of 10) (i64.of 0)))
+
+  (fn ret () Bytes (uses Alloc) (word3 (i64.of 128)))
+
+  (fn nop () Bytes (uses Alloc) (word3 (i64.of 8432)))
+
+  (fn ill () Bytes (uses Alloc) (word3 (i64.of 0)))
+
+  (fn simcall () Bytes (uses Alloc) (word3 (i64.of 20736)))
+
+  (fn signed32 ((n I64)) I64
+    (let v (bit.and n (i64.of 4294967295))
+      (if (< v (i64.of 2147483648)) v (wrap.sub v (i64.of 4294967296)))))
+
+  (fn fits12 ((v I64)) Bool (and (<= (i64.of -2048) v) (<= v (i64.of 2047))))
+
+  (fn low_signed ((v I64)) I64 (wrap.sub (bit.xor (bit.and v (i64.of 255)) (i64.of 128)) (i64.of 128)))
+
+  (fn built ((d U32) (v I64) (left U32)) Bytes
+    (uses Alloc)
+    (if (or (fits12 v) (<= left (u32.of 0)))
+      (movi d v)
+      (let b (low_signed v)
+        (bytes.concat (built d (bit.sar (wrap.sub v b) 8) (- left (u32.of 1)))
+          (bytes.concat (slli d d (u32.of 8)) (if (= b (i64.of 0)) (no_bytes) (addi8 d d b)))))))
+
+  (fn mov_imm ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (built d (signed32 n) (u32.of 3)))
+
+  (fn cond_of ((f3 U32)) U32
+    (if (= f3 (u32.of 0)) (u32.of 1)
+      (if (= f3 (u32.of 1)) (u32.of 9)
+        (if (= f3 (u32.of 4)) (u32.of 2)
+          (if (= f3 (u32.of 5)) (u32.of 10)
+            (if (= f3 (u32.of 6)) (u32.of 3) (u32.of 11)))))))
+
+  ; RISC-V's `zero` is a register and Xtensa has none. Comparing a register with zero for
+  ; (in)equality is beqz or bnez; any other comparison with zero, on either side, is made
+  ; with the temporary holding a zero instead.
+  (fn through_tmp ((f3 U32) (a U32) (b U32)) Bool
+    (or (= a (zero)) (and (= b (zero)) (not (or (= f3 (u32.of 0)) (= f3 (u32.of 1)))))))
+
+  (fn named ((r U32)) U32 (if (= r (zero)) (tmp) r))
+
+  ; Branch when a and b fail the RISC-V comparison f3; b is the register `zero` only for
+  ; (in)equality, which Xtensa writes as beqz or bnez.
+  (fn branch_not ((f3 U32) (a U32) (b U32) (off I64)) Bytes
+    (uses Alloc)
+    (if (= b (zero))
+      (if (= f3 (u32.of 0)) (bnez a off) (beqz a off))
+      (bcmp (bit.xor (cond_of f3) (u32.of 8)) a b off)))
+
+  ; call0 lands on a word, so every function, and the start code, is padded to a multiple of four.
+  (fn pad_of ((n U32)) U32 (bit.and (wrap.sub (u32.of 0) n) (u32.of 3)))
+
+  (fn aligned ((is VItems)) VItems
+    (uses Alloc)
+    (items_join is (raw (zeros (pad_of (items_size is)) (u32.of 8)))))
+
+  (fn padded ((b Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat b (zeros (pad_of (octets b)) (u32.of 8))))
+
+  (fn host_call ((k U32)) Bytes
+    (uses Alloc)
+    (cat (mov_imm (tmp) (wrap.add (i64.of 1074200576) (i64.of (wrap.mul k (u32.of 16))))) (callx0 (tmp))))
+
+  (fn push_frame () Bytes
+    (uses Alloc)
+    (cat3 (addi8 (sp) (sp) (i64.of -16)) (s32i (u32.of 0) (sp) (i64.of 8)) (s32i (fp) (sp) (i64.of 0))))
+
+  (fn pop_frame () Bytes
+    (uses Alloc)
+    (cat3 (l32i (fp) (sp) (i64.of 0)) (l32i (u32.of 0) (sp) (i64.of 8)) (addi8 (sp) (sp) (i64.of 16))))
+
+  (fn octets ((b Bytes)) U32
+    (let n (unwrap (bytes.len b)) (if (<= n 4294967295) (u32.of n) (u32.of 0))))
+
+  (fn greater ((a U32) (b U32)) U32 (if (< a b) b a))
+
+  (fn less ((a U32) (b U32)) U32 (if (< a b) (u32.of 0) (- a b)))
+
+  (enum VItem
+    (VRaw (code Bytes))
+    (VMark (id U32))
+    (VJump (id U32))
+    (VJumpIf (f3 U32) (a U32) (b U32) (id U32))
+    (VCallFn (func U32)))
+
+  (enum VItems (VNoItems) (VItems (head VItem) (rest VItems)))
+
+  (fn items_join ((a VItems) (b VItems)) VItems
+    (match a ((VNoItems) b) ((VItems h rest) (VItems h (items_join rest b)))))
+
+  (fn raw ((code Bytes)) VItems (VItems (VRaw code) (VNoItems)))
+
+  (fn item ((i VItem)) VItems (VItems i (VNoItems)))
+
+  (fn item_size ((i VItem)) U32
+    (match i
+      ((VRaw code) (octets code))
+      ((VMark id) (u32.of 0))
+      ((VJump id) (u32.of 3))
+      ((VJumpIf f3 a b id) (if (through_tmp f3 a b) (u32.of 9) (u32.of 6)))
+      ((VCallFn func) (u32.of 3))))
+
+  (fn items_size ((is VItems)) U32
+    (match is
+      ((VNoItems) (u32.of 0))
+      ((VItems h rest) (wrap.add (item_size h) (items_size rest)))))
+
+  (enum VLabels (VNoLabels) (VLabels (id U32) (offset U32) (rest VLabels)))
+
+  (fn labels_of ((is VItems) (at U32)) VLabels
+    (match is
+      ((VNoItems) (VNoLabels))
+      ((VItems h rest) (match h ((VMark id) (VLabels id at (labels_of rest at))) ((VRaw code) (labels_of rest (wrap.add at (item_size h)))) ((VJump id) (labels_of rest (wrap.add at (item_size h)))) ((VJumpIf f3 a b id) (labels_of rest (wrap.add at (item_size h)))) ((VCallFn func) (labels_of rest (wrap.add at (item_size h))))))))
+
+  (fn label_at ((ls VLabels) (mark U32)) U32
+    (match ls
+      ((VNoLabels) (u32.of 0))
+      ((VLabels l offset rest) (if (= l mark) offset (label_at rest mark)))))
+
+  (enum VStarts (VNoStarts) (VStarts (offset U32) (rest VStarts)))
+
+  (fn start_of ((ss VStarts) (index U32)) U32
+    (match ss
+      ((VNoStarts) (u32.of 0))
+      ((VStarts offset rest) (if (<= index (u32.of 0)) offset (start_of rest (- index (u32.of 1)))))))
+
+  (fn distance ((target U32) (at U32)) I64 (wrap.sub (i64.of target) (i64.of at)))
+
+  (fn item_bytes ((i VItem) (at U32) (ls VLabels) (ss VStarts)) Bytes
+    (uses Alloc)
+    (match i
+      ((VRaw code) code)
+      ((VMark id) (no_bytes))
+      ((VJump id) (j (distance (label_at ls id) at)))
+      ((VJumpIf f3 a b id) (if (through_tmp f3 a b) (cat3 (movi (tmp) (i64.of 0)) (branch_not f3 (named a) (named b) (i64.of 6)) (j (distance (label_at ls id) (wrap.add at (u32.of 6))))) (cat (branch_not f3 a b (i64.of 6)) (j (distance (label_at ls id) (wrap.add at (u32.of 3)))))))
+      ((VCallFn func) (call0_to (widen (start_of ss func)) (widen at)))))
+
+  (fn r0 () U32 (u32.of 2))
+
+  (fn r1 () U32 (u32.of 3))
+
+  (fn r2 () U32 (u32.of 4))
+
+  (fn r3 () U32 (u32.of 5))
+
+  (fn r4 () U32 (u32.of 6))
+
+  (fn r5 () U32 (u32.of 7))
+
+  (fn zero () U32 (u32.of 99))
+
+  (fn sp () U32 (u32.of 1))
+
+  (fn tmp () U32 (u32.of 13))
+
+  (fn fp () U32 (u32.of 14))
+
+  (fn mem () U32 (u32.of 12))
+
+  (fn os () U32 (u32.of 15))
+
+  (fn cat ((a Bytes) (b Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a b))
+
+  (fn cat3 ((a Bytes) (b Bytes) (c Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a (bytes.concat b c)))
+
+  (fn cat4 ((a Bytes) (b Bytes) (c Bytes) (d Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat a (bytes.concat b (bytes.concat c d))))
+
+  (fn push ((r U32)) Bytes
+    (uses Alloc)
+    (cat4 (addi8 (os) (os) (i64.of -8)) (s32i r (os) (i64.of 0)) (movi (tmp) (i64.of 0)) (s32i (tmp) (os) (i64.of 4))))
+
+  (fn pop ((r U32)) Bytes
+    (uses Alloc)
+    (cat (l32i r (os) (i64.of 0)) (addi8 (os) (os) (i64.of 8))))
+
+  ; A 64-bit value is a slot of two words, the low one first.
+  (fn pushp ((lo U32) (hi U32)) Bytes
+    (uses Alloc)
+    (cat3 (addi8 (os) (os) (i64.of -8)) (s32i lo (os) (i64.of 0)) (s32i hi (os) (i64.of 4))))
+
+  (fn popp ((lo U32) (hi U32)) Bytes
+    (uses Alloc)
+    (cat3 (l32i lo (os) (i64.of 0)) (l32i hi (os) (i64.of 4)) (addi8 (os) (os) (i64.of 8))))
+
+  (fn peekp ((lo U32) (hi U32)) Bytes
+    (uses Alloc)
+    (cat (l32i lo (os) (i64.of 0)) (l32i hi (os) (i64.of 4))))
+
+  ; The heap pointer and the page count live in two words of RAM.
+  (fn cell_get ((d U32) (at I64)) Bytes (uses Alloc) (cat (mov_imm (tmp) at) (l32i d (tmp) (i64.of 0))))
+
+  (fn cell_set ((s U32) (at I64)) Bytes (uses Alloc) (cat (mov_imm (tmp) at) (s32i s (tmp) (i64.of 0))))
+
+  ; addi takes -128 to 127; past that the constant goes through the temporary.
+  (fn addi ((d U32) (n U32) (imm I64)) Bytes
+    (uses Alloc)
+    (if (and (<= (i64.of -128) imm) (<= imm (i64.of 127)))
+      (addi8 d n imm)
+      (cat (mov_imm (tmp) imm) (add_rr d n (tmp)))))
+
+  (fn ldx ((dst U32) (base U32) (idx U32)) Bytes
+    (uses Alloc)
+    (cat (add_rr (tmp) base idx) (l32i dst (tmp) (i64.of 0))))
+
+  (fn sdx ((src U32) (base U32) (idx U32)) Bytes
+    (uses Alloc)
+    (cat4 (add_rr (tmp) base idx) (s32i src (tmp) (i64.of 0)) (movi (r5) (i64.of 0)) (s32i (r5) (tmp) (i64.of 4))))
+
+  (fn lbux ((dst U32) (base U32) (idx U32)) Bytes
+    (uses Alloc)
+    (cat (add_rr (tmp) base idx) (l8ui dst (tmp) (i64.of 0))))
+
+  (fn sbx ((src U32) (base U32) (idx U32)) Bytes
+    (uses Alloc)
+    (cat (add_rr (tmp) base idx) (s8i src (tmp) (i64.of 0))))
+
+  (fn add_big ((d U32) (n U32) (imm I64)) Bytes
+    (uses Alloc)
+    (addi d n imm))
+
+  (fn frame_loadp ((lo U32) (hi U32) (disp I64)) Bytes
+    (uses Alloc)
+    (if (and (<= (i64.of 0) disp) (<= disp (i64.of 1016)))
+      (cat (l32i lo (fp) disp) (l32i hi (fp) (wrap.add disp (i64.of 4))))
+      (cat3 (mov_imm (tmp) disp) (add_rr (tmp) (fp) (tmp)) (cat (l32i lo (tmp) (i64.of 0)) (l32i hi (tmp) (i64.of 4))))))
+
+  (fn frame_storep ((lo U32) (hi U32) (disp I64)) Bytes
+    (uses Alloc)
+    (if (and (<= (i64.of 0) disp) (<= disp (i64.of 1016)))
+      (cat (s32i lo (fp) disp) (s32i hi (fp) (wrap.add disp (i64.of 4))))
+      (cat3 (mov_imm (tmp) disp) (add_rr (tmp) (fp) (tmp)) (cat (s32i lo (tmp) (i64.of 0)) (s32i hi (tmp) (i64.of 4))))))
+
+  (fn widen ((n U32)) I64 (i64.of n))
+
+  (enum VShapes (VNoShapes) (VShapes (params U32) (results U32) (rest VShapes)))
+
+  (fn shape_at ((ss VShapes) (index U32)) (Option VShapes)
+    (match ss
+      ((VNoShapes) (None))
+      ((VShapes p r rest) (if (<= index (u32.of 0)) (Some ss) (shape_at rest (- index (u32.of 1)))))))
+
+  (enum VHostfns
+    (VNoHostfns)
+    (VHostfns (name Str) (params U32) (results U32) (rest VHostfns)))
+
+  (fn host_at ((hs VHostfns) (slot U32)) (Option VHostfns)
+    (match hs
+      ((VNoHostfns) (None))
+      ((VHostfns n p r rest) (if (<= slot (u32.of 0)) (Some hs) (host_at rest (- slot (u32.of 1)))))))
+
+  (record VFx (params U32) (locals U32) (results U32) (shapes VShapes) (hosts VHostfns))
+
+  (fn local_disp ((fx VFx) (index U32)) I64
+    (if (< index (get fx params))
+      (widen (wrap.mul (wrap.sub (wrap.sub (get fx params) (u32.of 1)) index) (u32.of 8)))
+      (wrap.sub (i64.of 0)
+        (widen (wrap.mul (wrap.add (wrap.sub index (get fx params)) (u32.of 1)) (u32.of 8))))))
+
+  (fn frame_depth ((fx VFx) (h U32)) U32 (wrap.mul (wrap.add (get fx locals) h) (u32.of 8)))
+
+  (fn set_stack ((fx VFx) (h U32)) Bytes
+    (uses Alloc)
+    (add_big (os) (fp) (wrap.sub (i64.of 0) (widen (frame_depth fx h)))))
+
+  (record VSt (h U32) (next U32) (dead Bool))
+
+  (record VWalked (items VItems) (st VSt))
+
+  (enum VCtrl (VNoCtrl) (VCtrl (target U32) (height U32) (carries U32) (rest VCtrl)))
+
+  (fn ctrl_at ((c VCtrl) (depth U32)) (Option VCtrl)
+    (match c
+      ((VNoCtrl) (None))
+      ((VCtrl t h a rest) (if (<= depth (u32.of 0)) (Some c) (ctrl_at rest (- depth (u32.of 1)))))))
+
+  (fn with_h ((st VSt) (h U32)) VSt (make VSt (h h) (next (get st next)) (dead false)))
+
+  (fn walked ((code Bytes) (st VSt) (h U32)) VWalked
+    (make VWalked (items (raw code)) (st (with_h st h))))
+
+  (fn nothing ((st VSt)) VWalked (make VWalked (items (VNoItems)) (st st)))
+
+  (fn walked_join ((a VWalked) (b VWalked)) VWalked
+    (make VWalked (items (items_join (get a items) (get b items))) (st (get b st))))
+
+  (fn binary_code ((work Bytes)) Bytes
+    (uses Alloc)
+    (cat4 (popp (r2) (r3)) (popp (r0) (r1)) work (pushp (r0) (r1))))
+
+  (fn unary_code ((work Bytes)) Bytes
+    (uses Alloc)
+    (cat3 (popp (r0) (r1)) work (pushp (r0) (r1))))
+
+  (fn compare_work ((code U8)) (Option Bytes)
+    (uses Alloc)
+    (if (= code (u8.of 81)) (Some (cat4 (xor_rr (u32.of 6) (u32.of 2) (u32.of 4)) (xor_rr (u32.of 7) (u32.of 3) (u32.of 5)) (or_rr (u32.of 6) (u32.of 6) (u32.of 7)) (cat4 (movi (u32.of 2) (i64.of 1)) (beqz (u32.of 6) (i64.of 6)) (movi (u32.of 2) (i64.of 0)) (movi (u32.of 3) (i64.of 0))))) (if (= code (u8.of 82)) (Some (cat4 (xor_rr (u32.of 6) (u32.of 2) (u32.of 4)) (xor_rr (u32.of 7) (u32.of 3) (u32.of 5)) (or_rr (u32.of 6) (u32.of 6) (u32.of 7)) (cat4 (movi (u32.of 2) (i64.of 1)) (bnez (u32.of 6) (i64.of 6)) (movi (u32.of 2) (i64.of 0)) (movi (u32.of 3) (i64.of 0))))) (if (= code (u8.of 83)) (Some (cat4 (movi (u32.of 6) (i64.of 1)) (bne (u32.of 3) (u32.of 5) (i64.of 9)) (bltu (u32.of 2) (u32.of 4) (i64.of 12)) (cat4 (j (i64.of 6)) (blt (u32.of 3) (u32.of 5) (i64.of 6)) (movi (u32.of 6) (i64.of 0)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 84)) (Some (cat4 (movi (u32.of 6) (i64.of 1)) (bne (u32.of 3) (u32.of 5) (i64.of 9)) (bltu (u32.of 2) (u32.of 4) (i64.of 12)) (cat4 (j (i64.of 6)) (bltu (u32.of 3) (u32.of 5) (i64.of 6)) (movi (u32.of 6) (i64.of 0)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 85)) (Some (cat4 (movi (u32.of 6) (i64.of 1)) (bne (u32.of 5) (u32.of 3) (i64.of 9)) (bltu (u32.of 4) (u32.of 2) (i64.of 12)) (cat4 (j (i64.of 6)) (blt (u32.of 5) (u32.of 3) (i64.of 6)) (movi (u32.of 6) (i64.of 0)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 86)) (Some (cat4 (movi (u32.of 6) (i64.of 1)) (bne (u32.of 5) (u32.of 3) (i64.of 9)) (bltu (u32.of 4) (u32.of 2) (i64.of 12)) (cat4 (j (i64.of 6)) (bltu (u32.of 5) (u32.of 3) (i64.of 6)) (movi (u32.of 6) (i64.of 0)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 87)) (Some (cat4 (movi (u32.of 6) (i64.of 0)) (bne (u32.of 5) (u32.of 3) (i64.of 9)) (bltu (u32.of 4) (u32.of 2) (i64.of 12)) (cat4 (j (i64.of 6)) (blt (u32.of 5) (u32.of 3) (i64.of 6)) (movi (u32.of 6) (i64.of 1)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 88)) (Some (cat4 (movi (u32.of 6) (i64.of 0)) (bne (u32.of 5) (u32.of 3) (i64.of 9)) (bltu (u32.of 4) (u32.of 2) (i64.of 12)) (cat4 (j (i64.of 6)) (bltu (u32.of 5) (u32.of 3) (i64.of 6)) (movi (u32.of 6) (i64.of 1)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 89)) (Some (cat4 (movi (u32.of 6) (i64.of 0)) (bne (u32.of 3) (u32.of 5) (i64.of 9)) (bltu (u32.of 2) (u32.of 4) (i64.of 12)) (cat4 (j (i64.of 6)) (blt (u32.of 3) (u32.of 5) (i64.of 6)) (movi (u32.of 6) (i64.of 1)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 90)) (Some (cat4 (movi (u32.of 6) (i64.of 0)) (bne (u32.of 3) (u32.of 5) (i64.of 9)) (bltu (u32.of 2) (u32.of 4) (i64.of 12)) (cat4 (j (i64.of 6)) (bltu (u32.of 3) (u32.of 5) (i64.of 6)) (movi (u32.of 6) (i64.of 1)) (cat (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0)))))) (None))))))))))))
+
+  (fn alu_work ((code U8)) (Option Bytes)
+    (uses Alloc)
+    (if (= code (u8.of 124)) (Some (cat4 (add_rr (u32.of 2) (u32.of 2) (u32.of 4)) (add_rr (u32.of 3) (u32.of 3) (u32.of 5)) (bgeu (u32.of 2) (u32.of 4) (i64.of 6)) (addi8 (u32.of 3) (u32.of 3) (i64.of 1)))) (if (= code (u8.of 125)) (Some (cat4 (sub_rr (u32.of 3) (u32.of 3) (u32.of 5)) (bgeu (u32.of 2) (u32.of 4) (i64.of 6)) (addi8 (u32.of 3) (u32.of 3) (i64.of -1)) (sub_rr (u32.of 2) (u32.of 2) (u32.of 4)))) (if (= code (u8.of 126)) (Some (cat4 (mull (u32.of 6) (u32.of 2) (u32.of 4)) (muluh (u32.of 7) (u32.of 2) (u32.of 4)) (mull (u32.of 8) (u32.of 2) (u32.of 5)) (cat4 (mull (u32.of 9) (u32.of 3) (u32.of 4)) (add_rr (u32.of 7) (u32.of 7) (u32.of 8)) (add_rr (u32.of 7) (u32.of 7) (u32.of 9)) (cat (mov_rr (u32.of 2) (u32.of 6)) (mov_rr (u32.of 3) (u32.of 7)))))) (if (= code (u8.of 131)) (Some (cat (and_rr (u32.of 2) (u32.of 2) (u32.of 4)) (and_rr (u32.of 3) (u32.of 3) (u32.of 5)))) (if (= code (u8.of 132)) (Some (cat (or_rr (u32.of 2) (u32.of 2) (u32.of 4)) (or_rr (u32.of 3) (u32.of 3) (u32.of 5)))) (if (= code (u8.of 133)) (Some (cat (xor_rr (u32.of 2) (u32.of 2) (u32.of 4)) (xor_rr (u32.of 3) (u32.of 3) (u32.of 5)))) (if (= code (u8.of 134)) (Some (cat4 (extui (u32.of 4) (u32.of 4) (u32.of 0) (u32.of 6)) (bbsi (u32.of 4) (u32.of 5) (i64.of 15)) (ssl (u32.of 4)) (cat4 (src (u32.of 3) (u32.of 3) (u32.of 2)) (sll (u32.of 2) (u32.of 2)) (j (i64.of 15)) (cat4 (addi8 (u32.of 8) (u32.of 4) (i64.of -32)) (ssl (u32.of 8)) (sll (u32.of 3) (u32.of 2)) (movi (u32.of 2) (i64.of 0)))))) (if (= code (u8.of 135)) (Some (cat4 (extui (u32.of 4) (u32.of 4) (u32.of 0) (u32.of 6)) (bbsi (u32.of 4) (u32.of 5) (i64.of 15)) (ssr (u32.of 4)) (cat4 (src (u32.of 2) (u32.of 3) (u32.of 2)) (sra (u32.of 3) (u32.of 3)) (j (i64.of 15)) (cat4 (addi8 (u32.of 8) (u32.of 4) (i64.of -32)) (ssr (u32.of 8)) (sra (u32.of 2) (u32.of 3)) (srai (u32.of 3) (u32.of 3) (u32.of 31)))))) (if (= code (u8.of 136)) (Some (cat4 (extui (u32.of 4) (u32.of 4) (u32.of 0) (u32.of 6)) (bbsi (u32.of 4) (u32.of 5) (i64.of 15)) (ssr (u32.of 4)) (cat4 (src (u32.of 2) (u32.of 3) (u32.of 2)) (srl (u32.of 3) (u32.of 3)) (j (i64.of 15)) (cat4 (addi8 (u32.of 8) (u32.of 4) (i64.of -32)) (ssr (u32.of 8)) (srl (u32.of 2) (u32.of 3)) (movi (u32.of 3) (i64.of 0)))))) (if (= code (u8.of 114)) (Some (cat (or_rr (u32.of 2) (u32.of 2) (u32.of 4)) (or_rr (u32.of 3) (u32.of 3) (u32.of 5)))) (if (= code (u8.of 113)) (Some (cat (and_rr (u32.of 2) (u32.of 2) (u32.of 4)) (and_rr (u32.of 3) (u32.of 3) (u32.of 5)))) (None)))))))))))))
+
+  (fn zero_check () Bytes (uses Alloc) (cat3 (or_rr (u32.of 6) (u32.of 4) (u32.of 5)) (bnez (u32.of 6) (i64.of 6)) (ill)))
+
+  (fn overflow_check () Bytes (uses Alloc) (cat4 (addi8 (u32.of 6) (u32.of 4) (i64.of 1)) (addi8 (u32.of 7) (u32.of 5) (i64.of 1)) (or_rr (u32.of 6) (u32.of 6) (u32.of 7)) (cat4 (bnez (u32.of 6) (i64.of 21)) (movi (u32.of 7) (i64.of 1)) (slli (u32.of 7) (u32.of 7) (u32.of 31)) (cat4 (xor_rr (u32.of 7) (u32.of 3) (u32.of 7)) (or_rr (u32.of 7) (u32.of 7) (u32.of 2)) (bnez (u32.of 7) (i64.of 6)) (ill)))))
+
+  (fn divide_code ((code U8)) (Option Bytes)
+    (uses Alloc)
+    (if (= code (u8.of 127))
+      (Some (binary_code (cat3 (zero_check) (overflow_check) (cat4 (extui (u32.of 8) (u32.of 3) (u32.of 31) (u32.of 1)) (extui (u32.of 9) (u32.of 5) (u32.of 31) (u32.of 1)) (slli (u32.of 10) (u32.of 9) (u32.of 1)) (cat4 (or_rr (u32.of 11) (u32.of 8) (u32.of 10)) (beqz (u32.of 8) (i64.of 15)) (neg_r (u32.of 3) (u32.of 3)) (cat4 (beqz (u32.of 2) (i64.of 6)) (addi8 (u32.of 3) (u32.of 3) (i64.of -1)) (neg_r (u32.of 2) (u32.of 2)) (cat4 (beqz (u32.of 9) (i64.of 15)) (neg_r (u32.of 5) (u32.of 5)) (beqz (u32.of 4) (i64.of 6)) (cat4 (addi8 (u32.of 5) (u32.of 5) (i64.of -1)) (neg_r (u32.of 4) (u32.of 4)) (movi (u32.of 6) (i64.of 0)) (cat4 (movi (u32.of 7) (i64.of 0)) (movi (u32.of 10) (i64.of 64)) (ssai (u32.of 31)) (cat4 (extui (u32.of 8) (u32.of 7) (u32.of 31) (u32.of 1)) (src (u32.of 7) (u32.of 7) (u32.of 6)) (src (u32.of 6) (u32.of 6) (u32.of 3)) (cat4 (src (u32.of 3) (u32.of 3) (u32.of 2)) (slli (u32.of 2) (u32.of 2) (u32.of 1)) (bnez (u32.of 8) (i64.of 15)) (cat4 (bne (u32.of 7) (u32.of 5) (i64.of 9)) (bltu (u32.of 6) (u32.of 4) (i64.of 24)) (j (i64.of 6)) (cat4 (bltu (u32.of 7) (u32.of 5) (i64.of 18)) (sub_rr (u32.of 7) (u32.of 7) (u32.of 5)) (bgeu (u32.of 6) (u32.of 4) (i64.of 6)) (cat4 (addi8 (u32.of 7) (u32.of 7) (i64.of -1)) (sub_rr (u32.of 6) (u32.of 6) (u32.of 4)) (addi8 (u32.of 2) (u32.of 2) (i64.of 1)) (cat4 (addi8 (u32.of 10) (u32.of 10) (i64.of -1)) (bnez (u32.of 10) (i64.of -48)) (srli (u32.of 8) (u32.of 11) (u32.of 1)) (cat4 (xor_rr (u32.of 8) (u32.of 8) (u32.of 11)) (extui (u32.of 8) (u32.of 8) (u32.of 0) (u32.of 1)) (beqz (u32.of 8) (i64.of 15)) (cat4 (neg_r (u32.of 3) (u32.of 3)) (beqz (u32.of 2) (i64.of 6)) (addi8 (u32.of 3) (u32.of 3) (i64.of -1)) (neg_r (u32.of 2) (u32.of 2)))))))))))))))))))
+      (if (= code (u8.of 128))
+        (Some (binary_code (cat (zero_check) (cat4 (movi (u32.of 6) (i64.of 0)) (movi (u32.of 7) (i64.of 0)) (movi (u32.of 10) (i64.of 64)) (cat4 (ssai (u32.of 31)) (extui (u32.of 8) (u32.of 7) (u32.of 31) (u32.of 1)) (src (u32.of 7) (u32.of 7) (u32.of 6)) (cat4 (src (u32.of 6) (u32.of 6) (u32.of 3)) (src (u32.of 3) (u32.of 3) (u32.of 2)) (slli (u32.of 2) (u32.of 2) (u32.of 1)) (cat4 (bnez (u32.of 8) (i64.of 15)) (bne (u32.of 7) (u32.of 5) (i64.of 9)) (bltu (u32.of 6) (u32.of 4) (i64.of 24)) (cat4 (j (i64.of 6)) (bltu (u32.of 7) (u32.of 5) (i64.of 18)) (sub_rr (u32.of 7) (u32.of 7) (u32.of 5)) (cat4 (bgeu (u32.of 6) (u32.of 4) (i64.of 6)) (addi8 (u32.of 7) (u32.of 7) (i64.of -1)) (sub_rr (u32.of 6) (u32.of 6) (u32.of 4)) (cat3 (addi8 (u32.of 2) (u32.of 2) (i64.of 1)) (addi8 (u32.of 10) (u32.of 10) (i64.of -1)) (bnez (u32.of 10) (i64.of -48))))))))))))
+        (if (= code (u8.of 129))
+          (Some (binary_code (cat (zero_check) (cat4 (extui (u32.of 8) (u32.of 3) (u32.of 31) (u32.of 1)) (extui (u32.of 9) (u32.of 5) (u32.of 31) (u32.of 1)) (slli (u32.of 10) (u32.of 9) (u32.of 1)) (cat4 (or_rr (u32.of 11) (u32.of 8) (u32.of 10)) (beqz (u32.of 8) (i64.of 15)) (neg_r (u32.of 3) (u32.of 3)) (cat4 (beqz (u32.of 2) (i64.of 6)) (addi8 (u32.of 3) (u32.of 3) (i64.of -1)) (neg_r (u32.of 2) (u32.of 2)) (cat4 (beqz (u32.of 9) (i64.of 15)) (neg_r (u32.of 5) (u32.of 5)) (beqz (u32.of 4) (i64.of 6)) (cat4 (addi8 (u32.of 5) (u32.of 5) (i64.of -1)) (neg_r (u32.of 4) (u32.of 4)) (movi (u32.of 6) (i64.of 0)) (cat4 (movi (u32.of 7) (i64.of 0)) (movi (u32.of 10) (i64.of 64)) (ssai (u32.of 31)) (cat4 (extui (u32.of 8) (u32.of 7) (u32.of 31) (u32.of 1)) (src (u32.of 7) (u32.of 7) (u32.of 6)) (src (u32.of 6) (u32.of 6) (u32.of 3)) (cat4 (src (u32.of 3) (u32.of 3) (u32.of 2)) (slli (u32.of 2) (u32.of 2) (u32.of 1)) (bnez (u32.of 8) (i64.of 15)) (cat4 (bne (u32.of 7) (u32.of 5) (i64.of 9)) (bltu (u32.of 6) (u32.of 4) (i64.of 24)) (j (i64.of 6)) (cat4 (bltu (u32.of 7) (u32.of 5) (i64.of 18)) (sub_rr (u32.of 7) (u32.of 7) (u32.of 5)) (bgeu (u32.of 6) (u32.of 4) (i64.of 6)) (cat4 (addi8 (u32.of 7) (u32.of 7) (i64.of -1)) (sub_rr (u32.of 6) (u32.of 6) (u32.of 4)) (addi8 (u32.of 2) (u32.of 2) (i64.of 1)) (cat4 (addi8 (u32.of 10) (u32.of 10) (i64.of -1)) (bnez (u32.of 10) (i64.of -48)) (extui (u32.of 8) (u32.of 11) (u32.of 0) (u32.of 1)) (cat4 (beqz (u32.of 8) (i64.of 15)) (neg_r (u32.of 7) (u32.of 7)) (beqz (u32.of 6) (i64.of 6)) (cat4 (addi8 (u32.of 7) (u32.of 7) (i64.of -1)) (neg_r (u32.of 6) (u32.of 6)) (mov_rr (u32.of 2) (u32.of 6)) (mov_rr (u32.of 3) (u32.of 7)))))))))))))))))))
+          (if (= code (u8.of 130))
+            (Some (binary_code (cat (zero_check) (cat4 (movi (u32.of 6) (i64.of 0)) (movi (u32.of 7) (i64.of 0)) (movi (u32.of 10) (i64.of 64)) (cat4 (ssai (u32.of 31)) (extui (u32.of 8) (u32.of 7) (u32.of 31) (u32.of 1)) (src (u32.of 7) (u32.of 7) (u32.of 6)) (cat4 (src (u32.of 6) (u32.of 6) (u32.of 3)) (src (u32.of 3) (u32.of 3) (u32.of 2)) (slli (u32.of 2) (u32.of 2) (u32.of 1)) (cat4 (bnez (u32.of 8) (i64.of 15)) (bne (u32.of 7) (u32.of 5) (i64.of 9)) (bltu (u32.of 6) (u32.of 4) (i64.of 24)) (cat4 (j (i64.of 6)) (bltu (u32.of 7) (u32.of 5) (i64.of 18)) (sub_rr (u32.of 7) (u32.of 7) (u32.of 5)) (cat4 (bgeu (u32.of 6) (u32.of 4) (i64.of 6)) (addi8 (u32.of 7) (u32.of 7) (i64.of -1)) (sub_rr (u32.of 6) (u32.of 6) (u32.of 4)) (cat4 (addi8 (u32.of 2) (u32.of 2) (i64.of 1)) (addi8 (u32.of 10) (u32.of 10) (i64.of -1)) (bnez (u32.of 10) (i64.of -48)) (cat (mov_rr (u32.of 2) (u32.of 6)) (mov_rr (u32.of 3) (u32.of 7)))))))))))))
+            (None))))))
+
+  (fn unary_work ((code U8)) (Option Bytes)
+    (uses Alloc)
+    (if (= code (u8.of 80)) (Some (cat4 (or_rr (u32.of 2) (u32.of 2) (u32.of 3)) (movi (u32.of 6) (i64.of 1)) (beqz (u32.of 2) (i64.of 6)) (cat3 (movi (u32.of 6) (i64.of 0)) (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0))))) (if (= code (u8.of 69)) (Some (cat4 (or_rr (u32.of 2) (u32.of 2) (u32.of 3)) (movi (u32.of 6) (i64.of 1)) (beqz (u32.of 2) (i64.of 6)) (cat3 (movi (u32.of 6) (i64.of 0)) (mov_rr (u32.of 2) (u32.of 6)) (movi (u32.of 3) (i64.of 0))))) (if (= code (u8.of 167)) (Some (movi (u32.of 3) (i64.of 0))) (if (= code (u8.of 173)) (Some (no_bytes)) (if (= code (u8.of 194)) (Some (cat3 (slli (u32.of 2) (u32.of 2) (u32.of 24)) (srai (u32.of 2) (u32.of 2) (u32.of 24)) (srai (u32.of 3) (u32.of 2) (u32.of 31)))) (if (= code (u8.of 195)) (Some (cat3 (slli (u32.of 2) (u32.of 2) (u32.of 16)) (srai (u32.of 2) (u32.of 2) (u32.of 16)) (srai (u32.of 3) (u32.of 2) (u32.of 31)))) (if (= code (u8.of 196)) (Some (srai (u32.of 3) (u32.of 2) (u32.of 31))) (None)))))))))
+
+  (fn op_step ((fx VFx) (code U8) (st VSt)) VWalked
+    (uses Alloc)
+    (match (compare_work code)
+      ((Some work) (walked (binary_code work) st (less (get st h) (u32.of 1))))
+      ((None) (match (alu_work code) ((Some work) (walked (binary_code work) st (less (get st h) (u32.of 1)))) ((None) (match (divide_code code) ((Some work) (walked work st (less (get st h) (u32.of 1)))) ((None) (match (unary_work code) ((Some work) (walked (unary_code work) st (get st h))) ((None) (other_op fx code st))))))))))
+
+  (fn other_op ((fx VFx) (code U8) (st VSt)) VWalked
+    (uses Alloc)
+    (if (= code (u8.of 26))
+      (walked (addi (os) (os) (i64.of 8)) st (less (get st h) (u32.of 1)))
+      (if (= code (u8.of 27))
+        (walked (cat4 (pop (r2)) (popp (r4) (r5)) (popp (r0) (r1)) (cat4 (bnez (r2) (i64.of 9)) (mov_rr (r0) (r4)) (mov_rr (r1) (r5)) (pushp (r0) (r1))))
+          st
+          (less (get st h) (u32.of 2)))
+        (if (= code (u8.of 1))
+          (nothing st)
+          (if (= code (u8.of 15))
+            (make VWalked
+              (items (raw (epilogue fx)))
+              (st (make VSt (h (get st h)) (next (get st next)) (dead true))))
+            (make VWalked
+              (items (raw (ill)))
+              (st (make VSt (h (get st h)) (next (get st next)) (dead true)))))))))
+
+  (fn epilogue ((fx VFx)) Bytes
+    (uses Alloc)
+    (cat4 (if (= (get fx results) (u32.of 0)) (no_bytes) (popp (r0) (r1)))
+      (add_big (os) (fp) (widen (wrap.mul (get fx params) (u32.of 8))))
+      (pop_frame)
+      (ret)))
+
+  (fn prologue ((fx VFx)) Bytes
+    (uses Alloc)
+    (cat4 (push_frame)
+      (mov_rr (fp) (os))
+      (mov_imm (r0) (i64.of 0))
+      (pushes (get fx locals))))
+
+  (fn pushes ((n U32)) Bytes
+    (uses Alloc)
+    (if (<= n (u32.of 0)) (no_bytes) (cat (push (r0)) (pushes (- n (u32.of 1))))))
+
+  (fn walk ((fx VFx) (ctrl VCtrl) (is Inss) (st VSt)) VWalked
+    (uses Alloc)
+    (match is
+      ((NoInss) (nothing st))
+      ((Inss i rest) (if (get st dead) (nothing st) (let first (step fx ctrl i st) (walked_join first (walk fx ctrl rest (get first st))))))))
+
+  (fn step ((fx VFx) (ctrl VCtrl) (i Ins) (st VSt)) VWalked
+    (uses Alloc)
+    (match i
+      ((WConst n) (walked (cat3 (mov_imm (r0) n) (mov_imm (r1) (bit.shr n 32)) (pushp (r0) (r1))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalGet x) (walked (cat (frame_loadp (r0) (r1) (local_disp fx x)) (pushp (r0) (r1))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalSet x) (walked (cat (popp (r0) (r1)) (frame_storep (r0) (r1) (local_disp fx x))) st (less (get st h) (u32.of 1))))
+      ((WLocalTee x) (walked (cat (peekp (r0) (r1)) (frame_storep (r0) (r1) (local_disp fx x))) st (get st h)))
+      ((WGlobalGet x) (walked (cat (cell_get (r0) (i64.of 1073737728)) (push (r0))) st (wrap.add (get st h) (u32.of 1))))
+      ((WGlobalSet x) (walked (cat (pop (r0)) (cell_set (r0) (i64.of 1073737728))) st (less (get st h) (u32.of 1))))
+      ((WOp code) (op_step fx code st))
+      ((WLoad code align offset) (walked (load_code code offset) st (get st h)))
+      ((WStore code align offset) (walked (store_code code offset) st (less (get st h) (u32.of 2))))
+      ((WCall f) (call_step fx f st))
+      ((WHost slot) (host_step fx slot st))
+      ((WIf value then other) (let otherwise (get st next) (let end (wrap.add otherwise (u32.of 1)) (let h0 (less (get st h) (u32.of 1)) (let inner (VCtrl end h0 (arity value) ctrl) (let yes (walk fx inner then (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) (let no (walk fx inner other (with_h (get yes st) h0)) (if_result yes no otherwise end h0 value))))))))
+      ((WBlock value body) (let end (get st next) (let h0 (get st h) (block_result (walk fx (VCtrl end h0 (arity value) ctrl) body (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) end h0 value))))
+      ((WLoop value body) (let start (get st next) (let h0 (get st h) (loop_result (walk fx (VCtrl start h0 (u32.of 0) ctrl) body (make VSt (h h0) (next (wrap.add start (u32.of 1))) (dead false))) start h0 value))))
+      ((WBr depth) (branch_step fx ctrl depth false st))
+      ((WBrIf depth) (branch_step fx ctrl depth true st))
+      ((WCopy) (walked (copy_code) st (less (get st h) (u32.of 3))))
+      ((WFill) (make VWalked (items (raw (ill))) (st (make VSt (h (get st h)) (next (get st next)) (dead true)))))
+      ((WMemSize) (walked (cat (cell_get (r0) (i64.of 1073737732)) (push (r0))) st (wrap.add (get st h) (u32.of 1))))
+      ((WMemGrow) (walked (cat4 (pop (r0)) (cell_get (r1) (i64.of 1073737732)) (cat (add_rr (r2) (r1) (r0)) (cell_set (r2) (i64.of 1073737732))) (push (r1))) st (get st h)))))
+
+  (fn with_offset ((disp U32)) Bytes
+    (uses Alloc)
+    (if (<= disp (u32.of 0))
+      (no_bytes)
+      (if (< disp (u32.of 2048))
+        (addi (r0) (r0) (widen disp))
+        (cat (mov_imm (r1) (widen disp)) (add_rr (r0) (r0) (r1))))))
+
+  (fn load_code ((code U8) (disp U32)) Bytes
+    (uses Alloc)
+    (if (= code (u8.of 49))
+      (cat4 (pop (r0)) (with_offset disp) (lbux (r0) (mem) (r0)) (push (r0)))
+      (cat4 (pop (r0)) (with_offset disp) (add_rr (tmp) (mem) (r0))
+        (cat3 (l32i (r0) (tmp) (i64.of 0)) (l32i (r1) (tmp) (i64.of 4)) (pushp (r0) (r1))))))
+
+  (fn store_code ((code U8) (disp U32)) Bytes
+    (uses Alloc)
+    (if (= code (u8.of 60))
+      (cat4 (popp (r2) (r3)) (pop (r0)) (with_offset disp) (sbx (r2) (mem) (r0)))
+      (cat4 (popp (r2) (r3)) (pop (r0)) (with_offset disp)
+        (cat3 (add_rr (tmp) (mem) (r0)) (s32i (r2) (tmp) (i64.of 0)) (s32i (r3) (tmp) (i64.of 4))))))
+
+  (fn copy_code () Bytes
+    (uses Alloc)
+    (cat4 (cat3 (pop (r2)) (pop (r1)) (pop (r0)))
+      (cat (add_rr (r0) (r0) (mem)) (add_rr (r1) (r1) (mem)))
+      (copy_loop)
+      (no_bytes)))
+
+  (fn call_step ((fx VFx) (f U32) (st VSt)) VWalked
+    (uses Alloc)
+    (match (shape_at (get fx shapes) f)
+      ((None) (nothing st))
+      ((Some found) (match found ((VNoShapes) (nothing st)) ((VShapes params results more) (let after (wrap.add (less (get st h) params) results) (make VWalked (items (items_join (item (VCallFn f)) (if (= results (u32.of 0)) (VNoItems) (raw (pushp (r0) (r1)))))) (st (with_h st after)))))))))
+
+  (fn arity ((value Bool)) U32 (if value (u32.of 1) (u32.of 0)))
+
+  (fn block_result ((inside VWalked) (end U32) (h0 U32) (value Bool)) VWalked
+    (make VWalked
+      (items (items_join (get inside items) (item (VMark end))))
+      (st (make VSt (h (wrap.add h0 (arity value))) (next (get (get inside st) next)) (dead false)))))
+
+  (fn loop_result ((inside VWalked) (start U32) (h0 U32) (value Bool)) VWalked
+    (make VWalked
+      (items (items_join (item (VMark start)) (get inside items)))
+      (st (make VSt (h (wrap.add h0 (arity value))) (next (get (get inside st) next)) (dead false)))))
+
+  (fn if_result ((yes VWalked) (no VWalked) (otherwise U32) (end U32) (h0 U32) (value Bool)) VWalked
+    (uses Alloc)
+    (make VWalked
+      (items (items_join (raw (pop (r0))) (items_join (item (VJumpIf (u32.of 0) (r0) (zero) otherwise)) (items_join (get yes items) (items_join (item (VJump end)) (items_join (item (VMark otherwise)) (items_join (get no items) (item (VMark end)))))))))
+      (st (make VSt (h (wrap.add h0 (arity value))) (next (get (get no st) next)) (dead false)))))
+
+  (fn jump_code ((fx VFx) (found VCtrl)) VItems
+    (uses Alloc)
+    (match found
+      ((VNoCtrl) (VNoItems))
+      ((VCtrl target height carries rest) (items_join (raw (cat3 (if (= carries (u32.of 0)) (no_bytes) (popp (r0) (r1))) (set_stack fx height) (if (= carries (u32.of 0)) (no_bytes) (pushp (r0) (r1))))) (item (VJump target))))))
+
+  (fn branch_step ((fx VFx) (ctrl VCtrl) (depth U32) (conditional Bool) (st VSt)) VWalked
+    (uses Alloc)
+    (match (ctrl_at ctrl depth)
+      ((None) (nothing st))
+      ((Some found) (if conditional (let skip (get st next) (make VWalked (items (items_join (raw (pop (r0))) (items_join (item (VJumpIf (u32.of 0) (r0) (zero) skip)) (items_join (jump_code fx found) (item (VMark skip)))))) (st (make VSt (h (less (get st h) (u32.of 1))) (next (wrap.add skip (u32.of 1))) (dead false))))) (make VWalked (items (jump_code fx found)) (st (make VSt (h (get st h)) (next (get st next)) (dead true))))))))
+
+  (fn host_step ((fx VFx) (slot U32) (st VSt)) VWalked
+    (uses Alloc)
+    (match (host_at (get fx hosts) slot)
+      ((None) (nothing st))
+      ((Some found) (match found ((VNoHostfns) (nothing st)) ((VHostfns name params results more) (let after (wrap.add (less (get st h) params) results) (walked (host_code name) st after)))))))
+
+  (fn print_code ((fd I64)) Bytes
+    (uses Alloc)
+    (cat4 (pop (r4)) (add_rr (r0) (mem) (r4)) (mov_imm (r1) fd) (host_call (u32.of 1))))
+
+  (fn clock_code ((which I64) (divide I64)) Bytes
+    (uses Alloc)
+    (cat4 (mov_imm (r0) which) (mov_imm (r1) divide) (host_call (u32.of 2)) (pushp (r0) (r1))))
+
+  (fn host_code ((name Str)) Bytes
+    (uses Alloc)
+    (if (str.eq name "print")
+      (print_code (i64.of 1))
+      (if (str.eq name "log")
+        (print_code (i64.of 2))
+        (if (str.eq name "clock.now")
+          (clock_code (i64.of 1) (i64.of 1))
+          (if (str.eq name "clock.wall")
+            (clock_code (i64.of 0) (i64.of 1))
+            (if (str.eq name "clock.ticks") (clock_code (i64.of 1) (i64.of 1000)) (ill)))))))
+
+  (enum VChunks (VNoChunks) (VChunks (head Bytes) (rest VChunks)))
+
+  (fn merged ((cs VChunks)) VChunks
+    (uses Alloc)
+    (match cs
+      ((VNoChunks) (VNoChunks))
+      ((VChunks a rest) (match rest ((VNoChunks) (VChunks a (VNoChunks))) ((VChunks b more) (VChunks (bytes.concat a b) (merged more)))))))
+
+  (fn joined_in ((cs VChunks) (rounds U32)) Bytes
+    (uses Alloc)
+    (match cs
+      ((VNoChunks) (no_bytes))
+      ((VChunks a rest) (match rest ((VNoChunks) a) ((VChunks b more) (if (<= rounds (u32.of 0)) (bytes.concat a (joined_linear rest)) (joined_in (merged cs) (- rounds (u32.of 1)))))))))
+
+  (fn joined_linear ((cs VChunks)) Bytes
+    (uses Alloc)
+    (match cs
+      ((VNoChunks) (no_bytes))
+      ((VChunks a rest) (bytes.concat a (joined_linear rest)))))
+
+  (fn joined ((cs VChunks)) Bytes
+    (uses Alloc)
+    (joined_in cs (u32.of 40)))
+
+  (fn code_to ((is VItems) (at U32) (ls VLabels) (ss VStarts) (tail VChunks)) VChunks
+    (uses Alloc)
+    (match is
+      ((VNoItems) tail)
+      ((VItems h rest) (VChunks (item_bytes h at ls ss) (code_to rest (wrap.add at (item_size h)) ls ss tail)))))
+
+  (fn shapes_of ((fs Funcs)) VShapes
+    (match fs
+      ((NoFuncs) (VNoShapes))
+      ((Funcs f rest) (VShapes (get f params) (get f results) (shapes_of rest)))))
+
+  (fn hostfns_of ((is Imports)) VHostfns
+    (match is
+      ((NoImports) (VNoHostfns))
+      ((Imports i rest) (VHostfns (get i name) (get i params) (get i results) (hostfns_of rest)))))
+
+  (fn function_items ((f Func) (shapes VShapes) (hosts VHostfns)) VItems
+    (uses Alloc)
+    (let fx (make VFx (params (get f params)) (locals (get f locals)) (results (get f results)) (shapes shapes) (hosts hosts))
+      (let walked_body (walk fx (VNoCtrl) (get f body) (make VSt (h (u32.of 0)) (next (u32.of 0)) (dead false)))
+        (items_join (raw (prologue fx))
+          (items_join (get walked_body items) (raw (epilogue fx)))))))
+
+  (enum VBodies (VNoBodies) (VBodies (items VItems) (rest VBodies)))
+
+  (fn bodies_of ((fs Funcs) (shapes VShapes) (hosts VHostfns)) VBodies
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) (VNoBodies))
+      ((Funcs f rest) (VBodies (aligned (function_items f shapes hosts)) (bodies_of rest shapes hosts)))))
+
+  (fn starts_from ((bs VBodies) (at U32)) VStarts
+    (match bs
+      ((VNoBodies) (VNoStarts))
+      ((VBodies is rest) (VStarts at (starts_from rest (wrap.add at (items_size is)))))))
+
+  (fn bodies_end ((bs VBodies) (at U32)) U32
+    (match bs
+      ((VNoBodies) at)
+      ((VBodies is rest) (bodies_end rest (wrap.add at (items_size is))))))
+
+  (fn bodies_to ((bs VBodies) (at U32) (ss VStarts) (tail VChunks)) VChunks
+    (uses Alloc)
+    (match bs
+      ((VNoBodies) tail)
+      ((VBodies is rest) (code_to is at (labels_of is at) ss (bodies_to rest (wrap.add at (items_size is)) ss tail)))))
+
+  (fn index_of_func ((fs Funcs) (name Str) (at U32)) (Option U32)
+    (match fs
+      ((NoFuncs) (None))
+      ((Funcs f rest) (if (str.eq (get f name) name) (Some at) (index_of_func rest name (wrap.add at (u32.of 1)))))))
+
+  (fn zeros ((n U32) (rounds U32)) Bytes
+    (uses Alloc)
+    (if (or (<= n (u32.of 1)) (<= rounds (u32.of 0)))
+      (if (<= n (u32.of 0)) (no_bytes) (bytes.of (u8.of 0)))
+      (bytes.concat (zeros (bit.shr n 1) (- rounds (u32.of 1)))
+        (zeros (wrap.sub n (bit.shr n 1)) (- rounds (u32.of 1))))))
+
+  (fn narrow ((n I64)) U32
+    (if (and (<= (i64.of 0) n) (<= n (i64.of 4294967295))) (u32.of n) (u32.of 0)))
+
+  (fn placed ((image Bytes) (seg Segment)) Bytes
+    (uses Alloc)
+    (let at (int.of (get seg offset))
+      (let size (int.of (octets (get seg bytes)))
+        (bytes.concat (bytes.slice image (Octets 0) (Octets at))
+          (bytes.concat (get seg bytes)
+            (bytes.slice image (Octets (+ at size)) (Octets (unwrap (bytes.len image)))))))))
+
+  (fn image_of ((ss Segments) (image Bytes)) Bytes
+    (uses Alloc)
+    (match ss ((NoSegments) image) ((Segments seg rest) (image_of rest (placed image seg)))))
+
+  (fn le16 ((n U32)) Bytes
+    (uses Alloc)
+    (cat (bytes.of (low8 n)) (bytes.of (low8 (bit.shr n 8)))))
+
+  (fn le32 ((n I64)) Bytes
+    (uses Alloc)
+    (imm32 n))
+
+  (fn le64 ((n I64)) Bytes
+    (uses Alloc)
+    (imm64 n))
+
+  (fn base_address () I64 (i64.of 1074266112))
+
+  (fn elf_header ((entry I64) (total I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat4 (cat4 (bytes.of (u8.of 127)) (bytes.of (u8.of 69)) (bytes.of (u8.of 76)) (bytes.of (u8.of 70))) (bytes.of (u8.of 1)) (bytes.of (u8.of 1)) (cat (bytes.of (u8.of 1)) (zeros (u32.of 9) (u32.of 8))))
+      (cat4 (le16 (u32.of 2)) (le16 (u32.of 94)) (le32 (i64.of 1)) (le32 entry))
+      (cat4 (le32 (i64.of 52))
+        (le32 (i64.of 0))
+        (le32 (i64.of 0))
+        (cat4 (le16 (u32.of 52))
+          (le16 (u32.of 32))
+          (le16 (u32.of 1))
+          (cat3 (le16 (u32.of 0)) (le16 (u32.of 0)) (le16 (u32.of 0)))))
+      (cat4 (le32 (i64.of 1))
+        (le32 (i64.of 0))
+        (le32 (base_address))
+        (cat4 (le32 (base_address))
+          (le32 total)
+          (le32 total)
+          (cat (le32 (i64.of 5)) (le32 (i64.of 4)))))))
+
+  (fn exit_code ((status I64)) Bytes
+    (uses Alloc)
+    (cat3 (mov_imm (r0) status) (host_call (u32.of 0)) (ill)))
+
+  (fn copy_loop () Bytes
+    (uses Alloc)
+    (cat4 (beqz (u32.of 4) (i64.of 21)) (l8ui (u32.of 5) (u32.of 3) (i64.of 0)) (s8i (u32.of 5) (u32.of 2) (i64.of 0)) (cat4 (addi8 (u32.of 3) (u32.of 3) (i64.of 1)) (addi8 (u32.of 2) (u32.of 2) (i64.of 1)) (addi8 (u32.of 4) (u32.of 4) (i64.of -1)) (bnez (u32.of 4) (i64.of -15)))))
+
+  (fn word_copy () Bytes
+    (uses Alloc)
+    (cat4 (beqz (u32.of 4) (i64.of 21)) (l32i (u32.of 5) (u32.of 3) (i64.of 0)) (s32i (u32.of 5) (u32.of 2) (i64.of 0)) (cat4 (addi8 (u32.of 3) (u32.of 3) (i64.of 4)) (addi8 (u32.of 2) (u32.of 2) (i64.of 4)) (addi8 (u32.of 4) (u32.of 4) (i64.of -1)) (bnez (u32.of 4) (i64.of -15)))))
+
+  (fn word_zero () Bytes
+    (uses Alloc)
+    (cat4 (s32i (u32.of 5) (u32.of 2) (i64.of 0)) (addi8 (u32.of 2) (u32.of 2) (i64.of 4)) (addi8 (u32.of 4) (u32.of 4) (i64.of -1)) (bnez (u32.of 4) (i64.of -9))))
+
+  (fn start_code ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat3 (mov_imm (sp) (i64.of 1073733632)) (mov_imm (os) (i64.of 1073676288)) (mov_imm (mem) (i64.of 1073414144)))
+      (cleared)
+      (cat (mov_rr (r0) (mem)) (cat4 (mov_imm (r1) image_at) (mov_imm (r2) (bit.shr image_size 2)) (word_copy) (cell_pair heap pages)))
+      (no_bytes)))
+
+  ; RAM comes out of reset holding anything, and the runtime counts on memory it has not
+  ; written reading as zero, as a wasm module's does: the free lists' table, for one, is
+  ; allocated and never cleared. So the wasm memory and the operand stack are zeroed, a word
+  ; at a time, before the data image is copied in.
+  (fn cleared () Bytes
+    (uses Alloc)
+    (cat4 (mov_rr (r0) (mem)) (mov_imm (r2) (i64.of 65536)) (movi (r3) (i64.of 0)) (word_zero)))
+
+  (fn cell_pair ((heap I64) (pages I64)) Bytes
+    (uses Alloc)
+    (cat4 (mov_imm (r0) heap) (cell_set (r0) (i64.of 1073737728)) (mov_imm (r0) pages) (cell_set (r0) (i64.of 1073737732))))
+
+  (fn main_entry ((main_index U32)) VItems
+    (uses Alloc)
+    (items_join (item (VCallFn main_index)) (raw (exit_code (i64.of 0)))))
+
+  (fn stub_items ((entry VItems) (image_at I64) (image_size I64) (heap I64) (pages I64)) VItems
+    (uses Alloc)
+    (items_join (raw (start_code image_at image_size heap pages)) entry))
+
+  (fn elf_of ((m Module) (entry_name Str) (filter Bool)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (index_of_func (get m funcs) entry_name (u32.of 0))
+      ((None) (Err (fault "native" (concat "the program has no function named " entry_name))))
+      ((Some index) (let shapes (shapes_of (get m funcs)) (let bodies (bodies_of (get m funcs) shapes (hostfns_of (get m imports))) (let heap (get m heap) (let image (padded (image_of (get m segments) (zeros (narrow heap) (u32.of 40)))) (let image_at (wrap.add (base_address) (i64.of 128)) (let entry (main_entry index) (let stub (aligned (stub_items entry image_at (i64.of (octets image)) heap (widen (get m pages)))) (let stub_end (items_size stub) (let starts (starts_from bodies stub_end) (let code (joined (code_to stub (u32.of 0) (labels_of stub (u32.of 0)) starts (bodies_to bodies stub_end starts (VNoChunks)))) (let code_offset (wrap.add (i64.of 128) (i64.of (octets image))) (let total (wrap.add code_offset (i64.of (octets code))) (if (< (i64.of 131072) total) (Err (fault "native" (concat "the image is " (concat (num.to_str total) " bytes, more than the 131072 of instruction RAM the ESP32's layout has for code")))) (Ok (cat4 (elf_header (wrap.add (base_address) code_offset) total) (zeros (u32.of 44) (u32.of 8)) image code))))))))))))))))))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/native_arm.wtn is exercised by tests/test_native_arm.py")))

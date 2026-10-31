@@ -1,0 +1,33 @@
+; One language, every scale. This module builds for `mcu`: no heap, and every function
+; carries a proven bound on how deep it goes and how much it allocates.
+;   witness check examples/device.wtn --profile mcu
+(module device
+  (newtype Celsius I16)
+
+  (newtype Reading U16)
+
+  (fn too_hot ((reading Celsius) (limit Celsius)) Bool
+    (bounds (depth 1) (alloc 0))
+    (< (unwrap limit) (unwrap reading)))
+
+  ; A raw sensor count becomes a temperature once, here, and the refinement travels with
+  ; the type from then on.
+  (newtype Scaled U16
+    (requires raw (<= raw (u16.of 4095))))
+
+  (fn scale ((raw U16)) (Option Scaled)
+    (bounds (depth 1) (alloc 0))
+    (if (<= raw (u16.of 4095)) (Some (Scaled raw)) (None)))
+
+  ; The recursion is bounded because the contract bounds the counter.
+  (fn settle ((samples I16) (reading Celsius)) Celsius
+    (requires (and (<= (i16.of 0) samples) (<= samples (i16.of 8))))
+    (bounds (depth 9) (repeats 9) (alloc 0))
+    (if (= samples (i16.of 0)) reading (settle (- samples (i16.of 1)) reading)))
+
+  (fn watch ((raw U16) (limit Celsius)) Unit
+    (uses Log)
+    (bounds (depth 3) (alloc 0))
+    (match (scale raw)
+      ((None) (log.fields (sensor_fault true)))
+      ((Some s) (log.fields (hot (too_hot (Celsius (i16.of (int.of (unwrap s)))) limit)))))))

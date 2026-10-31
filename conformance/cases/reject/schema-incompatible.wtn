@@ -1,0 +1,4 @@
+(module m
+  (record RV1 (schema S 1) (a Str))
+
+  (record RV2 (schema S 2) (a Str) (b Str)))

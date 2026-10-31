@@ -1,0 +1,4 @@
+(module m
+  (fn f ((b (label Secret Bool))) Unit
+    (uses Console)
+    (if b (print "yes") (print "no"))))

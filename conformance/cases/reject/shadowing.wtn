@@ -1,0 +1,2 @@
+(module m
+  (fn f ((x Int)) Int (let x 2 x)))

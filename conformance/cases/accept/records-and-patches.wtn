@@ -1,0 +1,7 @@
+(module m
+  (record Site (schema Site 1) (code Str) (tenant (Option Str)))
+
+  (patch SitePatch Site)
+
+  (fn rename ((s Site) (code Str)) Site
+    (update s (make SitePatch (code (Some code)) (tenant (None))))))

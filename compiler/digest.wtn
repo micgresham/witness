@@ -1,0 +1,244 @@
+; A canonical byte form for a parsed tree, and the SHA-256 digest of it.
+;
+; compiler/sha256.wtn settled that Witness can compute a hash, and compiler/parse.wtn
+; settled that Witness can build a tree. This is the join: the bytes that stand between
+; them. A digest is only ever a digest of bytes, so anything structured that is to be
+; named by its hash needs one agreed spelling first, and that spelling -- not the hash
+; function -- is where content addressing is either sound or quietly broken.
+;
+; WHAT THIS HASH IS, AND WHAT IT IS NOT
+;
+; This is a hash of the *written form*. It is not the hash witness/hashing.py computes,
+; and the difference is not a detail.
+;
+; `witness/hashing.py` hashes the **checked** form of one definition. That is what makes
+; a hash in this project name-independent: a parameter's name is replaced by its position
+; in scope, a type parameter's name by its index, the arms of a `match` are sorted so
+; that the order they were written in does not count, and every dependency appears as
+; *its own hash* rather than as the name it was called by -- so the object is a Merkle
+; hash over the definition's whole closure, and renaming a function, its parameters or
+; its import aliases leaves every hash in the codebase unchanged. A contract, a
+; redaction policy and a refinement are in there too, because they are part of what the
+; definition does.
+;
+; This module can reproduce none of that, and says so rather than appearing to. Every
+; one of those steps needs the checker: positions in scope need name resolution, a
+; dependency's hash needs to know that a call head is a function rather than a variant or
+; a builtin, and a policy needs the label a value carries. The checker does not exist in
+; Witness yet -- compiler/typecheck.wtn is its first piece, and reads a type. So what is
+; serialised here is the tree exactly as it was spelled: every name as the bytes of the
+; token it came from, every list in the order it was written, nothing resolved and
+; nothing dropped. Rename a parameter and this digest changes. It is therefore a
+; **digest of source text in a canonical binary form**, useful for saying "these two
+; sources are the same tree" and for a cache key, and it is *not* a content address.
+;
+; It is still the bottom half of the real thing rather than a detour. The real hash is
+; the same two steps -- serialise a tree to bytes in one unambiguous spelling, then
+; digest the bytes -- over a different tree: the checked one. When the checker exists in
+; Witness, what changes is what goes in, not how it is written down or hashed. The
+; marker at the front (`witness-tree-v0`) is there so that the two can never be mistaken
+; for one another: a digest from this module is domain-separated from anything a later,
+; name-independent serialisation will produce.
+;
+; WHAT THE SERIALISATION GUARANTEES
+;
+; One tree has exactly one spelling, and no two trees share a spelling. Both halves come
+; from the same device: every variable-length part is preceded by a count, so the reader
+; of the bytes never has to guess where a part ends from what follows it. The encoding
+; is self-delimiting, and a self-delimiting encoding of a tree is injective -- which is
+; the property a digest of it needs, and the one a naive `concat` of names and
+; parentheses would not have, since `(ab)` and `(a b)` would run together.
+;
+; WHAT GOT IN THE WAY, FOR THE RECORD
+;
+; Six definitions are imported below and a seventh could not be. `tokens_of` -- the
+; tokeniser, so that a digest could be taken of source text rather than of tokens handed
+; over by hand -- cannot be imported alongside sha256's `digest`: resolution splices a
+; dependency under the name the codebase holds it by, and compiler/reader.wtn's
+; `reversed` and compiler/sha256.wtn's `reversed` are two different definitions with the
+; same name, so bringing both closures into one module is refused with
+; `[unresolved-import]`. A local alias does not help -- `(use ... as ...)` renames the
+; definition asked for, not what it was built out of. So `main` and the propositions
+; below hand the parser the tokens of a small form directly, which is what
+; compiler/parse.wtn's own propositions do, and the tokeniser is reached through the
+; codebase rather than from here. It is worth naming plainly: the one place this project
+; still depends on a name is the one place it did not mean to.
+;
+;   witness test compiler/digest.wtn
+;   witness run  compiler/digest.wtn --grant Alloc,Console
+(module digest
+  (use "wtn:ce6bc8d6e4773e0df82ceaa91e0c3827343653940f9f9a55fcce94111224ea10" as sha256)
+
+  ; Hexadecimal, so a digest can be read and compared against one written down
+  ; elsewhere. It is sha256.wtn's, by hash: a second spelling of the same sixteen digits
+  ; would be a second thing to keep right.
+  (use "wtn:90a50d84c8567129b33153303f56c5821e914f53aaabe33a6097595553c3817a" as hex)
+
+  ; sha256.wtn calls this `length_suffix`, because there it writes the eight bytes of a
+  ; message's bit length onto the end of a padded block. What it *is* is more general --
+  ; the low `left` bytes of a word, most significant first, appended to what it is given
+  ; -- and that is exactly a big-endian count prefix. A name is local, so this module
+  ; calls it what it does here; the definition, and so its hash, is one and the same.
+  (use "wtn:934b1382a831995f1867d308ac2dada8ebc9f3d79d5b7c9a56ce99ddf7ce1ca9" as big_endian)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:7167847e8cee57f9c1c10d76cd9f09c0b6b9cedc0fff6a1af1c927ecc819bddd"
+    as
+    trees_count)
+
+  ; --- counts ----------------------------------------------------------------
+  ; A count is written in eight bytes, big-endian, always. A shorter encoding that chose
+  ; its own width would need a rule saying which width a given number must use, and a
+  ; serialisation whose canonicity rests on a rule nobody checks is the failure this
+  ; module exists to avoid. Eight bytes is wasteful and has no edge cases.
+  ;
+  ; The guard is what supplies the bound `u64.of` needs. Nothing can reach the other
+  ; branch: a count here is a number of bytes or of items held in memory, and no machine
+  ; holds 2^64 of either. sha256.wtn's `bit_length` is guarded the same way and for the
+  ; same reason -- saying so in an `if` costs no proof, and asserting it would.
+  (fn wide ((n Int)) U64
+    (requires (<= 0 n))
+    (if (<= n 18446744073709551615) (u64.of n) (u64.of 0)))
+
+  ; One byte saying which of the two shapes follows, then its count: for a leaf the
+  ; number of bytes of text after the header, and for a list the number of items. The
+  ; tags are 0x4c and 0x4e, 'L' and 'N', so that a hexdump of a serialised tree can be
+  ; read by eye while this is still young enough to be read by eye.
+  (fn header ((tag U8) (count Int)) Bytes
+    (uses Alloc)
+    (requires (<= 0 count))
+    (bytes.concat (bytes.of tag) (big_endian (wide count) 8 (str.encode ""))))
+
+  ; --- the tree, as bytes ----------------------------------------------------
+  ; A leaf keeps the bytes of its token and nothing else, which is all the parser gave
+  ; it: at this level `fn`, `30` and `"fn"` are each a run of bytes in a position. So a
+  ; quoted string and the word its bytes spell serialise the same way, exactly as they
+  ; parse the same way, and recording the difference would mean recording which kind of
+  ; token it was -- which is a thing the tree does not carry and this pass must not
+  ; invent.
+  ;
+  ; The two functions are a cycle, and every call around it takes a binder a `match`
+  ; lifted out of the parameter: `items` out of a `Node`, and `head` and `rest` out of a
+  ; `Trees`. A part of a part is smaller, so the walk needs no budget and no count of
+  ; its own.
+  (fn serialised ((t Tree)) Bytes
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (bytes.concat (header (u8.of 76) (unwrap (bytes.len text))) text))
+      ((Node items) (bytes.concat (header (u8.of 78) (trees_count items)) (serialised_items items)))))
+
+  (fn serialised_items ((ts Trees)) Bytes
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (str.encode ""))
+      ((Trees head rest) (bytes.concat (serialised head) (serialised_items rest)))))
+
+  ; The bytes that actually get hashed. The marker is a constant prefix, so it changes no
+  ; distinction the serialisation makes; what it does is keep this digest from ever
+  ; colliding with one taken over a different notion of what a definition is. A version
+  ; number in it is cheap now and impossible to add later.
+  (fn marked ((t Tree)) Bytes
+    (uses Alloc)
+    (bytes.concat (str.encode "witness-tree-v0") (serialised t)))
+
+  (fn digest_of ((t Tree)) Bytes
+    (uses Alloc)
+    (sha256 (marked t)))
+
+  (fn hex_of ((t Tree)) Str
+    (uses Alloc)
+    (let out (digest_of t) (hex out 0 (unwrap (bytes.len out)) "")))
+
+  ; --- small trees, for saying things about ----------------------------------
+  ; A tree cannot be written as a literal, and the propositions below need particular
+  ; ones, so these five build them. They are also what the Python side calls: a function
+  ; taking `Str` can be handed a made-up string from outside, where a function taking a
+  ; `Tree` cannot.
+  (fn leaf ((text Str)) Tree
+    (uses Alloc)
+    (Leaf (str.encode text) false))
+
+  (fn single ((a Str)) Tree
+    (uses Alloc)
+    (Node (Trees (leaf a) (NoTrees))))
+
+  (fn pair ((a Str) (b Str)) Tree
+    (uses Alloc)
+    (Node (Trees (leaf a) (Trees (leaf b) (NoTrees)))))
+
+  (fn nested ((a Str) (b Str)) Tree
+    (uses Alloc)
+    (Node (Trees (leaf a) (Trees (single b) (NoTrees)))))
+
+  (fn empty_node () Tree (Node (NoTrees)))
+
+  ; --- what the serialisation says about itself ------------------------------
+  ; The sizes first, because they are the whole of the encoding stated as arithmetic: a
+  ; header is nine bytes, a leaf is a header and its text, and a list is a header and its
+  ; items one after another. The marker adds fifteen.
+  (test "a leaf is a tag, a count and its text" (= 10 (unwrap (bytes.len (serialised (leaf "a"))))))
+
+  (test "a list of nothing is a tag and a count" (= 9 (unwrap (bytes.len (serialised (empty_node))))))
+
+  (test "a list of two one-byte leaves is its header and both of them" (= 29 (unwrap (bytes.len (serialised (pair "a" "b"))))))
+
+  ; Then the distinctions. Each of these is a pair of trees that a serialisation without
+  ; counts, or without tags, would run together -- which is what "unambiguous" has to
+  ; mean to be worth stating.
+  (test "a leaf is not the one-item list that holds it" (not (bytes.eq (marked (leaf "a")) (marked (single "a")))))
+
+  (test "where the lists nest is in the bytes" (not (bytes.eq (marked (pair "a" "b")) (marked (nested "a" "b")))))
+
+  (test "the order of a list is in the bytes" (not (bytes.eq (marked (pair "a" "b")) (marked (pair "b" "a")))))
+
+  ; The one a `concat` of names and spaces gets wrong: two leaves holding "ab" and
+  ; nothing, against two holding "a" and "b". Both are two leaves whose text runs to
+  ; "ab", and the counts are the only thing that tells them apart.
+  (test "where the text is split between two leaves is in the bytes" (not (bytes.eq (marked (pair "ab" "")) (marked (pair "a" "b")))))
+
+  (test "a digest is thirty-two bytes" (= 32 (unwrap (bytes.len (digest_of (empty_node))))))
+
+  (property "the same tree always gives the same bytes" ((text Str))
+    (bytes.eq (marked (leaf text)) (marked (leaf text))))
+
+  (property "different text in a leaf gives different bytes" ((a Str) (b Str))
+    (requires (not (str.eq a b)))
+    (not (bytes.eq (marked (leaf a)) (marked (leaf b)))))
+
+  (property "a leaf is never the list that holds it" ((text Str))
+    (not (bytes.eq (marked (leaf text)) (marked (single text)))))
+
+  (property "the order of two leaves is in the bytes" ((a Str) (b Str))
+    (requires (not (str.eq a b)))
+    (not (bytes.eq (marked (pair a b)) (marked (pair b a)))))
+
+  ; --- a form read and then digested -----------------------------------------
+  ; `(+ a b)` as the reader would have left it. Written out rather than tokenised,
+  ; because the tokeniser cannot be imported here; see the note at the top of the file.
+  (fn sample_tokens () Tokens
+    (uses Alloc)
+    (Tokens (Open)
+      (Tokens (Word (str.encode "+"))
+        (Tokens (Word (str.encode "a"))
+          (Tokens (Word (str.encode "b")) (Tokens (Close) (NoTokens)))))))
+
+  (fn sample_digest () Str
+    (uses Alloc)
+    (match (parse (sample_tokens))
+      ((Ok t) (hex_of t))
+      ((Err f) (concat "rejected: " (get f why)))))
+
+  ; Not a published vector -- there is nothing published to check this against, and
+  ; saying there were would be the dishonesty this module's comments exist to avoid.
+  ; What it is: the digest this code gave when it was written down, so that a change in
+  ; the serialisation cannot slip through as a change in nothing. tests/test_digest.py is
+  ; where the digest is checked against an independent SHA-256 of the same bytes.
+  (snapshot "the digest of (+ a b)" (sample_digest)
+    "9773115c5f049eef0711c73f82fbd39941e8186d09ded2dcbbb8035ec47abe11")
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq (print (sample_digest)) (print (hex_of (empty_node))))))

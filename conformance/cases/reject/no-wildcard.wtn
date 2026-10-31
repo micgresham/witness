@@ -1,0 +1,4 @@
+(module m
+  (enum P (A) (B))
+
+  (fn f ((p P)) Int (match p ((A) 1) (_ 0))))

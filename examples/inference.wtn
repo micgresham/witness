@@ -1,0 +1,53 @@
+; Machine learning in the same language as everything else.
+;   - a tensor carries its element format and its named axes, so a transposed weight
+;     matrix is a compile error
+;   - a model is a value named by the hash of its weights
+;   - the labels its training data carried stay on everything it answers
+;   - and its answer is not a fact: ModelOutput cannot reach a sink that would trust it
+(module inference
+  ; A generative model trained on public data, so its weights carry no label of their
+  ; own -- but its answer is still not a fact.
+  (model Assistant
+    (input Str)
+    (output Str)
+    (trained-on)
+    (device gpu)
+    (weights "wtn:3c7f1ad2e9"))
+
+  ; A classifier over embeddings, trained on data that carried labels of its own.
+  (model Risk
+    (input (tensor F32 (sample 1) (feature 768)))
+    (output (tensor F32 (sample 1) (class 2)))
+    (trained-on Personal tenant:acme)
+    (device npu)
+    (weights "wtn:91b4ee0c7a"))
+
+  (foreign embed ((text Str)) (tensor F32 (sample 1) (feature 768)))
+
+  ; Named axes: the last axis of the left must be the first axis of the right, by name
+  ; as well as size, so (feature 768) x (class 2) lines up and nothing else does.
+  (fn project ((batch (tensor F32 (sample 4) (feature 768))) (weights (tensor F32 (feature 768) (class 2)))) (tensor F32 (sample 4) (class 2))
+    (uses Alloc)
+    (tensor.matmul batch weights))
+
+  ; The classifier's answer carries ModelOutput and the labels of its training data.
+  (fn score ((text Str)) (label ModelOutput Personal tenant:acme (tensor F32 (sample 1) (class 2)))
+    (uses Foreign Npu)
+    (declassifies Unverified)
+    (infer Risk (declassify Unverified (embed text))))
+
+  ; A generated answer is checked before anything acts on it. The declassify is the
+  ; reviewed point where somebody takes responsibility for it.
+  (fn validated ((question Str)) (Result Str Fault)
+    (uses Gpu)
+    (declassifies ModelOutput)
+    (let answer (declassify ModelOutput (infer Assistant question))
+      (if (<= (unwrap (str.chars answer)) 280)
+        (Ok answer)
+        (Err (fault "validated" "the model said more than we will pass on")))))
+
+  (fn main () Unit
+    (uses Gpu Console Alloc)
+    (match (validated "what is the uplink for ST1528?")
+      ((Ok answer) (print answer))
+      ((Err f) (print (concat "rejected: " (get f why)))))))

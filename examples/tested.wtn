@@ -1,0 +1,26 @@
+; A module that states propositions about itself. `witness test examples/tested.wtn`
+; runs them: a test holds once, a property holds for inputs made up from its own name,
+; and a snapshot must still say what it said when it was written down.
+(module tested
+  (newtype Celsius I16)
+
+  (fn freezing () Celsius (Celsius (i16.of 0)))
+
+  (fn warmer ((a Celsius) (b Celsius)) Celsius (if (< (unwrap a) (unwrap b)) b a))
+
+  (fn describe ((c Celsius)) Str
+    (uses Alloc)
+    (concat (num.to_str (unwrap c)) "C"))
+
+  (test "freezing is zero" (= (i16.of 0) (unwrap (freezing))))
+
+  (test "warmer picks the larger" (= (i16.of 7) (unwrap (warmer (Celsius (i16.of 3)) (Celsius (i16.of 7))))))
+
+  ; Holds for every pair, so it is stated for every pair rather than for two of them.
+  (property "warmer is never colder than either" ((a Celsius) (b Celsius))
+    (and (<= (unwrap a) (unwrap (warmer a b))) (<= (unwrap b) (unwrap (warmer a b)))))
+
+  (property "warmer does not invent a reading" ((a Celsius) (b Celsius))
+    (or (= (unwrap (warmer a b)) (unwrap a)) (= (unwrap (warmer a b)) (unwrap b))))
+
+  (snapshot "describing freezing" (describe (freezing)) "0C"))

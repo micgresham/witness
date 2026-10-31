@@ -1,0 +1,4 @@
+(module m
+  (fn f ((n Int)) Int
+    (uses Console)
+    (seq n (print "x") n)))

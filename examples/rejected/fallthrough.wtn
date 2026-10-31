@@ -1,0 +1,6 @@
+; REJECTED. A catch-all arm silently routes every provider it doesn't
+; recognise to one destination - including providers added later.
+(module fallthrough
+  (enum Provider (Azure) (Ollama) (Alchemy))
+
+  (fn endpoint ((p Provider)) Str (match p ((Ollama) "ollama.local") (_ "azure-openai"))))

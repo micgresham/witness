@@ -1,0 +1,348 @@
+; The resource bounds, in Witness.
+;
+; `(bounds (depth N) (alloc N) (repeats N))` is the one declaration whose condition is a
+; *computation*, and this redoes it from the core terms rather than trusting the
+; checker's numbers: a frame per call, an allocation per operation that builds something
+; whose size is not known in advance, the worst of a case's arms, and work placed in
+; memory of its own spending another machine's stack and heap, not this one's.
+;
+; Two numbers come from elsewhere, and neither can be counted here.
+;
+; How often a recursion repeats rests on the termination measure, which is arithmetic:
+; it is taken as claimed, and kernel/arith.wtn replays the obligation behind it.
+;
+; Which calls are recursive would otherwise need the strongly connected components of
+; the call graph worked out here. Instead each function carries a **rank**: a call out of
+; a cycle goes to a lower rank, and a call within one goes to the same rank. That is a
+; local condition at every call site, so this checks it rather than computing it, and
+; then costs the ranks in turn from the bottom. A rank holding more than one cycle is
+; costed as though it were one, which can only ask for more than is needed -- and the
+; ranking the Phase 0 checker emits is the condensation's own order, where each rank
+; holds exactly one cycle.
+;
+; It has no entry point and performs nothing but Alloc, so nothing can tell it what to
+; conclude. witness/bounded.py writes a module's core terms and claims into a copy of it
+; and runs it.
+;
+;   witness check kernel/costs.wtn
+;   witness evidence kernel/costs.wtn
+(module costs
+  ; --- names -----------------------------------------------------------------
+  (enum Names (NoNames) (Names (head Str) (rest Names)))
+
+  (fn names_has ((ns Names) (a Str)) Bool
+    (match ns ((NoNames) false) ((Names h rest) (or (str.eq a h) (names_has rest a)))))
+
+  (fn first_name ((ns Names)) Str (match ns ((NoNames) "") ((Names h rest) h)))
+
+  ; --- the core term, as much of it as a cost depends on ---------------------
+  ; No types here: how deep a call goes and how much it builds does not depend on them.
+  ; `strs` is the rule's names -- a callee, or a placement per branch -- and `tasks` the
+  ; placement and retry policy of each supervised task.
+  (record Node (rule Str) (effects Names) (strs Names) (tasks Tasks) (parts Nodes))
+
+  (enum Nodes (NoNodes) (Nodes (head Node) (rest Nodes)))
+
+  (record Task (placement Str) (policy Str) (limit Int))
+
+  (enum Tasks (NoTasks) (Tasks (head Task) (rest Tasks)))
+
+  (fn tasks_count ((ts Tasks)) Int
+    (ensures (<= 0 result))
+    (match ts ((NoTasks) 0) ((Tasks h rest) (+ 1 (tasks_count rest)))))
+
+  (fn nodes_count ((ns Nodes)) Int
+    (ensures (<= 0 result))
+    (match ns ((NoNodes) 0) ((Nodes h rest) (+ 1 (nodes_count rest)))))
+
+  ; --- what each function claims ---------------------------------------------
+  ; `level` is the function's rank in the call graph; `repeats` how often its recursion
+  ; was proved to repeat, or zero where nothing bounds it; `bounds` what it declared.
+  (record Claim
+    (name Str)
+    (level Int)
+    (repeats Int)
+    (declares_depth Bool)
+    (depth Int)
+    (declares_alloc Bool)
+    (alloc Int)
+    (declares_repeats Bool)
+    (claimed_repeats Int)
+    (body Node))
+
+  (enum Claims (NoClaims) (Claims (head Claim) (rest Claims)))
+
+  (fn find_claim ((cs Claims) (name Str)) (Option Claim)
+    (match cs
+      ((NoClaims) (None))
+      ((Claims h rest) (if (str.eq name (get h name)) (Some h) (find_claim rest name)))))
+
+  (fn claims_count ((cs Claims)) Int
+    (ensures (<= 0 result))
+    (match cs ((NoClaims) 0) ((Claims h rest) (+ 1 (claims_count rest)))))
+
+  ; --- a cost ----------------------------------------------------------------
+  ; How deep the stack goes and how much is built. `calls` is the most calls back into the
+  ; rank being costed that the work can make, which decides how often a rank's bodies run.
+  ; `unbounded` is what a recursion with no counted repeat costs, and it cannot be compared
+  ; with anything.
+  (record Cost (deep Int) (built Int) (calls Int) (unbounded Bool))
+
+  (fn nothing () Cost (make Cost (deep 0) (built 0) (calls 0) (unbounded false)))
+
+  (fn unknown () Cost (make Cost (deep 0) (built 0) (calls 0) (unbounded true)))
+
+  ; A call back into the rank being costed: nothing here, one more call there.
+  (fn recall () Cost (make Cost (deep 0) (built 0) (calls 1) (unbounded false)))
+
+  ; Costs in sequence: the deepest call among them, and every allocation and call added up.
+  (fn after ((p Cost) (q Cost)) Cost
+    (if (or (get p unbounded) (get q unbounded))
+      (unknown)
+      (make Cost
+        (deep (higher (get p deep) (get q deep)))
+        (built (+ (get p built) (get q built)))
+        (calls (+ (get p calls) (get q calls)))
+        (unbounded false))))
+
+  ; Costs in alternative branches: only one of them runs, so take the worse.
+  (fn worse ((p Cost) (q Cost)) Cost
+    (if (or (get p unbounded) (get q unbounded))
+      (unknown)
+      (make Cost
+        (deep (higher (get p deep) (get q deep)))
+        (built (higher (get p built) (get q built)))
+        (calls (higher (get p calls) (get q calls)))
+        (unbounded false))))
+
+  ; A cycle entered `n` deep: the stack repeats `n` times, and what is built repeats once
+  ; for every time a body can run. A body that calls back into the cycle `k` times can run
+  ; 1 + k + ... + k^(n-1) times, which is `n` only when `k` is one: a body that calls
+  ; itself twice runs 2^n - 1 times. Seen from outside, the cycle calls nothing back.
+  (fn times ((n Int) (c Cost)) Cost
+    (if (or (get c unbounded) (<= n 0))
+      (unknown)
+      (make Cost (deep (* n (get c deep))) (built (* (runs (get c calls) n) (get c built))) (calls 0) (unbounded false))))
+
+  ; 1 + k + ... + k^(n-1): one run at the top, and under each run `k` more, `n` deep.
+  (fn runs ((k Int) (n Int)) Int
+    (requires (<= 0 n))
+    (if (<= n 0) 0 (+ 1 (* k (runs k (- n 1))))))
+
+  ; Work attempted `n` times: each attempt builds again, but the attempts are one after
+  ; another on the same stack, so the depth does not repeat.
+  (fn retried ((n Int) (c Cost)) Cost
+    (if (or (get c unbounded) (<= n 0))
+      (unknown)
+      (make Cost (deep (get c deep)) (built (* n (get c built))) (calls (* n (get c calls))) (unbounded false))))
+
+  (fn higher ((p Int) (q Int)) Int (if (< p q) q p))
+
+  ; --- the ranking is checked, not computed ----------------------------------
+  ; At every call, the callee is ranked no higher than the caller. A call to a lower rank
+  ; is a call out of this cycle, whose cost is already known; a call to the same rank is
+  ; a call within it, and the repeat factor accounts for that. A call to a higher rank
+  ; would be a cost that depends on itself, so it is refused.
+  (fn ranking_stands ((all Claims) (cs Claims)) (Result Unit Fault)
+    (uses Alloc)
+    (match cs
+      ((NoClaims) (Ok unit))
+      ((Claims c rest) (match (calls_rank_below all (get c level) (get c body)) ((Err e) (Err e)) ((Ok u) (ranking_stands all rest))))))
+
+  (fn calls_rank_below ((all Claims) (level Int) (node Node)) (Result Unit Fault)
+    (uses Alloc)
+    (match (if (str.eq (get node rule) "call") (rank_of all (first_name (get node strs))) (Some level))
+      ((None) (Err (fault "costs" "a call names a function with no claim of its own")))
+      ((Some callee) (if (< level callee) (Err (fault "costs" "a call goes to a function ranked above the caller, so its cost would depend on itself")) (parts_rank_below all level (get node parts))))))
+
+  (fn parts_rank_below ((all Claims) (level Int) (ns Nodes)) (Result Unit Fault)
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (Ok unit))
+      ((Nodes h rest) (match (calls_rank_below all level h) ((Err e) (Err e)) ((Ok u) (parts_rank_below all level rest))))))
+
+  (fn rank_of ((all Claims) (name Str)) (Option Int)
+    (match (find_claim all name) ((None) (None)) ((Some c) (Some (get c level)))))
+
+  ; --- costing the ranks, from the bottom ------------------------------------
+  ; What each rank costs, worked out from rank zero upwards: a rank's own bodies, costed
+  ; with calls to lower ranks already known, once for every repeat.
+  (enum Ranks (NoRanks) (Ranks (head Cost) (rest Ranks)))
+
+  (fn rank_cost ((rs Ranks) (level Int)) Cost
+    (uses Alloc)
+    (match rs
+      ((NoRanks) (unknown))
+      ((Ranks h rest) (if (<= level 0) h (rank_cost rest (- level 1))))))
+
+  (fn ranks_append ((rs Ranks) (c Cost)) Ranks
+    (uses Alloc)
+    (match rs
+      ((NoRanks) (Ranks c (NoRanks)))
+      ((Ranks h rest) (Ranks h (ranks_append rest c)))))
+
+  ; Rank by rank, lowest first. `left` counts down so the walk ends.
+  (fn all_rank_costs ((all Claims) (known Ranks) (at Int) (left Int)) Ranks
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      known
+      (all_rank_costs all
+        (ranks_append known (cost_of_rank all known at))
+        (+ at 1)
+        (- left 1))))
+
+  ; One rank: the deepest of its members' bodies, everything they build added up, and all
+  ; of it once per repeat. Summing over a rank that holds more than one cycle asks for
+  ; more than is needed, which only ever loses a program.
+  (fn cost_of_rank ((all Claims) (known Ranks) (at Int)) Cost
+    (uses Alloc)
+    (times (repeats_of_rank all at) (bodies_of_rank all all known at (nothing))))
+
+  ; `all` stays whole, because a call inside a body needs to find its callee's rank;
+  ; `left` is the cursor through the members.
+  (fn bodies_of_rank ((all Claims) (left Claims) (known Ranks) (at Int) (so_far Cost)) Cost
+    (uses Alloc)
+    (match left
+      ((NoClaims) so_far)
+      ((Claims c rest) (bodies_of_rank all rest known at (if (= (get c level) at) (add_member so_far (body_cost all known (get c level) (get c body))) so_far)))))
+
+  ; A member adds a frame of its own, is as deep as the deepest member, and builds what
+  ; every member builds. Each run of the rank is one member's body, so the calls back into
+  ; it are the most any one member makes.
+  (fn add_member ((so_far Cost) (body Cost)) Cost
+    (if (or (get so_far unbounded) (get body unbounded))
+      (unknown)
+      (make Cost
+        (deep (higher (get so_far deep) (+ 1 (get body deep))))
+        (built (+ (get so_far built) (get body built)))
+        (calls (higher (get so_far calls) (get body calls)))
+        (unbounded false))))
+
+  ; Every member of a rank must claim the same repeat count, because they go round
+  ; together. Zero means nothing bounds it.
+  (fn repeats_of_rank ((all Claims) (at Int)) Int
+    (match all
+      ((NoClaims) 0)
+      ((Claims c rest) (if (= (get c level) at) (get c repeats) (repeats_of_rank rest at)))))
+
+  ; --- one body, walked ------------------------------------------------------
+  (fn body_cost ((all Claims) (known Ranks) (level Int) (node Node)) Cost
+    (uses Alloc)
+    (if (str.eq (get node rule) "case")
+      (case_cost all known level (get node parts))
+      (if (str.eq (get node rule) "fork")
+        (fork_cost all known level (get node strs) (get node parts))
+        (if (str.eq (get node rule) "supervise")
+          (scope_cost all known level (get node tasks) (get node parts))
+          (if (str.eq (get node rule) "call")
+            (after (parts_cost all known level (get node parts))
+              (callee_cost all known level (first_name (get node strs))))
+            (after (builds node) (parts_cost all known level (get node parts))))))))
+
+  (fn parts_cost ((all Claims) (known Ranks) (level Int) (ns Nodes)) Cost
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (nothing))
+      ((Nodes h rest) (after (body_cost all known level h) (parts_cost all known level rest)))))
+
+  ; One operation that builds something whose size is not known in advance.
+  (fn builds ((node Node)) Cost
+    (if (and (names_has (get node effects) "Alloc") (is_builder (get node rule)))
+      (make Cost (deep 0) (built 1) (calls 0) (unbounded false))
+      (nothing)))
+
+  (fn is_builder ((rule Str)) Bool
+    (or (or (str.eq rule "prim") (str.eq rule "run"))
+      (or (str.eq rule "tensor") (str.eq rule "array"))))
+
+  ; One arm runs, so the cost is what was matched on plus the worst of the arms.
+  (fn case_cost ((all Claims) (known Ranks) (level Int) (ns Nodes)) Cost
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (nothing))
+      ((Nodes scrutinee arms) (after (body_cost all known level scrutinee) (worst_arm all known level arms)))))
+
+  (fn worst_arm ((all Claims) (known Ranks) (level Int) (ns Nodes)) Cost
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (nothing))
+      ((Nodes h rest) (worse (body_cost all known level h) (worst_arm all known level rest)))))
+
+  ; Branches have stacks of their own, so the depth is the worst of them; all of them
+  ; run, so what they build adds up. A branch in memory of its own spends another
+  ; machine's stack and heap, not this one's.
+  (fn fork_cost ((all Claims) (known Ranks) (level Int) (spots Names) (ns Nodes)) Cost
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (nothing))
+      ((Nodes h rest) (match spots ((NoNames) (body_cost all known level h)) ((Names spot more) (branch_and_rest (if (separate_memory spot) (nothing) (body_cost all known level h)) (fork_cost all known level more rest)))))))
+
+  ; A branch's own depth competes with the others'; what it builds, and calls, adds to theirs.
+  (fn branch_and_rest ((here Cost) (others Cost)) Cost
+    (if (or (get here unbounded) (get others unbounded))
+      (unknown)
+      (make Cost
+        (deep (higher (get here deep) (get others deep)))
+        (built (+ (get here built) (get others built)))
+        (calls (+ (get here calls) (get others calls)))
+        (unbounded false))))
+
+  (fn separate_memory ((spot Str)) Bool (or (str.eq spot "process") (str.eq spot "node")))
+
+  ; A scope's parts are each task's work, then each task's deadline, then the body. The
+  ; tasks and the parts are consumed in step: a task that may restart spends what it
+  ; builds once per attempt, and work in memory of its own spends another machine's
+  ; stack and heap. Once the tasks run out, what is left -- the deadlines and the body --
+  ; is work in sequence like any other.
+  (fn scope_cost ((all Claims) (known Ranks) (level Int) (ts Tasks) (ns Nodes)) Cost
+    (uses Alloc)
+    (match ns
+      ((NoNodes) (nothing))
+      ((Nodes here rest) (match ts ((NoTasks) (after (body_cost all known level here) (scope_cost all known level (NoTasks) rest))) ((Tasks t more) (after (if (separate_memory (get t placement)) (nothing) (retried (attempts t) (body_cost all known level here))) (scope_cost all known level more rest)))))))
+
+  (fn attempts ((t Task)) Int (if (str.eq (get t policy) "restart") (+ 1 (get t limit)) 1))
+
+  ; A call to a lower rank costs what that rank costs; a call within this one costs
+  ; nothing here but is counted, because how many such calls a body makes decides how
+  ; often the rank's bodies run (`times`). The callee's rank is read from the claim the
+  ; callee itself makes, not from the call site.
+  (fn callee_cost ((all Claims) (known Ranks) (level Int) (callee Str)) Cost
+    (uses Alloc)
+    (match (rank_of all callee)
+      ((None) (unknown))
+      ((Some rank) (if (= rank level) (recall) (rank_cost known rank)))))
+
+  ; --- what was declared has to cover it -------------------------------------
+  (fn judge_bounds ((all Claims) (profile Str)) (Result Unit Fault)
+    (uses Alloc)
+    (match (ranking_stands all all)
+      ((Err e) (Err e))
+      ((Ok u) (bounds_covered all (all_rank_costs all (NoRanks) 0 (claims_count all)) all profile))))
+
+  (fn bounds_covered ((all Claims) (ranks Ranks) (cs Claims) (profile Str)) (Result Unit Fault)
+    (uses Alloc)
+    (match cs
+      ((NoClaims) (Ok unit))
+      ((Claims c rest) (match (one_bound_covered c (rank_cost ranks (get c level)) profile) ((Err e) (Err e)) ((Ok u) (bounds_covered all ranks rest profile))))))
+
+  (fn one_bound_covered ((c Claim) (spent Cost) (profile Str)) (Result Unit Fault)
+    (if (not (declares_anything c))
+      (if (must_bound profile)
+        (Err (fault "costs" "this target needs a proven bound, and a function declares none"))
+        (Ok unit))
+      (if (get spent unbounded)
+        (Err (fault "costs" "a bound is declared, but nothing bounds how often the recursion repeats"))
+        (if (and (get c declares_depth) (< (get c depth) (get spent deep)))
+          (Err (fault "costs" "a function may go deeper than it declares"))
+          (if (and (get c declares_alloc) (< (get c alloc) (get spent built)))
+            (Err (fault "costs" "a function may build more than it declares"))
+            (if (and (get c declares_repeats) (< (get c claimed_repeats) (get c repeats)))
+              (Err (fault "costs" "a recursion may repeat more often than it declares"))
+              (Ok unit)))))))
+
+  (fn declares_anything ((c Claim)) Bool
+    (or (get c declares_depth) (or (get c declares_alloc) (get c declares_repeats))))
+
+  ; Targets that will not run code whose stack and heap are not proved bounded.
+  (fn must_bound ((profile Str)) Bool (or (str.eq profile "mcu") (str.eq profile "esp32"))))

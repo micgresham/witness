@@ -1,0 +1,6 @@
+(module m
+  (foreign read_config ((key Str)) Str)
+
+  (fn get_host ((key Str)) (label Unverified Str)
+    (uses Foreign)
+    (read_config key)))

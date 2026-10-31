@@ -1,0 +1,57 @@
+; Data at the edges. Everything arriving from outside is checked once, at one place, and
+; carries its own guarantee from then on.
+(module edges
+  ; A refinement: every Port is proved to be a real port where it is built.
+  (newtype Port U16
+    (requires n (<= (u16.of 1) n)))
+
+  ; A wire schema with two versions. Version 2 may only add optional fields, so a
+  ; version-1 writer and a version-2 reader still understand each other.
+  (record ListenerV1 (schema Listener 1) (host Str) (port U16))
+
+  (record ListenerV2 (schema Listener 2) (host Str) (port U16) (tenant (Option Str)))
+
+  ; A partial update is its own type, so no field can be dropped by not mentioning it.
+  (patch ListenerPatch ListenerV2)
+
+  ; Foreign code is outside every guarantee: calling it needs the Foreign effect, and
+  ; what it answers is Unverified until something here checks it.
+  (foreign read_config ((key Str)) Str)
+
+  ; A structured log line may carry labelled data only through a declared policy, and the
+  ; raw value never reaches the sink.
+  (redact Unverified length)
+
+  (fn parse_port ((n U16)) (Result Port Fault)
+    (if (<= (u16.of 1) n) (Ok (Port n)) (Err (fault "parse_port" "0 is not a port"))))
+
+  ; The validator is the one reviewed release point for the label.
+  (fn validate ((raw (label Unverified Str))) (Result Str Fault)
+    (declassifies Unverified)
+    (let text (declassify Unverified raw)
+      (if (< 0 (unwrap (str.chars text)))
+        (Ok text)
+        (Err (fault "validate" "the config value was empty")))))
+
+  (fn host_from_config ((key Str)) Str
+    (uses Foreign Log)
+    (let raw (read_config key)
+      (seq
+        (log.fields (key key) (answer raw))
+        (match (validate raw) ((Ok text) text) ((Err f) (get f why))))))
+
+  ; Nothing downstream re-checks the port: the refinement is a fact about the type.
+  (fn describe ((l ListenerV2)) Str
+    (uses Alloc)
+    (concat (get l host) (concat ":" (num.to_str (get l port)))))
+
+  (fn retenant ((l ListenerV2) (tenant Str)) ListenerV2
+    (update l (make ListenerPatch (host (None)) (port (None)) (tenant (Some (Some tenant))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (let base (make ListenerV2 (host "localhost") (port (u16.of 8080)) (tenant (None)))
+      (seq
+        (print (describe base))
+        (print (match (get (retenant base "acme") tenant) ((None) "no tenant") ((Some t) t)))
+        (print (match (parse_port (u16.of 0)) ((Ok p) (num.to_str (unwrap p))) ((Err f) (get f why))))))))

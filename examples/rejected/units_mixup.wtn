@@ -1,0 +1,9 @@
+; REJECTED. A minutes value passed where seconds are expected.
+(module units_mixup
+  (newtype Minutes Int)
+
+  (newtype Seconds Int)
+
+  (fn wait_for ((budget Seconds)) Int (unwrap budget))
+
+  (fn schedule ((interval Minutes)) Int (+ (wait_for interval) interval)))

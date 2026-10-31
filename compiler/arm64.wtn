@@ -1,0 +1,285 @@
+; AArch64 machine code: the instructions the ARM backend needs, as bytes.
+;
+; Every instruction is one little-endian 32-bit word, which is most of what makes this
+; simpler than x86: no prefixes, no variable length, so the size of a jump is always four
+; bytes and a layout needs no second guess. A register is its number (x0 to x30; 31 is the
+; zero register or the stack pointer depending on the instruction). Everything here is the
+; 64-bit form.
+;
+; The evidence is tests/test_arm64.py: capstone reads every encoding back.
+;
+;   witness test compiler/arm64.wtn
+(module arm64
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((n U32)) U8 (u8.of (bit.and n (u32.of 255))))
+
+  ; A 32-bit word, least significant byte first. The word is kept in an I64 so that the
+  ; encodings with the top bit set (most of them) are numbers and not overflows.
+  (fn word ((w I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (byte (part w (u32.of 0))))
+      (bytes.concat (bytes.of (byte (part w (u32.of 8))))
+        (bytes.concat (bytes.of (byte (part w (u32.of 16))))
+          (bytes.of (byte (part w (u32.of 24))))))))
+
+  (fn part ((w I64) (shift U32)) U32
+    (let low (bit.and (bit.shr w (int.of shift)) (i64.of 255))
+      (if (and (<= (i64.of 0) low) (<= low (i64.of 255))) (u32.of low) (u32.of 0))))
+
+  (fn shifted ((n U32) (by U32)) I64 (bit.shl (i64.of n) (int.of by)))
+
+  (fn plus ((a I64) (b I64)) I64 (wrap.add a b))
+
+  (fn rd ((r U32)) I64 (i64.of (bit.and r (u32.of 31))))
+
+  (fn rn ((r U32)) I64 (shifted (bit.and r (u32.of 31)) (u32.of 5)))
+
+  (fn rm ((r U32)) I64 (shifted (bit.and r (u32.of 31)) (u32.of 16)))
+
+  (fn ra ((r U32)) I64 (shifted (bit.and r (u32.of 31)) (u32.of 10)))
+
+  ; --- moving constants -------------------------------------------------------------------------
+  ; movz, movk and movn: sixteen bits at a time, `hw` saying which sixteen.
+  (fn movz ((d U32) (imm U32) (hw U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 3531603968) (shifted hw (u32.of 21))) (plus (shifted (bit.and imm (u32.of 65535)) (u32.of 5)) (rd d)))))
+
+  (fn movk ((d U32) (imm U32) (hw U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4068474880) (shifted hw (u32.of 21))) (plus (shifted (bit.and imm (u32.of 65535)) (u32.of 5)) (rd d)))))
+
+  (fn movn ((d U32) (imm U32) (hw U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2457862144) (shifted hw (u32.of 21))) (plus (shifted (bit.and imm (u32.of 65535)) (u32.of 5)) (rd d)))))
+
+  ; The sixteen bits of a 64-bit value starting at bit 16 * hw.
+  (fn chunk ((n I64) (hw U32)) U32
+    (let low (bit.and (bit.shr n (int.of (wrap.mul hw (u32.of 16)))) (i64.of 65535))
+      (if (and (<= (i64.of 0) low) (<= low (i64.of 65535))) (u32.of low) (u32.of 0))))
+
+  ; A whole 64-bit constant: movz for the first chunk and movk for each other chunk that is
+  ; not zero. Four instructions at most; a constant of zero is one.
+  (fn mov_imm ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (movz d (chunk n (u32.of 0)) (u32.of 0))
+      (bytes.concat (keep d n (u32.of 1))
+        (bytes.concat (keep d n (u32.of 2)) (keep d n (u32.of 3))))))
+
+  (fn keep ((d U32) (n I64) (hw U32)) Bytes
+    (uses Alloc)
+    (if (= (chunk n hw) (u32.of 0)) (no_bytes) (movk d (chunk n hw) hw)))
+
+  ; --- arithmetic ---------------------------------------------------------------------------------------
+  (fn mov_rr ((d U32) (s U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2852127712) (rm s)) (rd d))))
+
+  ; add and sub with a 12-bit immediate; mov to or from sp is add #0
+  (fn add_imm ((d U32) (n U32) (imm U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2432696320) (shifted (bit.and imm (u32.of 4095)) (u32.of 10))) (plus (rn n) (rd d)))))
+
+  (fn sub_imm ((d U32) (n U32) (imm U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 3506438144) (shifted (bit.and imm (u32.of 4095)) (u32.of 10))) (plus (rn n) (rd d)))))
+
+  (fn three ((base I64) (d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus base (rm m)) (plus (rn n) (rd d)))))
+
+  (fn add_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2332033024) d n m))
+
+  (fn sub_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 3405774848) d n m))
+
+  (fn and_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2315255808) d n m))
+
+  (fn orr_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2852126720) d n m))
+
+  (fn eor_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 3388997632) d n m))
+
+  ; subs xzr, n, m: compare
+  (fn cmp_rr ((n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 3942645760) (u32.of 31) n m))
+
+  ; ands xzr, n, m: test
+  (fn tst_rr ((n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 3925868544) (u32.of 31) n m))
+
+  (fn mul_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2600500224) d n m))
+
+  (fn sdiv_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2596277248) d n m))
+
+  (fn udiv_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2596276224) d n m))
+
+  (fn lsl_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2596282368) d n m))
+
+  (fn lsr_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2596283392) d n m))
+
+  (fn asr_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 2596284416) d n m))
+
+  ; msub d, n, m, a: a - n * m
+  (fn msub ((d U32) (n U32) (m U32) (a U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2600501248) (rm m)) (plus (ra a) (plus (rn n) (rd d))))))
+
+  ; csel d, n, m, cond and cset d, cond
+  (fn csel ((d U32) (n U32) (m U32) (cond U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2592079872) (rm m)) (plus (shifted (bit.and cond (u32.of 15)) (u32.of 12)) (plus (rn n) (rd d))))))
+
+  ; cset d, cond is csinc d, xzr, xzr, !cond
+  (fn cset ((d U32) (cond U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 2594113504) (shifted (bit.xor (bit.and cond (u32.of 15)) (u32.of 1)) (u32.of 12))) (rd d))))
+
+  ; sign extension: sxtb, sxth, sxtw; and a 32-bit move that clears the top half
+  (fn sxt ((bits U32) (d U32) (n U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (if (= bits (u32.of 8)) (i64.of 2470452224) (if (= bits (u32.of 16)) (i64.of 2470460416) (i64.of 2470476800))) (rn n)) (rd d))))
+
+  (fn mov_w ((d U32) (s U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 704644064) (rm s)) (rd d))))
+
+  ; --- memory ----------------------------------------------------------------------------------------------
+  ; ldr/str d, [n, #imm] with a non-negative multiple of 8 below 32768
+  (fn ldr_off ((d U32) (n U32) (off U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4181721088) (shifted (bit.and (bit.shr off 3) (u32.of 4095)) (u32.of 10))) (plus (rn n) (rd d)))))
+
+  (fn str_off ((d U32) (n U32) (off U32)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4177526784) (shifted (bit.and (bit.shr off 3) (u32.of 4095)) (u32.of 10))) (plus (rn n) (rd d)))))
+
+  ; ldr/str d, [n, m]
+  (fn ldr_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 4167067648) d n m))
+
+  (fn str_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 4162873344) d n m))
+
+  (fn ldrb_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 945842176) d n m))
+
+  (fn strb_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (three (i64.of 941647872) d n m))
+
+  ; the signed nine-bit forms: pre-index, post-index and unscaled
+  (fn imm9 ((n I64)) I64 (shifted (bit.and (low32 n) (u32.of 511)) (u32.of 12)))
+
+  (fn low32 ((n I64)) U32
+    (let low (bit.and n (i64.of 4294967295))
+      (if (and (<= (i64.of 0) low) (<= low (i64.of 4294967295))) (u32.of low) (u32.of 0))))
+
+  (fn ldr_pre ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4164946944) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn ldr_post ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4164944896) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn str_pre ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4160752640) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn str_post ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4160750592) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn ldur ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4164943872) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn stur ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 4160749568) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn ldrb_post ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 943719424) (imm9 off)) (plus (rn n) (rd d)))))
+
+  (fn strb_post ((d U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 939525120) (imm9 off)) (plus (rn n) (rd d)))))
+
+  ; stp x29, x30, [sp, #-16]! and ldp x29, x30, [sp], #16
+  (fn push_frame () Bytes
+    (uses Alloc)
+    (word (i64.of 2847898621)))
+
+  (fn pop_frame () Bytes
+    (uses Alloc)
+    (word (i64.of 2831252477)))
+
+  ; --- control ---------------------------------------------------------------------------------------------------
+  (fn insn_size () U32 (u32.of 4))
+
+  ; b and bl take a distance in instructions, signed, twenty-six bits
+  (fn b ((words I64)) Bytes
+    (uses Alloc)
+    (word (plus (i64.of 335544320) (bit.and words (i64.of 67108863)))))
+
+  (fn bl ((words I64)) Bytes
+    (uses Alloc)
+    (word (plus (i64.of 2483027968) (bit.and words (i64.of 67108863)))))
+
+  ; b.cond, with a nineteen-bit distance
+  (fn b_cond ((cond U32) (words I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 1409286144) (shifted (low32 (bit.and words (i64.of 524287))) (u32.of 5))) (i64.of (bit.and cond (u32.of 15))))))
+
+  (fn cbz ((t U32) (words I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 3019898880) (shifted (low32 (bit.and words (i64.of 524287))) (u32.of 5))) (rd t))))
+
+  (fn cbnz ((t U32) (words I64)) Bytes
+    (uses Alloc)
+    (word (plus (plus (i64.of 3036676096) (shifted (low32 (bit.and words (i64.of 524287))) (u32.of 5))) (rd t))))
+
+  (fn ret () Bytes
+    (uses Alloc)
+    (word (i64.of 3596551104)))
+
+  (fn svc () Bytes
+    (uses Alloc)
+    (word (i64.of 3556769793)))
+
+  (fn brk () Bytes
+    (uses Alloc)
+    (word (i64.of 3558866944)))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/arm64.wtn is exercised by tests/test_arm64.py")))

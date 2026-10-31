@@ -1,0 +1,7 @@
+(module m
+  (model Helper (input Str) (output Str) (trained-on) (device gpu) (weights "wtn:ab12"))
+
+  (fn ask ((q Str)) Str
+    (uses Gpu)
+    (declassifies ModelOutput)
+    (declassify ModelOutput (infer Helper q))))

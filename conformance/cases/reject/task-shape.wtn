@@ -1,0 +1,4 @@
+(module m
+  (fn f ((a Int) (d Duration)) Int
+    (uses Clock)
+    (scope ((one (+ a 1) (deadline d) (on-fail fail))) one)))

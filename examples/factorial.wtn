@@ -1,0 +1,19 @@
+(module factorial
+  (enum Outcome (Small (n Int)) (Large (n Int) (digits Int)))
+
+  (fn fact ((n Int)) Int (if (<= n 1) 1 (* n (fact (- n 1)))))
+
+  (fn classify ((n Int)) Outcome
+    (uses Alloc)
+    (let v (fact n)
+      (if (< v 1000000) (Small v) (Large v (unwrap (str.chars (num.to_str v)))))))
+
+  (fn describe ((o Outcome)) Str
+    (uses Alloc)
+    (match o
+      ((Small n) (concat "small: " (num.to_str n)))
+      ((Large n digits) (concat (concat (num.to_str digits) " digits: ") (num.to_str n)))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq (print (describe (classify 5))) (print (describe (classify 20))))))

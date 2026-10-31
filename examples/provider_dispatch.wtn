@@ -1,0 +1,21 @@
+; A provider dispatch that cannot silently fall through to a default
+; destination, and cannot send unsanitised text over the network.
+; The one place a label is released is visible in a signature.
+(module dispatch
+  (enum Provider (Azure) (Ollama) (Alchemy))
+
+  (fn sanitise ((text (label Unsanitised Str))) Str
+    (uses Alloc)
+    (declassifies Unsanitised)
+    (concat "[sanitised] " (declassify Unsanitised text)))
+
+  (fn endpoint ((p Provider)) Str
+    (match p ((Azure) "azure-openai") ((Ollama) "ollama.local") ((Alchemy) "alchemy-llm")))
+
+  (fn ask ((p Provider) (prompt (label Unsanitised Str))) Str
+    (uses Alloc Net)
+    (net.send (endpoint p) (sanitise prompt)))
+
+  (fn main () Unit
+    (uses Alloc Net Console)
+    (print (ask (Ollama) "which uplink serves ST1528?"))))

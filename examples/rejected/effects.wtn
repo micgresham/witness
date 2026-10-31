@@ -1,0 +1,11 @@
+; REJECTED. Hidden I/O, an over-broad signature and a hallucinated API.
+(module effects
+  (fn ping () Str (net.send "collector" "ping"))
+
+  (fn now () Instant
+    (uses Clock Net)
+    (clock.now))
+
+  (fn typo () Str
+    (uses Net)
+    (net.sendd "collector" "ping")))

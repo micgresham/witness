@@ -1,0 +1,6 @@
+(module m
+  (fn poll ((n Int)) (Result Int Fault) (if (< 0 n) (Ok n) (Err (fault "poll" "no"))))
+
+  (fn sweep ((n Int) (d Duration)) (Result Int Fault)
+    (uses Clock)
+    (scope ((one (poll n) (deadline d) (on-fail restart 2))) (Ok one))))

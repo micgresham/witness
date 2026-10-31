@@ -1,0 +1,47 @@
+; Fixed-width integers. On a machine integer every operation must be proved to stay in
+; range; where that cannot be proved, say what should happen instead.
+(module widths
+  (newtype Port U16)
+
+  ; `Int` is unbounded, so this arithmetic cannot overflow and needs no proof.
+  (fn total ((a Int) (b Int)) Int (* (+ a b) 1000))
+
+  ; The contract carries the bound, stated over the unbounded values.
+  (fn add ((a U8) (b U8)) U8
+    (requires (<= (+ (int.of a) (int.of b)) 255))
+    (+ a b))
+
+  ; A branch carries it instead.
+  (fn bump ((n U8)) U8 (if (<= (int.of n) 254) (+ n (u8.of 1)) n))
+
+  ; Or widen, compute freely, and narrow once the value is known to fit.
+  (fn parse_port ((n Int)) (Result Port Fault)
+    (if (and (<= 0 n) (<= n 65535))
+      (Ok (Port (u16.of n)))
+      (Err (fault "parse_port" "outside 0..65535"))))
+
+  ; Where overflow is expected, the behaviour is named rather than proved away.
+  (fn checksum ((a U8) (b U8)) U8 (wrap.add a b))
+
+  (fn capped ((a U8) (b U8)) U8
+    (ensures (<= (int.of result) 255))
+    (sat.add a b))
+
+  ; A product needs both factors bounded by a constant.
+  (fn area ((w U8) (h U8)) U8
+    (requires (and (<= (int.of w) 15) (<= (int.of h) 15)))
+    (* w h))
+
+  (fn describe ((p Port)) Str
+    (uses Alloc)
+    (concat "port " (num.to_str (unwrap p))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (num.to_str (total 2 3)))
+      (print (num.to_str (add (u8.of 200) (u8.of 55))))
+      (print (num.to_str (checksum (u8.of 250) (u8.of 10))))
+      (print (num.to_str (capped (u8.of 250) (u8.of 10))))
+      (print (num.to_str (area (u8.of 12) (u8.of 12))))
+      (print (match (parse_port 8080) ((Ok p) (describe p)) ((Err f) (get f why)))))))

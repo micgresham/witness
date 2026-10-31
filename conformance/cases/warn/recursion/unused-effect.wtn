@@ -1,0 +1,18 @@
+; A recursive group's calls to itself are taken at their declared word, which is the very
+; declaration in question: `ping` and `pong` only hand Console to each other, so neither
+; performs it. `tick` prints, so its declaration is used.
+(module m
+  (fn ping ((n Int)) Int
+    (uses Console)
+    (requires (<= 0 n))
+    (if (<= n 0) 0 (pong (- n 1))))
+
+  (fn pong ((n Int)) Int
+    (uses Console)
+    (requires (<= 0 n))
+    (if (<= n 0) 0 (ping (- n 1))))
+
+  (fn tick ((n Int)) Int
+    (uses Console)
+    (requires (<= 0 n))
+    (if (<= n 0) (seq (print "tick") 0) (tick (- n 1)))))

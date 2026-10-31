@@ -1,0 +1,2 @@
+(module m
+  (redact Secret nonsense))

@@ -1,0 +1,8 @@
+(module m
+  (fn f () Int 42)
+
+  (fn g () Str "text")
+
+  (fn h () Bool true)
+
+  (fn i () Unit unit))

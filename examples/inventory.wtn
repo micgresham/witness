@@ -1,0 +1,28 @@
+; Records, the prelude's Option and Result, and labels inside type arguments.
+(module inventory
+  (newtype Minutes Int)
+
+  (record Site (code Str) (tenant (label tenant:acme Str)) (interval Minutes))
+
+  (fn validate ((code Str) (minutes Int)) (Result Minutes Str)
+    (uses Alloc)
+    (if (< 0 minutes)
+      (Ok (Minutes minutes))
+      (Err (concat "interval must be positive for " code))))
+
+  (fn site ((code Str) (minutes Int)) (Option (label tenant:acme Site))
+    (uses Alloc)
+    (match (validate code minutes)
+      ((Ok m) (Some (make Site (code code) (tenant "acme") (interval m))))
+      ((Err e) (None))))
+
+  (fn describe ((s (Option (label tenant:acme Site)))) Str
+    (uses Alloc)
+    (declassifies tenant:acme)
+    (match (declassify tenant:acme s)
+      ((None) "no site")
+      ((Some found) (concat (get found code) (concat " every " (num.to_str (unwrap (get found interval))))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq (print (describe (site "ST1528" 30))) (print (describe (site "ST7001" 0))))))

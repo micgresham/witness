@@ -1,0 +1,393 @@
+; A WebAssembly binary encoder, in Witness: a description of some functions in, the
+; bytes of a loadable `.wasm` module out.
+;
+; This exists to settle a question rather than to be a backend. Phase 2 compiles Witness
+; without LLVM, which means something written in Witness has to be able to lay out a
+; target format byte for byte -- and the WebAssembly binary format is varints almost
+; everywhere, so the question is really whether LEB128 can be written here at all. Until
+; `bit.and`, `bit.or`, `bit.shl` and `bit.shr` existed it could not: a varint is a value
+; taken apart seven bits at a time, and a `U32` could be added and compared but never
+; taken apart. This is the proof that it now can be.
+;
+; What this is not: a compiler. It takes a hand-built description -- how many parameters
+; a function has, what it returns, and a short list of instructions -- because the IR a
+; real backend would walk does not exist yet. Everything downstream of that description
+; is real: the section framing, the length prefixes, the signed and unsigned varints and
+; the exact bytes a runtime loads.
+;
+; Two things about the shape of the code are forced by the language. There is no array,
+; so the functions of a module and the instructions of a body are cons lists, walked
+; structurally. And every function must be proved to terminate: a varint is produced by
+; dividing a value down seven bits at a time, and `bit.shr` is a movement of bits rather
+; than arithmetic the prover can see into, so nothing tells it that a shifted value is
+; smaller than the one it came from. Each varint walk therefore carries a budget that
+; falls at every step, and five is enough for either 32-bit width, which is all this
+; encoder emits.
+;
+; The expected bytes are at the bottom, as the tests. The module the sample describes is
+; this one, and `tests/test_wasm.py` hands the bytes to a real WebAssembly runtime where
+; one is installed, which is how we know they are a module and not a near miss:
+;
+;   (module
+;     (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)
+;     (func (export "minus_one") (result i32) i32.const -1))
+;
+;   witness test compiler/wasm.wtn
+;   witness run  compiler/wasm.wtn --grant Alloc,Console
+(module wasm
+  ; --- what there is to encode -----------------------------------------------
+  ; A count or an index that is known to be small. The condition is proved once where the
+  ; value is built and is a fact about the type from then on, which is what keeps the
+  ; walks below free of the guards they would otherwise need at every call. The ceiling
+  ; of 255 is this type's own and not the format's: WebAssembly indices are u32 varints,
+  ; and raising it here is a one-line change the encoder below does not care about.
+  (newtype Index Int
+    (requires n (and (<= 0 n) (<= n 255))))
+
+  ; Four instructions: enough for a function that adds its two arguments and one that
+  ; returns a constant, which between them exercise an operand on the stack, an unsigned
+  ; index, a signed immediate and the end of a body.
+  (enum Instr (LocalGet (local Index)) (I32Const (value I32)) (I32Add) (End))
+
+  (enum Instrs (NoInstrs) (Instrs (head Instr) (rest Instrs)))
+
+  ; Every parameter and every result is an i32, so a signature is two counts. That is the
+  ; whole numeric world of this encoder; a real one would carry a list of value types.
+  (record Func (params Index) (results Index) (name Str) (body Instrs))
+
+  (enum Funcs (NoFuncs) (Funcs (head Func) (rest Funcs)))
+
+  ; --- bytes -----------------------------------------------------------------
+  ; There is no empty-bytes literal in the language, so one is written out here; and no
+  ; byte literal either, which is why every constant below is a number narrowed to `U8`.
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn repeated ((b U8) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) out (repeated b (- left 1) (bytes.concat out (bytes.of b)))))
+
+  ; The condition on `Index` is known wherever a value of the type is, but a refinement
+  ; does not travel out of a record through a `get` and a branch's facts do not travel
+  ; into a call, so `ensures` is how the counts reach the walks that need them bounded.
+  (fn arity ((i Index)) Int
+    (ensures (and (<= 0 result) (<= result 255)))
+    (unwrap i))
+
+  ; --- LEB128 ----------------------------------------------------------------
+  ; One group of a varint: seven bits of payload, and the top bit set when another group
+  ; follows. Masking is total but narrowing is not -- the prover knows only that a
+  ; bitwise result sits somewhere inside its width -- so the `if` is what supplies the
+  ; bound `u8.of` needs. Its other branch cannot be reached from either caller below.
+  (fn group ((part Int) (more Bool)) U8
+    (if (and (<= 0 part) (<= part 127))
+      (if more (u8.of (+ part 128)) (u8.of part))
+      (u8.of 0)))
+
+  ; Unsigned LEB128: the low seven bits, then whatever is left, least significant group
+  ; first, with the last group's top bit clear. A `U32` is five groups at most, so the
+  ; budget cannot run out before the value does.
+  (fn uleb128_from ((w U32) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let part (int.of (bit.and w (u32.of 127)))
+      (let rest (bit.shr w 7)
+        (if (or (<= left 0) (= rest (u32.of 0)))
+          (bytes.concat out (bytes.of (group part false)))
+          (uleb128_from rest (- left 1) (bytes.concat out (bytes.of (group part true))))))))
+
+  (fn uleb128 ((w U32)) Bytes
+    (uses Alloc)
+    (uleb128_from w 5 (no_bytes)))
+
+  ; `bit.shr` fills with zero on a signed width as on any other: the sign bit travels
+  ; along like the rest of them. An arithmetic shift is that movement with the sign put
+  ; back into the seven places it vacated -- the top seven bits of a 32-bit pattern are
+  ; -33554432 read as signed -- and it is what makes -1 shift down to -1 rather than to a
+  ; large positive number, which is what lets the signed walk below ever stop.
+  (fn shifted_down ((w I32)) I32
+    (if (< w (i32.of 0)) (bit.or (bit.shr w 7) (i32.of -33554432)) (bit.shr w 7)))
+
+  ; A signed varint stops when the groups still to come say nothing that the sign bit of
+  ; the group just written does not already say: all zeroes after a group whose sign bit
+  ; is clear, all ones after one whose sign bit is set. `part` is seven bits, so its sign
+  ; bit is set exactly when it is 64 or more.
+  (fn settled ((part Int) (rest I32)) Bool
+    (if (<= 64 part) (= rest (i32.of -1)) (= rest (i32.of 0))))
+
+  ; Signed LEB128. Five groups of seven bits cover an `I32` in either direction, which is
+  ; why the budget is the same as the unsigned one: -2147483648 is 80 80 80 80 78.
+  (fn sleb128_from ((w I32) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (requires (<= 0 left))
+    (let part (int.of (bit.and w (i32.of 127)))
+      (let rest (shifted_down w)
+        (if (or (<= left 0) (settled part rest))
+          (bytes.concat out (bytes.of (group part false)))
+          (sleb128_from rest (- left 1) (bytes.concat out (bytes.of (group part true))))))))
+
+  (fn sleb128 ((w I32)) Bytes
+    (uses Alloc)
+    (sleb128_from w 5 (no_bytes)))
+
+  ; Every length and index in the format is an unsigned varint. A length arrives as an
+  ; `Octets` with no upper bound stated, so the `if` is what makes it a `U32`; a module
+  ; four gigabytes long could not be built in memory here, so the other branch is
+  ; unreachable rather than a fallback anything should rely on.
+  (fn varint ((n Int)) Bytes
+    (uses Alloc)
+    (if (and (<= 0 n) (<= n 4294967295)) (uleb128 (u32.of n)) (uleb128 (u32.of 0))))
+
+  ; --- framing ---------------------------------------------------------------
+  ; A section is its id, its size in bytes, and its contents. The size is why a section
+  ; is built before it is framed: nothing can be written until all of it is known, which
+  ; is also why none of this can stream.
+  (fn section ((id U8) (payload Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of id)
+      (bytes.concat (varint (unwrap (bytes.len payload))) payload)))
+
+  ; A vector is its element count and then the elements. A section body is a vector of
+  ; entries, a name is a vector of bytes, and a signature is two vectors of value types.
+  (fn vector ((items Int) (payload Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat (varint items) payload))
+
+  (fn funcs_count ((fs Funcs)) Int
+    (match fs ((NoFuncs) 0) ((Funcs h rest) (+ 1 (funcs_count rest)))))
+
+  ; --- the type section (id 1) -----------------------------------------------
+  ; A vector of value types, all of them i32, which is the byte 0x7f.
+  (fn i32_vector ((how_many Int)) Bytes
+    (uses Alloc)
+    (requires (<= 0 how_many))
+    (bytes.concat (varint how_many) (repeated (u8.of 127) how_many (no_bytes))))
+
+  ; The 0x60 is the tag that says this is a function type rather than one of the other
+  ; forms the type section was left room for; the two vectors after it are the parameters
+  ; and the results, and in WebAssembly 1.0 the second has at most one element.
+  (fn functype ((f Func)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (u8.of 96))
+      (bytes.concat (i32_vector (arity (get f params)))
+        (i32_vector (arity (get f results))))))
+
+  (fn functypes ((fs Funcs) (out Bytes)) Bytes
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) out)
+      ((Funcs h rest) (functypes rest (bytes.concat out (functype h))))))
+
+  (fn type_section ((fs Funcs)) Bytes
+    (uses Alloc)
+    (section (u8.of 1) (vector (funcs_count fs) (functypes fs (no_bytes)))))
+
+  ; --- the function section (id 3) -------------------------------------------
+  ; One signature per function and no sharing between them, so a function's type index is
+  ; its own index. A real backend would pool identical signatures; nothing downstream
+  ; depends on that, and which index means what is the part that has to be right.
+  (fn typeidxs ((fs Funcs) (at Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) out)
+      ((Funcs h rest) (typeidxs rest (+ at 1) (bytes.concat out (varint at))))))
+
+  (fn function_section ((fs Funcs)) Bytes
+    (uses Alloc)
+    (section (u8.of 3) (vector (funcs_count fs) (typeidxs fs 0 (no_bytes)))))
+
+  ; --- the export section (id 7) ---------------------------------------------
+  ; A name on the wire is its UTF-8 encoding with the length in front. `str.encode` is
+  ; the only way from text to bytes and it cannot fail, so an export name needs nothing
+  ; checked here that the type system has not already settled.
+  (fn wire_name ((text Str)) Bytes
+    (uses Alloc)
+    (let raw (str.encode text) (bytes.concat (varint (unwrap (bytes.len raw))) raw)))
+
+  ; Every function is exported, under the name the description gives it. The 0x00 is the
+  ; kind: a function, rather than a table, a memory or a global.
+  (fn exports ((fs Funcs) (at Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) out)
+      ((Funcs h rest) (exports rest (+ at 1) (bytes.concat out (bytes.concat (wire_name (get h name)) (bytes.concat (bytes.of (u8.of 0)) (varint at))))))))
+
+  (fn export_section ((fs Funcs)) Bytes
+    (uses Alloc)
+    (section (u8.of 7) (vector (funcs_count fs) (exports fs 0 (no_bytes)))))
+
+  ; --- the code section (id 10) ----------------------------------------------
+  ; The opcodes: 0x20 local.get, 0x41 i32.const, 0x6a i32.add, 0x0b end. An index is
+  ; unsigned and a constant is signed, which is the whole reason both varints exist.
+  (fn instr_bytes ((i Instr)) Bytes
+    (uses Alloc)
+    (match i
+      ((LocalGet local) (bytes.concat (bytes.of (u8.of 32)) (varint (arity local))))
+      ((I32Const value) (bytes.concat (bytes.of (u8.of 65)) (sleb128 value)))
+      ((I32Add) (bytes.of (u8.of 106)))
+      ((End) (bytes.of (u8.of 11)))))
+
+  ; The encoder writes the instructions it is given and adds nothing, so a well-formed
+  ; body ends with `(End)` and it is the description that says so. A body without one is
+  ; refused by the loader rather than quietly repaired here, which is the honest place
+  ; for that to be caught until something builds these lists from an IR.
+  (fn expression ((steps Instrs) (out Bytes)) Bytes
+    (uses Alloc)
+    (match steps
+      ((NoInstrs) out)
+      ((Instrs h rest) (expression rest (bytes.concat out (instr_bytes h))))))
+
+  ; A code entry is its own size in front of its body, and a body is its local
+  ; declarations and then its expression. Nothing here declares a local beyond the
+  ; parameters, so the vector of local groups is empty: that is the leading 0x00.
+  (fn code_entry ((f Func)) Bytes
+    (uses Alloc)
+    (let inner (bytes.concat (bytes.of (u8.of 0)) (expression (get f body) (no_bytes)))
+      (bytes.concat (varint (unwrap (bytes.len inner))) inner)))
+
+  (fn code_entries ((fs Funcs) (out Bytes)) Bytes
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) out)
+      ((Funcs h rest) (code_entries rest (bytes.concat out (code_entry h))))))
+
+  (fn code_section ((fs Funcs)) Bytes
+    (uses Alloc)
+    (section (u8.of 10) (vector (funcs_count fs) (code_entries fs (no_bytes)))))
+
+  ; --- the module ------------------------------------------------------------
+  ; The magic number is the four bytes 0x00 'a' 's' 'm' and the version is 1 in four
+  ; little-endian bytes. A loader checks both before it reads anything else.
+  (fn preamble () Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (u8.of 0))
+      (bytes.concat (bytes.of (u8.of 97))
+        (bytes.concat (bytes.of (u8.of 115))
+          (bytes.concat (bytes.of (u8.of 109))
+            (bytes.concat (bytes.of (u8.of 1))
+              (bytes.concat (bytes.of (u8.of 0))
+                (bytes.concat (bytes.of (u8.of 0)) (bytes.of (u8.of 0))))))))))
+
+  ; Sections appear in the order the format lists them -- type 1, function 3, export 7,
+  ; code 10 -- because a loader reads the ids as an increasing sequence and refuses one
+  ; that goes backwards. These four are the smallest set that makes a callable module:
+  ; the type section says what the signatures are, the function section says which
+  ; signature each function has, the code section holds the bodies in the same order, and
+  ; the export section is what gives a caller outside a name to reach them by.
+  (fn encoded ((fs Funcs)) Bytes
+    (uses Alloc)
+    (bytes.concat (preamble)
+      (bytes.concat (type_section fs)
+        (bytes.concat (function_section fs)
+          (bytes.concat (export_section fs) (code_section fs))))))
+
+  ; --- the sample description ------------------------------------------------
+  ; Two functions, because with one the type section would not show that the indices line
+  ; up, and because a second signature taking no parameters is where an empty vector gets
+  ; written. `minus_one` returns a negative constant so the signed varint is exercised by
+  ; the module itself and not only by the vectors below.
+  (fn sample () Funcs
+    (Funcs (make Func (params (Index 2)) (results (Index 1)) (name "add") (body (Instrs (LocalGet (Index 0)) (Instrs (LocalGet (Index 1)) (Instrs (I32Add) (Instrs (End) (NoInstrs)))))))
+      (Funcs (make Func (params (Index 0)) (results (Index 1)) (name "minus_one") (body (Instrs (I32Const (i32.of -1)) (Instrs (End) (NoInstrs)))))
+        (NoFuncs))))
+
+  ; --- reading the answer ----------------------------------------------------
+  ; Hexadecimal, because that is the form a binary format is quoted in. There is no way
+  ; to index a `Str`, so the digits are a decision rather than a lookup.
+  (fn hex_digit ((n Int)) Str
+    (if (= n 0)
+      "0"
+      (if (= n 1)
+        "1"
+        (if (= n 2)
+          "2"
+          (if (= n 3)
+            "3"
+            (if (= n 4)
+              "4"
+              (if (= n 5)
+                "5"
+                (if (= n 6)
+                  "6"
+                  (if (= n 7)
+                    "7"
+                    (if (= n 8)
+                      "8"
+                      (if (= n 9)
+                        "9"
+                        (if (= n 10)
+                          "a"
+                          (if (= n 11)
+                            "b"
+                            (if (= n 12) "c" (if (= n 13) "d" (if (= n 14) "e" "f"))))))))))))))))
+
+  (fn hex_byte ((b U8)) Str
+    (uses Alloc)
+    (concat (hex_digit (int.of (bit.shr b 4))) (hex_digit (int.of (bit.and b (u8.of 15))))))
+
+  (fn byte_of ((data Bytes) (at Int)) U8
+    (match (bytes.at data (Octets at)) ((None) (u8.of 0)) ((Some b) b)))
+
+  (fn hex_from ((data Bytes) (at Int) (left Int) (out Str)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len data)) at))
+      out
+      (hex_from data (+ at 1) (- left 1) (concat out (hex_byte (byte_of data at))))))
+
+  (fn hex ((data Bytes)) Str
+    (uses Alloc)
+    (hex_from data 0 (unwrap (bytes.len data)) ""))
+
+  ; --- what the bytes should be ----------------------------------------------
+  ; The varint vectors are the LEB128 examples the DWARF standard quotes, plus the edges
+  ; of each width and of a single group, which is where an encoder that is nearly right
+  ; stops being right.
+  (test "zero is one group" (str.eq (hex (uleb128 (u32.of 0))) "00"))
+
+  (test "seven bits still fit in one group" (str.eq (hex (uleb128 (u32.of 127))) "7f"))
+
+  (test "the eighth bit starts a second group" (str.eq (hex (uleb128 (u32.of 128))) "8001"))
+
+  (test "624485 is the example everybody quotes" (str.eq (hex (uleb128 (u32.of 624485))) "e58e26"))
+
+  (test "the largest u32 is five groups" (str.eq (hex (uleb128 (u32.of 4294967295))) "ffffffff0f"))
+
+  (test "signed zero is one group" (str.eq (hex (sleb128 (i32.of 0))) "00"))
+
+  (test "minus one is one group of ones" (str.eq (hex (sleb128 (i32.of -1))) "7f"))
+
+  (test "63 fits in a group, because its sign bit is clear" (str.eq (hex (sleb128 (i32.of 63))) "3f"))
+
+  (test "64 does not, because that bit would read as a sign" (str.eq (hex (sleb128 (i32.of 64))) "c000"))
+
+  (test "minus 64 fits" (str.eq (hex (sleb128 (i32.of -64))) "40"))
+
+  (test "minus 65 does not" (str.eq (hex (sleb128 (i32.of -65))) "bf7f"))
+
+  (test "minus 123456 is the signed example everybody quotes" (str.eq (hex (sleb128 (i32.of -123456))) "c0bb78"))
+
+  (test "the largest i32" (str.eq (hex (sleb128 (i32.of 2147483647))) "ffffffff07"))
+
+  (test "the smallest i32, where the sign is carried the whole way" (str.eq (hex (sleb128 (i32.of -2147483648))) "8080808078"))
+
+  ; The preamble is fixed, and every loader checks it before anything else.
+  (test "the magic number and the version" (str.eq (hex (preamble)) "0061736d01000000"))
+
+  ; Section by section as well as whole, so that a failure says which framing is wrong
+  ; rather than only that the module is. Each one reads as id, size, entry count, entries.
+  (test "the type section holds both signatures" (str.eq (hex (type_section (sample))) "010b0260027f7f017f6000017f"))
+
+  (test "the function section points each function at its own signature" (str.eq (hex (function_section (sample))) "0303020001"))
+
+  (test "the export section names both functions" (str.eq (hex (export_section (sample))) "071302036164640000096d696e75735f6f6e650001"))
+
+  (test "the code section holds both bodies" (str.eq (hex (code_section (sample))) "0a0e020700200020016a0b0400417f0b"))
+
+  (test "the whole module, sixty-three bytes of it" (str.eq (hex (encoded (sample))) "0061736d01000000010b0260027f7f017f6000017f0303020001071302036164640000096d696e75735f6f6e6500010a0e020700200020016a0b0400417f0b"))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (hex (encoded (sample))))))

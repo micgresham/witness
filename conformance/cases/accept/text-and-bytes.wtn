@@ -1,0 +1,4 @@
+(module m
+  (fn round_trip ((s Str)) Str
+    (uses Alloc)
+    (match (bytes.decode (str.encode s)) ((Ok back) back) ((Err f) (get f why)))))

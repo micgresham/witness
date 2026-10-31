@@ -1,0 +1,6 @@
+; A dependency is named by content hash, and the codebase does not hold this one. There
+; is no fallback and no search path: a hash either names a definition or it does not.
+(module unresolved_import
+  (use "wtn:0000000000000000000000000000000000000000000000000000000000000000" as helper)
+
+  (fn main () Int (helper 1)))

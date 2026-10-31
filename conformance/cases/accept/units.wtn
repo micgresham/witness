@@ -1,0 +1,6 @@
+(module m
+  (newtype Minutes Int)
+
+  (fn interval () Minutes (Minutes 30))
+
+  (fn as_int ((m Minutes)) Int (unwrap m)))

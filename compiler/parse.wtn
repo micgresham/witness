@@ -1,0 +1,292 @@
+; The second piece of the Witness compiler, in Witness: turning tokens into a tree.
+;
+; compiler/reader.wtn settled whether a reader could be written at all. This settles the
+; question after it: whether the tree a reader feeds can be built in a language where
+; every function is proved to terminate. A parser is where that bites hardest. The
+; obvious shape -- read one form, then carry on from whatever tokens it left over --
+; descends into nothing the checker can see, because what comes back from a recursive
+; call is a new value rather than a part of the old one. So the measure is a budget: a
+; count of steps that falls at every call, bounded above by the number of tokens, which
+; is the same device the reader uses for its walk over bytes.
+;
+; The grammar is s-expressions and nothing else: a leaf is a word, a number or a string,
+; and a node is a parenthesised list. That is the whole of the surface syntax (SPEC 3) --
+; what a particular form *means* is a later pass, and `fn_shape` below is the first step
+; of one: it takes a `(fn name (params) ret body)` apart into those four pieces, or says
+; which piece was not there.
+;
+; A module imports nothing, so the tokens come from a copy of the reader rather than from
+; the reader itself. Nearly all of those definitions are character for character the
+; reader's and hash to the same objects, so the codebase holds one of each however many
+; modules spell them out; that is as close to sharing as Stage 0 gets, and a module
+; system is still Phase 2's work.
+;
+;   witness run compiler/parse.wtn --grant Alloc,Console
+(module parse
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:c8e6358e9de0097130dc8a674ef168139a96e44b0164d15be43ce52b738c2496"
+    as
+    tokens_count)
+
+  (use "wtn:bd1a77044c0d3e518148df62da5228dfc9826268a0e4a2136a54247423e0c966" as text_of)
+
+  ; --- tokens, as the reader leaves them -------------------------------------
+  ; A transcription of compiler/reader.wtn down to `tokens_of`, so that this module can
+  ; be driven from source text. Nothing in this section is new work.
+  ; --- the tree --------------------------------------------------------------
+  ; A leaf keeps the bytes of its token and whether they were quoted. `fn` and `"fn"` are
+  ; different tokens, and a pass that wants a name must be able to tell them apart, so
+  ; `quoted` is carried rather than guessed at later. Words and numbers are not told
+  ; apart: a number is a word that starts with a digit, and which one a position accepts
+  ; is the business of the pass above.
+  (enum Tree (Leaf (text Bytes) (quoted Bool)) (Node (items Trees)))
+
+  (enum Trees (NoTrees) (Trees (head Tree) (rest Trees)))
+
+  (fn trees_count ((ts Trees)) Int
+    (ensures (<= 0 result))
+    (match ts ((NoTrees) 0) ((Trees h rest) (+ 1 (trees_count rest)))))
+
+  (fn trees_empty ((ts Trees)) Bool (match ts ((NoTrees) true) ((Trees h rest) false)))
+
+  ; --- what one step of parsing produced -------------------------------------
+  ; A parse answers two things at once -- the tree it built and the tokens it has not
+  ; read -- and there are no tuples, so each pair is a record. Both are fixed-size
+  ; values, which is why nothing from here down to `parse` needs a heap: the parser
+  ; moves bytes the reader has already allocated and builds nothing whose size its type
+  ; does not fix.
+  (record Parsed (tree Tree) (rest Tokens))
+
+  (record ParsedItems (items Trees) (rest Tokens))
+
+  (fn is_open ((t Token)) Bool
+    (match t
+      ((Open) true)
+      ((Close) false)
+      ((Word text) false)
+      ((Text text) false)
+      ((Number text) false)))
+
+  (fn is_close ((t Token)) Bool
+    (match t
+      ((Open) false)
+      ((Close) true)
+      ((Word text) false)
+      ((Text text) false)
+      ((Number text) false)))
+
+  ; A token that is a form all by itself. The two parentheses are not: one opens a list
+  ; and the other ends one, and both are the caller's business, so each says so rather
+  ; than standing in for a leaf.
+  (fn one_token ((t Token) (after Tokens)) (Result Parsed Fault)
+    (match t
+      ((Open) (Err (fault "parse" "a ( opens a list, which is not one token")))
+      ((Close) (Err (fault "parse" "a ) closes nothing here")))
+      ((Word text) (Ok (make Parsed (tree (Leaf text false)) (rest after))))
+      ((Text text) (Ok (make Parsed (tree (Leaf text true)) (rest after))))
+      ((Number text) (Ok (make Parsed (tree (Leaf text false)) (rest after))))))
+
+  ; One form: a single token, or a `(` and everything up to its `)`. `left` is how many
+  ; steps of parsing may still be taken, and it falls at every call. That is what makes
+  ; the parse finite: a remainder handed back by a call is a value of its own, and
+  ; nothing about it is a part of anything the checker can measure.
+  ;
+  ; The two-way dispatch is also what keeps the budget provable. A `(match ...)` on the
+  ; token here would put every pair of its five variants in scope as a fact that the two
+  ; exclude each other: ten disjunctions, and the prover, which splits into cases, gives
+  ; up on the thousand cases they make before it reaches the one line of arithmetic that
+  ; matters. Asking the token one question instead leaves `left` in plain view.
+  (fn parse_form ((ts Tokens) (left Int)) (Result Parsed Fault)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "parse" "the source nests deeper than its own length allows"))
+      (match ts
+        ((NoTokens) (Err (fault "parse" "the source ended where a form was expected")))
+        ((Tokens h more) (if (is_open h) (noded (parse_items more (- left 1))) (one_token h more))))))
+
+  ; The items of a list, up to and including the `)` that ends it. Running out of tokens
+  ; first is the unclosed `(`, and it is reported here because this is the only place
+  ; that knows a `)` was still owed.
+  ;
+  ; Carrying on after the first item reads better as a function of its own -- take the
+  ; item and the budget, return the whole list -- but that function would be a third
+  ; member of the cycle, and the measure has to fall at every call around a cycle. So it
+  ; would have to spend a step of budget to do nothing but hold a value, and every item
+  ; would cost half again as much. It is written out here instead.
+  (fn parse_items ((ts Tokens) (left Int)) (Result ParsedItems Fault)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "parse" "the source nests deeper than its own length allows"))
+      (match ts
+        ((NoTokens) (Err (fault "parse" "a ( was never closed")))
+        ((Tokens h more) (if (is_close h) (Ok (make ParsedItems (items (NoTrees)) (rest more))) (match (parse_form ts (- left 1)) ((Err f) (Err f)) ((Ok p) (prefixed (get p tree) (parse_items (get p rest) (- left 1))))))))))
+
+  ; One item in front of a list that is already parsed. A failure is passed along as it
+  ; is: the message it carries already says what was wrong further in, and a layer of
+  ; `context` per item would bury that under a chain as long as the list.
+  (fn prefixed ((first Tree) (r (Result ParsedItems Fault))) (Result ParsedItems Fault)
+    (match r
+      ((Err f) (Err f))
+      ((Ok p) (Ok (make ParsedItems (items (Trees first (get p items))) (rest (get p rest)))))))
+
+  ; And a finished list, as the one form its parentheses made of it.
+  (fn noded ((r (Result ParsedItems Fault))) (Result Parsed Fault)
+    (match r
+      ((Err f) (Err f))
+      ((Ok p) (Ok (make Parsed (tree (Node (get p items))) (rest (get p rest)))))))
+
+  ; One token list, one tree. Two steps of budget per token is more than the longest
+  ; chain of calls a list of that length can need -- each step either consumes a token or
+  ; ends a list -- so a source that was going to parse never meets the budget, and one
+  ; that meets it was not going to.
+  (fn parse ((ts Tokens)) (Result Tree Fault)
+    (match (parse_form ts (+ 2 (* 2 (tokens_count ts))))
+      ((Err f) (Err f))
+      ((Ok p) (match (get p rest) ((NoTokens) (Ok (get p tree))) ((Tokens h more) (Err (left_over h)))))))
+
+  ; A `)` left over is the stray close the caller most likely wrote; any other leftover
+  ; is a second form where one was wanted.
+  (fn left_over ((t Token)) Fault
+    (if (is_close t)
+      (fault "parse" "a ) closes nothing here")
+      (fault "parse" "there is more than one form here")))
+
+  (fn parsed_source ((src Bytes)) (Result Tree Fault)
+    (uses Alloc)
+    (parse (tokens_of src)))
+
+  ; Whether a parse refused, which is as much as the propositions at the end of the
+  ; module can ask: two trees cannot be compared without a function to compare them, and
+  ; what those cases are about is which sources are turned away.
+  (fn rejected ((r (Result Tree Fault))) Bool (match r ((Ok t) false) ((Err f) true)))
+
+  ; --- one layer above s-expressions -----------------------------------------
+  ; The first thing a pass over the tree wants: the parts of a definition, named. Nothing
+  ; here recurses, and each step reports the part that was missing rather than offering
+  ; one message for every way a `fn` can be misshapen.
+  (record FnShape (name Bytes) (params Trees) (ret Tree) (clauses Trees) (body Tree))
+
+  (fn leaf_text ((t Tree)) (Option Bytes)
+    (match t ((Leaf text quoted) (if quoted (None) (Some text))) ((Node items) (None))))
+
+  (fn node_items ((t Tree)) (Option Trees)
+    (match t ((Leaf text quoted) (None)) ((Node items) (Some items))))
+
+  (fn is_word ((t Tree) (word Str)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (and (not quoted) (bytes.eq text (str.encode word))))
+      ((Node items) false)))
+
+  (fn fn_shape ((t Tree)) (Result FnShape Fault)
+    (uses Alloc)
+    (match (node_items t)
+      ((None) (Err (fault "fn_shape" "a word on its own is not a definition")))
+      ((Some items) (fn_keyword items))))
+
+  (fn fn_keyword ((items Trees)) (Result FnShape Fault)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (Err (fault "fn_shape" "an empty form is not a definition")))
+      ((Trees h more) (if (is_word h "fn") (fn_named more) (Err (fault "fn_shape" "the form does not begin with fn"))))))
+
+  (fn fn_named ((after Trees)) (Result FnShape Fault)
+    (match after
+      ((NoTrees) (Err (fault "fn_shape" "a fn needs a name")))
+      ((Trees h more) (match (leaf_text h) ((None) (Err (fault "fn_shape" "a fn's name is one word; a generic or label-parameter name is not read yet"))) ((Some text) (fn_params text more))))))
+
+  (fn fn_params ((name Bytes) (after Trees)) (Result FnShape Fault)
+    (match after
+      ((NoTrees) (Err (fault "fn_shape" "a fn needs a parameter list, written () when it has none")))
+      ((Trees h more) (match (node_items h) ((None) (Err (fault "fn_shape" "a fn's parameters are a list"))) ((Some items) (fn_ret name items more))))))
+
+  (fn fn_ret ((name Bytes) (params Trees) (after Trees)) (Result FnShape Fault)
+    (match after
+      ((NoTrees) (Err (fault "fn_shape" "a fn needs a return type")))
+      ((Trees h more) (fn_body name params h more))))
+
+  ; The clauses between the return type and the body -- uses, requires and the rest --
+  ; are forms of their own, so reading them is a pass above this one. What is checked
+  ; here is that the last form is the body, which is the rule `seq` and `let` exist to
+  ; satisfy, and that everything before it is a list, as a clause is. Which clause a list
+  ; is, is not looked at: naming it would take an `Alloc` that nothing else here needs.
+  (fn fn_body ((name Bytes) (params Trees) (ret Tree) (after Trees)) (Result FnShape Fault)
+    (match (last_of after)
+      ((None) (Err (fault "fn_shape" "a fn needs a body")))
+      ((Some body) (if (all_lists (clauses_of after)) (Ok (make FnShape (name name) (params params) (ret ret) (clauses (clauses_of after)) (body body))) (Err (fault "fn_shape" "a fn has exactly one body expression; sequence with seq or let"))))))
+
+  (fn last_of ((ts Trees)) (Option Tree)
+    (match ts
+      ((NoTrees) (None))
+      ((Trees h more) (match more ((NoTrees) (Some h)) ((Trees next rest) (last_of more))))))
+
+  (fn clauses_of ((ts Trees)) Trees
+    (match ts
+      ((NoTrees) (NoTrees))
+      ((Trees h more) (match more ((NoTrees) (NoTrees)) ((Trees next rest) (Trees h (clauses_of more)))))))
+
+  (fn all_lists ((ts Trees)) Bool
+    (match ts
+      ((NoTrees) true)
+      ((Trees h more) (match (node_items h) ((Some items) (all_lists more)) ((None) false)))))
+
+  ; --- showing what was read -------------------------------------------------
+  ; A tree shown and then read again gives the same tree: a quoted leaf is shown quoted.
+  (fn shown ((t Tree)) Str
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (if quoted (concat "\"" (concat (text_of text) "\"")) (text_of text)))
+      ((Node items) (concat "(" (concat (shown_items items) ")")))))
+
+  (fn shown_items ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (if (trees_empty more) (shown h) (concat (shown h) (concat " " (shown_items more)))))))
+
+  (fn tree_line ((src Str)) Str
+    (uses Alloc)
+    (match (parsed_source (str.encode src))
+      ((Ok t) (shown t))
+      ((Err f) (concat "rejected: " (get f why)))))
+
+  (fn shape_line ((src Str)) Str
+    (uses Alloc)
+    (match (parsed_source (str.encode src))
+      ((Ok t) (shape_shown (fn_shape t)))
+      ((Err f) (concat "rejected: " (get f why)))))
+
+  (fn shape_shown ((r (Result FnShape Fault))) Str
+    (uses Alloc)
+    (match r
+      ((Ok s) (concat (text_of (get s name)) (concat " takes " (concat (num.to_str (trees_count (get s params))) (concat ", returns " (concat (shown (get s ret)) (concat ", does " (shown (get s body)))))))))
+      ((Err f) (concat "not a definition: " (get f why)))))
+
+  ; --- what the parser says about itself -------------------------------------
+  ; The tokens are built by hand because a test performs nothing, and encoding text
+  ; allocates.
+  (test "a list of nothing is still a form" (not (rejected (parse (Tokens (Open) (Tokens (Close) (NoTokens)))))))
+
+  (test "an unclosed ( is refused" (rejected (parse (Tokens (Open) (NoTokens)))))
+
+  (test "a ) on its own is refused" (rejected (parse (Tokens (Close) (NoTokens)))))
+
+  (test "two forms are not one tree" (rejected (parse (Tokens (Open) (Tokens (Close) (Tokens (Open) (Tokens (Close) (NoTokens))))))))
+
+  (test "nothing at all is refused" (rejected (parse (NoTokens))))
+
+  ; A definition with a comment in it, a nested parameter list and an operator.
+  (fn sample () Str
+    (uses Alloc)
+    (concat "(fn add ((a Int) (b Int)) Int ; adds\n" "  (+ a b))"))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (tree_line (sample)))
+      (print (shape_line (sample)))
+      (print (tree_line "(test \"it adds\" (= 3 (add 1 2)))"))
+      (print (tree_line "(a (b c)"))
+      (print (tree_line "a)"))
+      (print (shape_line "(fn add ((a Int)))")))))

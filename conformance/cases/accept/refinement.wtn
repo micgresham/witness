@@ -1,0 +1,6 @@
+(module m
+  (newtype Port U16
+    (requires n (<= (u16.of 1) n)))
+
+  (fn parse ((n U16)) (Result Port Fault)
+    (if (<= (u16.of 1) n) (Ok (Port n)) (Err (fault "parse" "not a port")))))

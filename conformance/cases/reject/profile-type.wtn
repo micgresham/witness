@@ -1,0 +1,4 @@
+(module m
+  (fn f ((a Int) (b Int)) Bool
+    (bounds (depth 1) (alloc 0))
+    (< a b)))

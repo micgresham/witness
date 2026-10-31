@@ -1,0 +1,4 @@
+(module m
+  (fn f ((a Int)) Int
+    (uses Console Alloc)
+    (par ((left (print (num.to_str a))) (right (* a a))) right)))

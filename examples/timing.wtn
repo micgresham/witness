@@ -1,0 +1,26 @@
+; Three clocks, three types. A Duration is the difference between two readings of the
+; same clock; reading any of them needs the Clock effect.
+(module timing
+  (newtype Budget Duration)
+
+  (fn over_budget ((taken Duration) (budget Budget)) Bool
+    (< (duration.ms (unwrap budget)) (duration.ms taken)))
+
+  (fn due_at ((start Instant) (budget Budget)) Instant (instant.plus start (unwrap budget)))
+
+  ; A monotonic reading is the right clock for measuring elapsed work: WallTime can jump
+  ; backwards when the host clock is corrected.
+  (fn report ((start Instant) (finish Instant) (budget Budget)) Str
+    (uses Alloc)
+    (let taken (instant.since finish start)
+      (concat (num.to_str (duration.ms taken))
+        (if (over_budget taken budget) "ms (over budget)" "ms"))))
+
+  (fn main () Unit
+    (uses Alloc Clock Console)
+    (let budget (Budget (duration.of_ms (i64.of 500)))
+      (let start (clock.now)
+        (seq
+          (print (report start (instant.plus start (duration.of_ms (i64.of 250))) budget))
+          (print (report start (instant.plus start (duration.of_ms (i64.of 750))) budget))
+          (print (num.to_str (duration.ms (instant.since (due_at start budget) start)))))))))

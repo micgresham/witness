@@ -1,0 +1,204 @@
+; Xtensa machine code: the instructions an ESP32 (Xtensa LX6) backend needs, as bytes.
+;
+; Every instruction here is a three-byte one, none of the two-byte "narrow" forms, so the size
+; of a piece of code never depends on which registers or constants happened to fit them. A
+; three-byte instruction is little-endian, with the major opcode in the low four bits. A
+; register is its number a0 to a15; with the `call0` convention a0 holds the return address
+; and a1 the stack pointer. There are no flags: a conditional branch compares two registers,
+; or one with zero, itself. A branch's distance is from the instruction itself, as in the
+; other encoders, and the four the hardware adds is taken off here.
+;
+; The evidence is tests/test_xtensa.py: Espressif's disassembler reads every encoding back.
+;
+;   witness test compiler/xtensa.wtn
+(module xtensa
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((n I64)) U8 (u8.of (bit.and n (i64.of 255))))
+
+  (fn plus ((a I64) (b I64)) I64 (wrap.add a b))
+
+  (fn at ((n I64) (by U32)) I64 (bit.shl n (int.of by)))
+
+  (fn bits ((n I64) (from U32) (mask I64)) I64 (bit.and (bit.shr n (int.of from)) mask))
+
+  (fn rg ((r U32)) I64 (i64.of (bit.and r (u32.of 15))))
+
+  (fn field ((n I64)) I64 (bit.and n (i64.of 15)))
+
+  ; Three bytes, the least significant first.
+  (fn word3 ((w I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (byte w)) (bytes.concat (bytes.of (byte (bit.shr w 8))) (bytes.of (byte (bit.shr w 16))))))
+
+  ; --- the RRR format: op2 op1 r s t op0, four bits each ----------------------------------
+  (fn rrr ((op2 I64) (op1 I64) (r I64) (s I64) (t I64) (op0 I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (field op2) (u32.of 20)) (plus (at (field op1) (u32.of 16))
+      (plus (at (field r) (u32.of 12)) (plus (at (field s) (u32.of 8)) (plus (at (field t) (u32.of 4)) (field op0))))))))
+
+  (fn reg3 ((op2 I64) (op1 I64) (d U32) (s U32) (t U32)) Bytes
+    (uses Alloc)
+    (rrr op2 op1 (rg d) (rg s) (rg t) (i64.of 0)))
+
+  (fn add_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 0) d s t))
+  (fn sub_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 12) (i64.of 0) d s t))
+  (fn and_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 1) (i64.of 0) d s t))
+  (fn or_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 2) (i64.of 0) d s t))
+  (fn xor_rr ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 3) (i64.of 0) d s t))
+  (fn mull ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 2) d s t))
+  (fn muluh ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 10) (i64.of 2) d s t))
+
+  ; mov is or with the same register twice.
+  (fn mov_rr ((d U32) (s U32)) Bytes (uses Alloc) (or_rr d s s))
+
+  ; neg d, t
+  (fn neg_r ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 6) (i64.of 0) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+
+  ; --- shifts ------------------------------------------------------------------------------
+  ; slli encodes 32 minus the amount, which is 1 to 31.
+  (fn slli ((d U32) (s U32) (by U32)) Bytes
+    (uses Alloc)
+    (let f (wrap.sub (i64.of 32) (i64.of by))
+      (rrr (bits f (u32.of 4) (i64.of 1)) (i64.of 1) (rg d) (rg s) (field f) (i64.of 0))))
+
+  ; srli shifts by 0 to 15 only; extui reaches the rest.
+  (fn srli ((d U32) (t U32) (by U32)) Bytes
+    (uses Alloc)
+    (rrr (i64.of 4) (i64.of 1) (rg d) (field (i64.of by)) (rg t) (i64.of 0)))
+
+  (fn srai ((d U32) (t U32) (by U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of by)
+      (rrr (plus (i64.of 2) (bits n (u32.of 4) (i64.of 1))) (i64.of 1) (rg d) (field n) (rg t) (i64.of 0))))
+
+  ; extui d, t, shift, width: the `width` bits of t from bit `shift` up, width 1 to 16.
+  (fn extui ((d U32) (t U32) (shift U32) (width U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of shift)
+      (rrr (wrap.sub (i64.of width) (i64.of 1)) (plus (i64.of 4) (bits n (u32.of 4) (i64.of 1))) (rg d) (field n) (rg t) (i64.of 0))))
+
+  ; The shifts by a register go through SAR: ssl sets it for a left shift by s, ssr for a
+  ; right one, ssai to a constant. src is the funnel: the low word of (s:t) >> SAR.
+  (fn ssl ((s U32)) Bytes (uses Alloc) (rrr (i64.of 4) (i64.of 0) (i64.of 1) (rg s) (i64.of 0) (i64.of 0)))
+  (fn ssr ((s U32)) Bytes (uses Alloc) (rrr (i64.of 4) (i64.of 0) (i64.of 0) (rg s) (i64.of 0) (i64.of 0)))
+
+  (fn ssai ((by U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of by) (rrr (i64.of 4) (i64.of 0) (i64.of 4) (field n) (bits n (u32.of 4) (i64.of 1)) (i64.of 0))))
+
+  (fn sll ((d U32) (s U32)) Bytes (uses Alloc) (rrr (i64.of 10) (i64.of 1) (rg d) (rg s) (i64.of 0) (i64.of 0)))
+  (fn srl ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 9) (i64.of 1) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+  (fn sra ((d U32) (t U32)) Bytes (uses Alloc) (rrr (i64.of 11) (i64.of 1) (rg d) (i64.of 0) (rg t) (i64.of 0)))
+  (fn src ((d U32) (s U32) (t U32)) Bytes (uses Alloc) (reg3 (i64.of 8) (i64.of 1) d s t))
+
+  ; --- the RRI8 format: an eight-bit immediate above r s t op0 ---------------------------
+  (fn rri8 ((imm I64) (r I64) (s U32) (t U32) (op0 I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and imm (i64.of 255)) (u32.of 16)) (plus (at r (u32.of 12)) (plus (at (rg s) (u32.of 8)) (plus (at (rg t) (u32.of 4)) op0))))))
+
+  ; movi t, -2048 to 2047: the top four bits of the twelve go in the s field.
+  (fn movi ((t U32) (imm I64)) Bytes
+    (uses Alloc)
+    (let v (bit.and imm (i64.of 4095))
+      (word3 (plus (at (bit.and v (i64.of 255)) (u32.of 16)) (plus (at (i64.of 10) (u32.of 12)) (plus (at (bits v (u32.of 8) (i64.of 15)) (u32.of 8)) (plus (at (rg t) (u32.of 4)) (i64.of 2))))))))
+
+  ; addi t, s, -128 to 127
+  (fn addi8 ((t U32) (s U32) (imm I64)) Bytes (uses Alloc) (rri8 imm (i64.of 12) s t (i64.of 2)))
+
+  ; The loads and stores take an unsigned offset, scaled by the size: up to 1020 for a word.
+  (fn l32i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 (bit.shr off 2) (i64.of 2) s t (i64.of 2)))
+  (fn s32i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 (bit.shr off 2) (i64.of 6) s t (i64.of 2)))
+  (fn l8ui ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 off (i64.of 0) s t (i64.of 2)))
+  (fn s8i ((t U32) (s U32) (off I64)) Bytes (uses Alloc) (rri8 off (i64.of 4) s t (i64.of 2)))
+
+  ; --- branches ----------------------------------------------------------------------------
+  ; A comparison of two registers, -124 to 131 bytes away: beq 1, bne 9, blt 2, bge 10,
+  ; bltu 3, bgeu 11. Each condition's opposite is the same number with the eight flipped.
+  (fn bcmp ((cond U32) (s U32) (t U32) (off I64)) Bytes
+    (uses Alloc)
+    (rri8 (wrap.sub off (i64.of 4)) (i64.of (bit.and cond (u32.of 15))) s t (i64.of 7)))
+
+  (fn beq ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 1) s t off))
+  (fn bne ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 9) s t off))
+  (fn blt ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 2) s t off))
+  (fn bge ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 10) s t off))
+  (fn bltu ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 3) s t off))
+  (fn bgeu ((s U32) (t U32) (off I64)) Bytes (uses Alloc) (bcmp (u32.of 11) s t off))
+
+  ; A test of one bit: bbci takes the branch when bit `n` of s is clear, bbsi when it is set.
+  (fn bbi ((r I64) (s U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (let b (i64.of n) (rri8 (wrap.sub off (i64.of 4)) (plus r (bits b (u32.of 4) (i64.of 1))) s (bit.and n (u32.of 15)) (i64.of 7))))
+
+  (fn bbci ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (bbi (i64.of 6) s n off))
+  (fn bbsi ((s U32) (n U32) (off I64)) Bytes (uses Alloc) (bbi (i64.of 14) s n off))
+
+  ; A comparison with zero reaches -2044 to 2051 bytes: beqz 0, bnez 1.
+  (fn bz ((m I64) (s U32) (off I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (wrap.sub off (i64.of 4)) (i64.of 4095)) (u32.of 12)) (plus (at (rg s) (u32.of 8)) (plus (at m (u32.of 6)) (i64.of 22))))))
+
+  (fn beqz ((s U32) (off I64)) Bytes (uses Alloc) (bz (i64.of 0) s off))
+  (fn bnez ((s U32) (off I64)) Bytes (uses Alloc) (bz (i64.of 1) s off))
+
+  ; j reaches 128 KiB either way.
+  (fn j ((off I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (wrap.sub off (i64.of 4)) (i64.of 262143)) (u32.of 6)) (i64.of 6))))
+
+  ; call0 lands on a word boundary: its distance, a multiple of four, is counted from the
+  ; word holding the call, plus four. The return address goes in a0.
+  (fn call0 ((rel I64)) Bytes
+    (uses Alloc)
+    (word3 (plus (at (bit.and (bit.sar rel 2) (i64.of 262143)) (u32.of 6)) (i64.of 5))))
+
+  ; A call0 from `at` to `target`, both counted from the same place.
+  (fn call0_to ((target I64) (at I64)) Bytes
+    (uses Alloc)
+    (call0 (wrap.sub (wrap.sub target (bit.and at (i64.of -4))) (i64.of 4))))
+
+  (fn callx0 ((s U32)) Bytes (uses Alloc) (rrr (i64.of 0) (i64.of 0) (i64.of 0) (rg s) (i64.of 12) (i64.of 0)))
+
+  (fn jx ((s U32)) Bytes (uses Alloc) (rrr (i64.of 0) (i64.of 0) (i64.of 0) (rg s) (i64.of 10) (i64.of 0)))
+
+  (fn ret () Bytes (uses Alloc) (word3 (i64.of 128)))
+
+  (fn nop () Bytes (uses Alloc) (word3 (i64.of 8432)))
+
+  ; An illegal instruction, which is how a trap is raised: three zero bytes.
+  (fn ill () Bytes (uses Alloc) (word3 (i64.of 0)))
+
+  (fn simcall () Bytes (uses Alloc) (word3 (i64.of 20736)))
+
+  ; --- constants ---------------------------------------------------------------------------
+  ; The low 32 bits of n, read as a signed number.
+  (fn signed32 ((n I64)) I64
+    (let v (bit.and n (i64.of 4294967295))
+      (if (< v (i64.of 2147483648)) v (wrap.sub v (i64.of 4294967296)))))
+
+  (fn fits12 ((v I64)) Bool (and (<= (i64.of -2048) v) (<= v (i64.of 2047))))
+
+  ; The low byte of v as a signed number, -128 to 127.
+  (fn low_signed ((v I64)) I64 (wrap.sub (bit.xor (bit.and v (i64.of 255)) (i64.of 128)) (i64.of 128)))
+
+  ; A constant too wide for movi is built a byte at a time from the top: v is 256 times what
+  ; the rest builds, plus a signed low byte. Three rounds take any 32 bits down to movi's twelve.
+  (fn built ((d U32) (v I64) (left U32)) Bytes
+    (uses Alloc)
+    (if (or (fits12 v) (<= left (u32.of 0)))
+      (movi d v)
+      (let b (low_signed v)
+        (bytes.concat (built d (bit.sar (wrap.sub v b) 8) (- left (u32.of 1)))
+          (bytes.concat (slli d d (u32.of 8)) (if (= b (i64.of 0)) (no_bytes) (addi8 d d b)))))))
+
+  ; Any 32-bit constant, in one register: three bytes up to twenty-one, by its value alone.
+  (fn mov_imm ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (built d (signed32 n) (u32.of 3)))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/xtensa.wtn is exercised by tests/test_xtensa.py")))

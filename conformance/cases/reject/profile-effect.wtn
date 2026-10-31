@@ -1,0 +1,5 @@
+(module m
+  (fn f ((a Str) (b Str)) Str
+    (uses Alloc)
+    (bounds (depth 1) (alloc 1))
+    (concat a b)))

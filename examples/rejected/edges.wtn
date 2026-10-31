@@ -1,0 +1,18 @@
+; Rejected: three ways of being careless at an edge.
+(module edges
+  (record SiteV1 (schema Site 1) (code Str))
+
+  ; A version-1 writer does not write `region`, so a version-2 reader cannot require it.
+  (record SiteV2 (schema Site 2) (code Str) (region Str))
+
+  (patch SitePatch SiteV1)
+
+  (foreign read_env ((key Str)) Str)
+
+  ; A patch is not the record it patches: that is the whole point of it being a type.
+  (fn swap ((p SitePatch)) SiteV1 p)
+
+  ; Foreign results are unverified until something here checks them.
+  (fn trusting ((key Str)) Str
+    (uses Foreign)
+    (read_env key)))

@@ -1,0 +1,23 @@
+; Str is always valid text; Bytes is raw. Encoding is safe, decoding can fail, and a
+; length says which unit it counts in.
+(module text
+  (fn frame_fits ((s Str)) Bool (<= (unwrap (str.octets s)) 1500))
+
+  (fn round_trip ((s Str)) Str
+    (uses Alloc)
+    (match (bytes.decode (str.encode s))
+      ((Ok back) back)
+      ((Err f) (concat "undecodable: " (get f why)))))
+
+  ; A character count and a byte count are different types, so they cannot be swapped.
+  (fn report ((s Str)) Str
+    (uses Alloc)
+    (concat (num.to_str (unwrap (str.chars s)))
+      (concat " chars, " (concat (num.to_str (unwrap (str.octets s))) " bytes"))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (report "héllo"))
+      (print (round_trip "héllo"))
+      (print (if (frame_fits "short") "fits" "too long")))))

@@ -1,0 +1,8 @@
+(module m
+  (record Update (schema Update 1) (site Str))
+
+  (channel Updates Update (accepts tenant:acme))
+
+  (fn publish ((u (label tenant:acme Update))) Unit
+    (uses Ipc)
+    (send Updates u)))

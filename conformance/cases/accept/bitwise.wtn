@@ -1,0 +1,64 @@
+(module m
+  (fn masked ((a U8) (b U8)) U8 (bit.and a b))
+
+  (fn either ((a U8) (b U8)) U8 (bit.or a b))
+
+  (fn different ((a U8) (b U8)) U8 (bit.xor a b))
+
+  ; The same complement on a signed and an unsigned width of the same size: the bits are
+  ; the same pattern, and the value they name is not.
+  (fn flipped_unsigned ((a U8)) U8 (bit.not a))
+
+  (fn flipped_signed ((a I8)) I8 (bit.not a))
+
+  ; A shift count is a plain Int, so the same count serves every width.
+  (fn up ((a U32) (by Int)) U32 (bit.shl a by))
+
+  (fn down ((a U32) (by Int)) U32 (bit.shr a by))
+
+  ; The arithmetic shift fills from the top bit of the width: the sign of a signed value,
+  ; and the top bit of an unsigned one, which is what a signed varint wants.
+  (fn sar32 ((a I32) (by Int)) I32 (bit.sar a by))
+
+  (fn sar8 ((a U8) (by Int)) U8 (bit.sar a by))
+
+  (fn sar64 ((a I64) (by Int)) I64 (bit.sar a by))
+
+  (test "and keeps the bits both have" (= (u8.of 12) (masked (u8.of 60) (u8.of 13))))
+
+  (test "or keeps the bits either has" (= (u8.of 61) (either (u8.of 60) (u8.of 13))))
+
+  (test "xor keeps the bits exactly one has" (= (u8.of 49) (different (u8.of 60) (u8.of 13))))
+
+  (test "complementing a U8 counts upwards" (= (u8.of 255) (flipped_unsigned (u8.of 0))))
+
+  (test "complementing an I8 of the same bits is -1" (= (i8.of -1) (flipped_signed (i8.of 0))))
+
+  (test "and the top of an I8 is its most negative value" (= (i8.of -128) (flipped_signed (i8.of 127))))
+
+  (test "a shift moves bits" (= (u32.of 65536) (up (u32.of 1) 16)))
+
+  (test "and back again" (= (u32.of 1) (down (u32.of 65536) 16)))
+
+  ; Out of range in either direction, and the operation stays total.
+  (test "a count at the width shifts everything out" (= (u32.of 0) (up (u32.of 1) 32)))
+
+  (test "so does a negative count" (= (u32.of 0) (down (u32.of 65536) -1)))
+
+  (test "sar keeps the sign of a negative value" (= (i32.of -4) (sar32 (i32.of -16) 2)))
+
+  (test "sar of a positive value is a shift" (= (i32.of 4) (sar32 (i32.of 16) 2)))
+
+  (test "a count past the width leaves only the sign, all ones" (= (i32.of -1) (sar32 (i32.of -5) 40)))
+
+  (test "or all zeros" (= (i32.of 0) (sar32 (i32.of 5) 40)))
+
+  (test "a negative count leaves only the sign too" (= (i32.of -1) (sar32 (i32.of -8) -1)))
+
+  (test "an unsigned width fills from its top bit" (= (u8.of 240) (sar8 (u8.of 128) 3)))
+
+  (test "and from zero when the top bit is clear" (= (u8.of 8) (sar8 (u8.of 64) 3)))
+
+  (test "sar at the full width" (= (i64.of -128) (sar64 (i64.of -1024) 3)))
+
+  (test "sar by nothing is the value" (= (i32.of -7) (sar32 (i32.of -7) 0))))

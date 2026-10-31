@@ -1,0 +1,6 @@
+(module m
+  (fn tree ((n Int)) Str
+    (uses Alloc)
+    (requires (and (<= 0 n) (<= n 10)))
+    (bounds (depth 11) (alloc 11))
+    (if (<= n 0) "x" (concat (tree (- n 1)) (tree (- n 1))))))

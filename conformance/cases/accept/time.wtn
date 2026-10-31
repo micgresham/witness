@@ -1,0 +1,2 @@
+(module m
+  (fn elapsed ((a Instant) (b Instant)) I64 (duration.ms (instant.since b a))))

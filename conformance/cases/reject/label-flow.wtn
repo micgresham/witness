@@ -1,0 +1,2 @@
+(module m
+  (fn f ((s (label Secret Str))) Str s))

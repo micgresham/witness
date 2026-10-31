@@ -1,0 +1,2 @@
+(module m
+  (fn both ((a Int) (b Int)) Int (par ((left (* a a)) (right (* b b))) (+ left right))))

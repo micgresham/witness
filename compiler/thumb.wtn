@@ -1,0 +1,229 @@
+; Thumb-2 machine code: the instructions a Cortex-M (ARMv7-M) backend needs, as bytes.
+;
+; Every instruction here is written in its 32-bit form, so each is four bytes and a jump's
+; distance never depends on which instructions a register number happened to allow in the
+; 16-bit forms. A 32-bit instruction is two little-endian halfwords, the first one first.
+; A register is its number (r13 is sp, r14 lr, r15 pc). The flags are set only by the
+; instructions whose names say so (`adds`, `subs`, `cmp`), and a branch to a condition reads
+; them; a branch's distance is from the instruction itself, as in the RISC-V encoders, and
+; the extra four the hardware adds is taken off here.
+;
+; The evidence is tests/test_thumb.py: capstone reads every encoding back.
+;
+;   witness test compiler/thumb.wtn
+(module thumb
+  (fn no_bytes () Bytes
+    (uses Alloc)
+    (str.encode ""))
+
+  (fn byte ((n I64)) U8 (u8.of (bit.and n (i64.of 255))))
+
+  ; A halfword, least significant byte first.
+  (fn half ((h I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (bytes.of (byte h)) (bytes.of (byte (bit.shr h 8)))))
+
+  (fn wide ((a I64) (b I64)) Bytes
+    (uses Alloc)
+    (bytes.concat (half a) (half b)))
+
+  (fn plus ((a I64) (b I64)) I64 (wrap.add a b))
+
+  (fn at ((n I64) (by U32)) I64 (bit.shl n (int.of by)))
+
+  (fn bits ((n I64) (from U32) (mask I64)) I64 (bit.and (bit.shr n (int.of from)) mask))
+
+  (fn rg ((r U32)) I64 (i64.of (bit.and r (u32.of 15))))
+
+  ; --- data processing, register ---------------------------------------------------------
+  ; AND 0, ORR 2, EOR 4, ADD 8, ADC 10, SBC 11, SUB 13, RSB 14; `s` is 1 to set the flags.
+  (fn dp ((op I64) (s I64) (d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 59904) (plus (at op (u32.of 5)) (plus (at s (u32.of 4)) (rg n))))
+          (plus (at (rg d) (u32.of 8)) (rg m))))
+
+  (fn add_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 8) (i64.of 0) d n m))
+  (fn adds_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 8) (i64.of 1) d n m))
+  (fn adc_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 10) (i64.of 0) d n m))
+  (fn sub_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 13) (i64.of 0) d n m))
+  (fn subs_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 13) (i64.of 1) d n m))
+  (fn sbc_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 11) (i64.of 0) d n m))
+  (fn and_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 0) (i64.of 0) d n m))
+  (fn orr_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 2) (i64.of 0) d n m))
+  (fn eor_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 4) (i64.of 0) d n m))
+  (fn rsb_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 14) (i64.of 0) d n m))
+
+  ; cmp n, m is subs with no destination.
+  (fn cmp_rr ((n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 13) (i64.of 1) (u32.of 15) n m))
+
+  (fn mov_rr ((d U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 2) (i64.of 0) d (u32.of 15) m))
+
+
+  (fn adcs_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 10) (i64.of 1) d n m))
+  (fn sbcs_rr ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 11) (i64.of 1) d n m))
+
+  ; not: mvn d, m
+  (fn mvn_rr ((d U32) (m U32)) Bytes (uses Alloc) (dp (i64.of 3) (i64.of 0) d (u32.of 15) m))
+
+  ; The same operations with an eight-bit immediate in place of the second register.
+  (fn dpi ((op I64) (s I64) (d U32) (n U32) (imm I64)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 61440) (plus (at op (u32.of 5)) (plus (at s (u32.of 4)) (rg n))))
+          (plus (at (rg d) (u32.of 8)) (bit.and imm (i64.of 255)))))
+
+  (fn adds_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 8) (i64.of 1) d n imm))
+  (fn adc_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 10) (i64.of 0) d n imm))
+  (fn subs_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 13) (i64.of 1) d n imm))
+  (fn orr_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 2) (i64.of 0) d n imm))
+  (fn and_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 0) (i64.of 0) d n imm))
+  (fn rsb_i ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 14) (i64.of 0) d n imm))
+  (fn cmp_i ((n U32) (imm I64)) Bytes (uses Alloc) (dpi (i64.of 13) (i64.of 1) (u32.of 15) n imm))
+
+  ; A call through a register, padded to four bytes.
+  (fn blx_r ((m U32)) Bytes (uses Alloc) (bytes.concat (half (plus (i64.of 18304) (at (rg m) (u32.of 3)))) (half (i64.of 48896))))
+
+  ; --- shifts ----------------------------------------------------------------------------------------
+  ; By an immediate: a move with a shifted operand; type 0 lsl, 1 lsr, 2 asr.
+  (fn shift_i ((kind I64) (d U32) (m U32) (by U32)) Bytes
+    (uses Alloc)
+    (let n (i64.of by)
+      (wide (i64.of 59983)
+            (plus (plus (at (bits n (u32.of 2) (i64.of 7)) (u32.of 12)) (at (rg d) (u32.of 8)))
+                  (plus (at (bits n (u32.of 0) (i64.of 3)) (u32.of 6)) (plus (at kind (u32.of 4)) (rg m)))))))
+
+  (fn lsl_i ((d U32) (m U32) (by U32)) Bytes (uses Alloc) (shift_i (i64.of 0) d m by))
+  (fn lsr_i ((d U32) (m U32) (by U32)) Bytes (uses Alloc) (shift_i (i64.of 1) d m by))
+  (fn asr_i ((d U32) (m U32) (by U32)) Bytes (uses Alloc) (shift_i (i64.of 2) d m by))
+
+  ; By a register: the count is the bottom byte of m.
+  (fn shift_r ((kind I64) (d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 64000) (plus (at kind (u32.of 5)) (rg n)))
+          (plus (i64.of 61440) (plus (at (rg d) (u32.of 8)) (rg m)))))
+
+  (fn lsl_r ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (shift_r (i64.of 0) d n m))
+  (fn lsr_r ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (shift_r (i64.of 1) d n m))
+  (fn asr_r ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (shift_r (i64.of 2) d n m))
+
+  ; --- multiply and divide ------------------------------------------------------------------
+  (fn mul_rr ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 64256) (rg n)) (plus (i64.of 61440) (plus (at (rg d) (u32.of 8)) (rg m)))))
+
+  ; The 64-bit product of two unsigned words: low word in lo, high in hi.
+  (fn umull ((lo U32) (hi U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 64416) (rg n)) (plus (at (rg lo) (u32.of 12)) (plus (at (rg hi) (u32.of 8)) (rg m)))))
+
+  (fn udiv ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 64432) (rg n)) (plus (i64.of 61680) (plus (at (rg d) (u32.of 8)) (rg m)))))
+
+  (fn sdiv ((d U32) (n U32) (m U32)) Bytes
+    (uses Alloc)
+    (wide (plus (i64.of 64400) (rg n)) (plus (i64.of 61680) (plus (at (rg d) (u32.of 8)) (rg m)))))
+
+  ; --- immediates -------------------------------------------------------------------------------------
+  ; movw sets the low sixteen bits and clears the rest; movt sets the high sixteen.
+  (fn mov16 ((base I64) (d U32) (v I64)) Bytes
+    (uses Alloc)
+    (wide (plus base (plus (at (bits v (u32.of 11) (i64.of 1)) (u32.of 10)) (bits v (u32.of 12) (i64.of 15))))
+          (plus (at (bits v (u32.of 8) (i64.of 7)) (u32.of 12)) (plus (at (rg d) (u32.of 8)) (bits v (u32.of 0) (i64.of 255))))))
+
+  (fn movw ((d U32) (v I64)) Bytes (uses Alloc) (mov16 (i64.of 62016) d v))
+  (fn movt ((d U32) (v I64)) Bytes (uses Alloc) (mov16 (i64.of 62144) d v))
+
+  ; d = n + v or n - v for a twelve-bit v.
+  (fn addsub12 ((base I64) (d U32) (n U32) (v I64)) Bytes
+    (uses Alloc)
+    (wide (plus base (plus (at (bits v (u32.of 11) (i64.of 1)) (u32.of 10)) (rg n)))
+          (plus (at (bits v (u32.of 8) (i64.of 7)) (u32.of 12)) (plus (at (rg d) (u32.of 8)) (bits v (u32.of 0) (i64.of 255))))))
+
+  (fn addw ((d U32) (n U32) (v I64)) Bytes (uses Alloc) (addsub12 (i64.of 61952) d n v))
+  (fn subw ((d U32) (n U32) (v I64)) Bytes (uses Alloc) (addsub12 (i64.of 62112) d n v))
+
+  ; A constant: movw, and movt when the high half is not zero.
+  (fn mov_imm ((d U32) (n I64)) Bytes
+    (uses Alloc)
+    (let low (bit.and n (i64.of 65535))
+      (let high (bit.and (bit.shr n 16) (i64.of 65535))
+        (if (= high (i64.of 0)) (movw d low) (bytes.concat (movw d low) (movt d high))))))
+
+  ; --- memory --------------------------------------------------------------------------------------------
+  ; A load or store at n plus a twelve-bit offset, or n minus an eight-bit one.
+  (fn mem12 ((base I64) (t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (wide (plus base (rg n)) (plus (at (rg t) (u32.of 12)) (bits off (u32.of 0) (i64.of 4095)))))
+
+  (fn mem8m ((base I64) (t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (wide (plus base (rg n)) (plus (at (rg t) (u32.of 12)) (plus (i64.of 3072) (bits (wrap.sub (i64.of 0) off) (u32.of 0) (i64.of 255))))))
+
+  ; Offsets from -255 to 4095; anything else is the caller's to build with an address.
+  (fn ldr ((t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (if (< off (i64.of 0)) (mem8m (i64.of 63568) t n off) (mem12 (i64.of 63696) t n off)))
+
+  (fn str ((t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (if (< off (i64.of 0)) (mem8m (i64.of 63552) t n off) (mem12 (i64.of 63680) t n off)))
+
+  (fn ldrb ((t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (if (< off (i64.of 0)) (mem8m (i64.of 63504) t n off) (mem12 (i64.of 63632) t n off)))
+
+  (fn strb ((t U32) (n U32) (off I64)) Bytes
+    (uses Alloc)
+    (if (< off (i64.of 0)) (mem8m (i64.of 63488) t n off) (mem12 (i64.of 63616) t n off)))
+
+  ; --- control ----------------------------------------------------------------------------------------------
+  (fn insn_size () U32 (u32.of 4))
+
+  ; Condition codes for bcond.
+  (fn cc_eq () U32 (u32.of 0))
+  (fn cc_ne () U32 (u32.of 1))
+  (fn cc_hs () U32 (u32.of 2))
+  (fn cc_lo () U32 (u32.of 3))
+  (fn cc_hi () U32 (u32.of 8))
+  (fn cc_ls () U32 (u32.of 9))
+  (fn cc_ge () U32 (u32.of 10))
+  (fn cc_lt () U32 (u32.of 11))
+  (fn cc_gt () U32 (u32.of 12))
+  (fn cc_le () U32 (u32.of 13))
+
+  ; The condition that holds exactly when `c` does not: the low bit flips.
+  (fn not_cond ((c U32)) U32 (bit.xor c (u32.of 1)))
+
+  ; b and bl: the distance from the instruction, even, within sixteen megabytes.
+  (fn long_jump ((second I64) (off I64)) Bytes
+    (uses Alloc)
+    (let d (wrap.sub off (i64.of 4))
+      (let s (bits d (u32.of 24) (i64.of 1))
+        (let j1 (bit.xor (i64.of 1) (bit.xor (bits d (u32.of 23) (i64.of 1)) s))
+          (let j2 (bit.xor (i64.of 1) (bit.xor (bits d (u32.of 22) (i64.of 1)) s))
+            (wide (plus (i64.of 61440) (plus (at s (u32.of 10)) (bits d (u32.of 12) (i64.of 1023))))
+                  (plus second (plus (at j1 (u32.of 13)) (plus (at j2 (u32.of 11)) (bits d (u32.of 1) (i64.of 2047)))))))))))
+
+  (fn b ((off I64)) Bytes (uses Alloc) (long_jump (i64.of 36864) off))
+  (fn bl ((off I64)) Bytes (uses Alloc) (long_jump (i64.of 53248) off))
+
+  ; A conditional branch within a megabyte.
+  (fn bcond ((c U32) (off I64)) Bytes
+    (uses Alloc)
+    (let d (wrap.sub off (i64.of 4))
+      (let s (bits d (u32.of 20) (i64.of 1))
+        (wide (plus (i64.of 61440) (plus (at s (u32.of 10)) (plus (at (i64.of c) (u32.of 6)) (bits d (u32.of 12) (i64.of 63)))))
+              (plus (i64.of 32768) (plus (at (bits d (u32.of 18) (i64.of 1)) (u32.of 13)) (plus (at (bits d (u32.of 19) (i64.of 1)) (u32.of 11)) (bits d (u32.of 1) (i64.of 2047)))))))))
+
+  ; Return: bx lr, padded with a nop to four bytes.
+  (fn ret () Bytes (uses Alloc) (bytes.concat (half (i64.of 18288)) (half (i64.of 48896))))
+
+  (fn nop () Bytes (uses Alloc) (bytes.concat (half (i64.of 48896)) (half (i64.of 48896))))
+
+  (fn bkpt () Bytes (uses Alloc) (bytes.concat (half (i64.of 48640)) (half (i64.of 48896))))
+
+  (fn svc ((n U32)) Bytes (uses Alloc) (bytes.concat (half (plus (i64.of 57088) (i64.of (bit.and n (u32.of 255))))) (half (i64.of 48896))))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/thumb.wtn is exercised by tests/test_thumb.py")))

@@ -1,0 +1,26 @@
+; Arrays: built by pushing, read by index, measured by length. Reading is total, so an
+; index that is not there answers nothing and no proof stands between a program and an
+; element. An array is a value: pushing answers a new one rather than changing the old.
+(module arrays
+  (fn (or_else T) ((o (Option T)) (fallback T)) T (match o ((None) fallback) ((Some v) v)))
+
+  (fn three () (Array Int)
+    (uses Alloc)
+    (array.push (array.push (array.push (array.empty) 10) 20) 30))
+
+  (fn size ((a (Array Int))) Int (unwrap (array.len a)))
+
+  (fn nth ((a (Array Int)) (i Int)) Int (or_else (array.at a (Count i)) (- 0 1)))
+
+  ; What an array holds is what comes back out of it, whatever that is.
+  (fn (first T) ((a (Array T)) (fallback T)) T (or_else (array.at a (Count 0)) fallback))
+
+  (test "pushing three makes three" (= 3 (size (three))))
+
+  (test "the second is the second" (= 20 (nth (three) 1)))
+
+  (test "there is no tenth" (= (- 0 1) (nth (three) 9)))
+
+  (test "an empty array holds nothing" (= 0 (size (array.empty))))
+
+  (test "what goes in comes out" (str.eq "a" (first (array.push (array.empty) "a") "?"))))

@@ -1,0 +1,4 @@
+(module m
+  (fn f ((n Str)) Str
+    (ensures (str.eq result (env.secret "KEY")))
+    n))

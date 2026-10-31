@@ -1,0 +1,20 @@
+; REJECTED. Four ways labelled data tries to escape.
+(module leak
+  ; unsanitised text sent straight to the network
+  (fn ask ((prompt (label Unsanitised Str))) Str
+    (uses Net)
+    (net.send "azure-openai" prompt))
+
+  ; a secret written to a log
+  (fn debug () Unit
+    (uses Env Log)
+    (log (env.secret "API_KEY")))
+
+  ; a secret laundered through an unlabelled return type
+  (fn launder ((key (label Secret Str))) Str key)
+
+  ; a release the signature does not admit to
+  (fn sneaky ((key (label Secret Str))) Str (declassify Secret key))
+
+  ; branching on a secret makes the result secret too
+  (fn probe ((flag (label Secret Bool))) Int (if flag 1 0)))

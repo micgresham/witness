@@ -1,0 +1,4 @@
+(module m
+  (fn tenth () F32 (f32.of 0.1))
+
+  (fn ratio ((a F32) (b F32)) F32 (match (num.div a b) ((None) (f32.of 0.0)) ((Some q) q))))

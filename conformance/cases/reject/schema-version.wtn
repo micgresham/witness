@@ -1,0 +1,2 @@
+(module m
+  (record R (schema S 0) (a Str)))

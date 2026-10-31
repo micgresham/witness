@@ -1,0 +1,2 @@
+(module m
+  (fn (or_else T) ((o (Option T)) (fallback T)) T (match o ((None) fallback) ((Some v) v))))

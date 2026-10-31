@@ -1,0 +1,4 @@
+(module m
+  (record R (a Int) (b Int))
+
+  (fn f () R (make R (a 1))))

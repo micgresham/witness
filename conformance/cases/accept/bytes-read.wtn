@@ -1,0 +1,26 @@
+; Reading bytes: the nth one, a slice of them, and one built from a number. All three
+; are total -- an index out of range answers nothing, and a slice is clamped -- so none
+; of them carries an obligation.
+(module bytes_read
+  (fn at ((b Bytes) (i Int)) Int
+    (match (bytes.at b (Octets i)) ((None) (- 0 1)) ((Some x) (int.of x))))
+
+  (fn middle ((b Bytes)) Bytes
+    (uses Alloc)
+    (bytes.slice b (Octets 1) (Octets 3)))
+
+  (fn one ((n U8)) Bytes
+    (uses Alloc)
+    (bytes.of n))
+
+  (fn text ((b Bytes)) Str
+    (uses Alloc)
+    (match (bytes.decode b) ((Ok s) s) ((Err e) "")))
+
+  (test "the second byte of abc is b" (= 98 (at (str.encode "abc") 1)))
+
+  (test "there is no tenth byte of abc" (= (- 0 1) (at (str.encode "abc") 9)))
+
+  (test "a slice is what is between" (str.eq "el" (text (middle (str.encode "hello")))))
+
+  (test "a byte is a byte" (str.eq "A" (text (one (u8.of 65))))))

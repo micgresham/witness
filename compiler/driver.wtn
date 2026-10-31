@@ -1,0 +1,170 @@
+; The compiler as one function a host can call: Witness source in, a module out.
+;
+; A host puts the source in memory as a string, calls `drive`, and reads the result back
+; as bytes. A module starts with the four bytes 0x00 'a' 's' 'm'; anything else is the
+; text of the reason the source was not compiled. Compiled by itself this is the compiler
+; as a WebAssembly module (docs/ROADMAP.md, Phase 2), and the module it writes for its own
+; source is the fixpoint the exit criterion asks for.
+;
+;   witness run compiler/driver.wtn --grant Alloc,Console
+(module driver
+  (use "wtn:04852b0bc4bbba2ffbb78275cfe77192e76f28ec12528c975b2558092906f0f9" as arm_elf_of)
+
+  (use "wtn:d36fcd57bb45f66081e3fb1a111df0b2308c6017a061dc178703caa341226978" as riscv_elf_of)
+
+  (use "wtn:ae45c0cf44087f29bdab366b90af80ad265eb70acda993390390a4fe89558071" as thumb_elf_of)
+
+  (use "wtn:378401454ee82e571f8614440a5c21d232596590e5be4a062b1fe7113fd5af7d" as xtensa_elf_of)
+
+  (use "wtn:5b123f88fe4b7128f93dd24d20649bd7d4698fd584f7abd052dcf27110bda4b1" as xtensa_s3_elf_of)
+
+  (use "wtn:29a5f535e1de9e8ff808a5b5d23ec9b246d8156f52ad0a3817047a07579323ac" as checked_bound)
+
+  (use "wtn:88c73db9a8893b323b01e30609eff81feeebad5f82c12f7e62fdf716aaf9723f" as checked_bound_in)
+
+  (use "wtn:61b215edb2c7025de42e889ce2b3e73ee789f2b9ff345a30b6aad643572f3b6a" as esp32_room)
+
+  (use "wtn:3b5197a59216c6648cb24412ef872cfb200d1b64f7af3e49c6030b2fd5fdb227" as esp32s3_room)
+
+  (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
+
+  (use "wtn:5650ba4318f0f6dae18f381fa6944f08d89f44ecc80bcc9d70ed3a067dae097f" as module_ir)
+
+  (use "wtn:dc55715dcac24a1489129d0f2e28460470bbabf0de7086cfa46e5806d3435145" as elf_of)
+
+  (use "wtn:fc4d501f2627d2dfc1878dda5df39fe67eba400e3920d5c9cb2c1b00c2f9fb3d" as compile_ir)
+
+  (fn drive ((src Str)) Bytes
+    (uses Alloc)
+    (match (compile_ir src)
+      ((Ok wasm) wasm)
+      ((Err f) (str.encode (concat "error: " (get f why))))))
+
+  ; The same source as a Linux program: an ELF file whose entry runs `main`, and then the
+  ; one that reads standard input as the source and writes the module to standard output,
+  ; which is how a compiled compiler is used as a command.
+  (fn drive_native ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_native_filter ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (elf_of m "drive" true) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; An ELF file that reads source on standard input and writes an ELF file like itself to
+  ; standard output: the native compiler, made to reproduce.
+  (fn drive_self ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (elf_of m "drive_self" true) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as an AArch64 Linux program.
+  (fn drive_arm ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (arm_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_arm_filter ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (arm_elf_of m "drive" true) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as a RISC-V (RV64) Linux program.
+  (fn drive_riscv ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (riscv_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as a RISC-V (RV32) Linux program.
+  (fn drive_riscv32 ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (riscv32_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as a Cortex-M (Thumb-2) image.
+  (fn drive_thumb ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as an ESP32 (Xtensa LX6) image.
+  (fn drive_xtensa ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; The same source as an ESP32-S3 (Xtensa LX7) image.
+  (fn drive_xtensa_s3 ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  ; For a board whose stacks must not overflow (the `mcu` profile): the image only if what it
+  ; can use of each stack, bounded before it runs (compiler/stack.wtn), fits the room it has.
+  (fn drive_thumb_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bound m "main" src)
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
+  ; The bound itself, as text: the operand stack's bytes, then the machine stack's.
+  (fn thumb_stack ((src Str)) Str
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (concat "error: " (get f why)))
+      ((Ok m) (match (checked_bound m "main" src)
+        ((Err f) (concat "error: " (get f why)))
+        ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
+
+  ; The bounded build for the ESP32 and the ESP32-S3, the `esp32` profile's: each image only
+  ; if its stacks fit the room its layout has (compiler/stack.wtn). A program that allocates is
+  ; refused for now, as on Cortex-M, since a heap that grows has no bound yet.
+  (fn drive_xtensa_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bound_in m "main" src (esp32_room))
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
+  (fn drive_xtensa_s3_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bound_in m "main" src (esp32s3_room))
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
+  ; The bound as text for a chip ("esp32" or "esp32s3"): the operand stack's bytes, then the
+  ; machine stack's.
+  (fn xtensa_stack ((src Str) (chip Str)) Str
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (concat "error: " (get f why)))
+      ((Ok m) (match (checked_bound_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (esp32_room)))
+        ((Err f) (concat "error: " (get f why)))
+        ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
+
+  (fn drive_riscv_filter ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (riscv_elf_of m "drive" true) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (match (compile_ir "(module m (fn double ((x I32)) I32 (wrap.add x x)))") ((Ok wasm) (concat "compiled " (concat (num.to_str (unwrap (bytes.len wasm))) " bytes"))) ((Err f) (concat "not compiled: " (get f why)))))))

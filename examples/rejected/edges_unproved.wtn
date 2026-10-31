@@ -1,0 +1,13 @@
+; Rejected: a refinement that nothing establishes. The types all line up; what is missing
+; is the proof, so the error comes from the prover rather than the type checker.
+(module unproved
+  (newtype Port U16
+    (requires n (<= (u16.of 1) n)))
+
+  (fn assume ((n U16)) Port (Port n))
+
+  (fn nonempty ((s Str)) Str
+    (requires (< 0 (unwrap (str.chars s))))
+    s)
+
+  (fn careless ((s Str)) Str (nonempty s)))

@@ -1,0 +1,480 @@
+; How much stack a Cortex-M image can use, in bytes, before it runs.
+;
+; compiler/native_thumb.wtn gives every call two things: sixteen bytes of the machine stack
+; (the return address and the caller's frame pointer) and, on the operand stack, eight bytes
+; for each local beyond the parameters and for each slot the body's operands reach at their
+; deepest. The parameters are the caller's slots, so they are counted once, where they were
+; pushed. Nothing else touches either stack: an operation works in registers, and a host
+; function is the board's own code, whose stack is its own business (the bound says so).
+;
+; A body's deepest operand height is read off its instructions with WebAssembly's own stack
+; effects -- the backend keeps exactly that height, slot for slot -- and a chain of calls
+; costs the sum of its frames. A call graph without a cycle is exact: a function's frame and
+; the costliest of its callees. A function that can reach itself is bounded by what the
+; checker proved of it: `(bounds (depth N))` is one plus the deepest nest of calls it makes,
+; counted in the program's own functions, so its frames number at most N, each no larger
+; than the largest it can reach. That needs every function under it to be one the checker
+; counted -- one with a declared depth -- and the runtime's functions, which no depth
+; counts, to sit on top of the nest without a cycle of their own; anything else is refused
+; by name rather than guessed at.
+;
+; The runtime has one cycle: releasing a block whose count reaches zero releases what it
+; holds (and, the first time, allocates the table freed blocks are kept in). A block is
+; counted only at or above the heap's base, and only `rt_alloc` makes one, so where nothing
+; but `rt_release` itself can reach `rt_alloc` every block is static, and none of the calls
+; `rt_release` makes is ever made.
+; A program that allocates has no bound on its heap here, and its operand stack grows toward
+; the heap, so it is refused too.
+;
+;   witness test compiler/stack.wtn
+(module stack
+  (use "wtn:a21c39d745ed071e8a191a37f70dd1779e3f66cef78971e75cc5db8d15985d3a" as Ins)
+
+  (use "wtn:1073bcf7f2ec07adcc09eb7c2e8fe48e9f9e9761a767076f6172edba3db8cde8" as Inss)
+
+  (use "wtn:780cd5f1caffd09ae27df62731b93b0f47c18f7b93487643ce22510a7c5f029b" as Func)
+
+  (use "wtn:3e591891f9cf54232e04bb14b46fe1ad8efe8c82e1ddad2a481589bba3844f43" as Funcs)
+
+  (use "wtn:2246c36031ae9d98c0dcb67dfc9591483d4b9f520cbeedf2355dd9208a84d3ea" as Import)
+
+  (use "wtn:746b7af1483e2ad3bac5bd48a927f405dda763ad2e13285b41298d2d268a366f" as Imports)
+
+  (use "wtn:aaa5788594cd2f68165abd0f2e6560c4aa6aaf92e09822948cc887f7cd927be5" as Module)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:341db8e3e6f1bc39d35ed90f4c8e78b275e1270bc6bb95034c49e3233d7b280c" as word_of)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  ; --- what the checker proved: each function's declared depth ---------------------------
+  (enum Depths (NoDepths) (Depths (name Str) (depth Int) (rest Depths)))
+
+  (fn depth_of ((ds Depths) (name Str)) (Option Int)
+    (match ds ((NoDepths) (None)) ((Depths n d rest) (if (str.eq n name) (Some d) (depth_of rest name)))))
+
+  (fn depths_of_source ((src Str)) Depths
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (NoDepths))
+      ((Ok tree) (depths_in (module_items tree)))))
+
+  (fn depths_in ((items Trees)) Depths
+    (uses Alloc)
+    (match items
+      ((NoTrees) (NoDepths))
+      ((Trees h rest) (match (declared_depth h)
+        ((None) (depths_in rest))
+        ((Some d) (Depths (fn_name h) d (depths_in rest)))))))
+
+  ; `(fn name ...)` or `(fn (name T ...) ...)`.
+  (fn fn_name ((h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (match (node_items n)
+        ((None) (word_of n))
+        ((Some parts) (match parts ((NoTrees) "") ((Trees first more) (word_of first))))))))
+
+  (fn declared_depth ((h Tree)) (Option Int)
+    (uses Alloc)
+    (if (not (head_is h "fn"))
+      (None)
+      (match (after_head h)
+        ((NoTrees) (None))
+        ((Trees n rest) (clauses_depth rest)))))
+
+  (fn clauses_depth ((ts Trees)) (Option Int)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (None))
+      ((Trees c rest) (if (head_is c "bounds") (depth_in (after_head c)) (clauses_depth rest)))))
+
+  (fn depth_in ((ts Trees)) (Option Int)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (None))
+      ((Trees c rest) (if (head_is c "depth")
+        (match (after_head c) ((NoTrees) (None)) ((Trees k more) (number_in k)))
+        (depth_in rest)))))
+
+  (fn number_in ((t Tree)) (Option Int)
+    (match (leaf_text t)
+      ((None) (None))
+      ((Some b) (decimal b 0 0 (+ 1 (unwrap (bytes.len b)))))))
+
+  (fn decimal ((b Bytes) (at Int) (acc Int) (left Int)) (Option Int)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (None)
+      (match (bytes.at b (Octets at))
+        ((None) (if (< 0 at) (Some acc) (None)))
+        ((Some d) (if (and (<= 48 (int.of d)) (<= (int.of d) 57))
+          (decimal b (+ at 1) (+ (* acc 10) (- (int.of d) 48)) (- left 1))
+          (None))))))
+
+  ; --- one body: its deepest operand height and the functions it calls --------------------
+  (record Hw (h Int) (top Int) (dead Bool) (bad Str))
+
+  (fn hw_at ((h Int) (top Int)) Hw (make Hw (h h) (top (if (< top h) h top)) (dead false) (bad "")))
+
+  (fn hw_dead ((w Hw)) Hw (with w (dead true)))
+
+  (fn hw_bad ((w Hw) (why Str)) Hw (with w (dead true) (bad why)))
+
+  (fn func_at ((fs Funcs) (k U32)) (Option Func)
+    (match fs ((NoFuncs) (None)) ((Funcs f rest) (if (= k (u32.of 0)) (Some f) (func_at rest (- k (u32.of 1)))))))
+
+  (fn import_at ((is Imports) (k U32)) (Option Import)
+    (match is ((NoImports) (None)) ((Imports i rest) (if (= k (u32.of 0)) (Some i) (import_at rest (- k (u32.of 1)))))))
+
+  (fn heights ((fs Funcs) (imps Imports) (is Inss) (w Hw)) Hw
+    (uses Alloc)
+    (match is
+      ((NoInss) w)
+      ((Inss i rest) (if (get w dead) w (heights fs imps rest (height_step fs imps i w))))))
+
+  (fn moved ((w Hw) (by Int)) Hw (hw_at (+ (get w h) by) (get w top)))
+
+  (fn height_step ((fs Funcs) (imps Imports) (i Ins) (w Hw)) Hw
+    (uses Alloc)
+    (match i
+      ((WConst n) (moved w 1))
+      ((WLocalGet x) (moved w 1))
+      ((WLocalSet x) (moved w -1))
+      ((WLocalTee x) w)
+      ((WGlobalGet x) (moved w 1))
+      ((WGlobalSet x) (moved w -1))
+      ((WOp code) (op_height code w))
+      ((WLoad code align offset) w)
+      ((WStore code align offset) (moved w -2))
+      ((WCall f) (match (func_at fs f)
+        ((None) (hw_bad w "a call to a function that is not there"))
+        ((Some g) (moved w (- (int.of (get g results)) (int.of (get g params)))))))
+      ((WHost slot) (match (import_at imps slot)
+        ((None) (hw_bad w "a call to a host function that is not there"))
+        ((Some g) (moved w (- (int.of (get g results)) (int.of (get g params)))))))
+      ((WIf value then other) (let h0 (- (get w h) 1)
+        (let yes (heights fs imps then (hw_at h0 (get w top)))
+          (let no (heights fs imps other (hw_at h0 (get yes top)))
+            (joined (hw_at (+ h0 (arity value)) (get no top)) yes no)))))
+      ((WBlock value body) (let inner (heights fs imps body (hw_at (get w h) (get w top)))
+        (joined (hw_at (+ (get w h) (arity value)) (get inner top)) inner inner)))
+      ((WLoop value body) (let inner (heights fs imps body (hw_at (get w h) (get w top)))
+        (joined (hw_at (+ (get w h) (arity value)) (get inner top)) inner inner)))
+      ((WBr depth) (hw_dead w))
+      ((WBrIf depth) (moved w -1))
+      ((WCopy) (moved w -3))
+      ((WFill) (hw_dead w))
+      ((WMemSize) (moved w 1))
+      ((WMemGrow) w)))
+
+  ; What is wrong inside a branch is wrong with the whole.
+  (fn joined ((after Hw) (a Hw) (b Hw)) Hw
+    (if (not (str.eq (get a bad) "")) (hw_bad after (get a bad))
+      (if (not (str.eq (get b bad) "")) (hw_bad after (get b bad)) after)))
+
+  (fn arity ((value Bool)) Int (if value 1 0))
+
+  ; The operations the lowering writes, by what they take and leave. One not listed here is
+  ; refused rather than given a size.
+  (fn op_height ((code U8) (w Hw)) Hw
+    (uses Alloc)
+    (let c (int.of code)
+      (if (or (= c 0) (= c 15)) (hw_dead w)
+        (if (= c 26) (moved w -1)
+          (if (= c 27) (moved w -2)
+            (if (or (or (= c 69) (= c 80)) (or (= c 167) (or (= c 173) (and (<= 194 c) (<= c 196))))) w
+              (if (or (and (<= 81 c) (<= c 90)) (or (or (= c 113) (= c 114)) (and (<= 124 c) (<= c 136)))) (moved w -1)
+                (hw_bad w (concat "an operation this does not size: " (num.to_str c))))))))))
+
+  (enum Calls (NoCalls) (Calls (index Int) (rest Calls)))
+
+  (fn calls_in ((is Inss) (acc Calls)) Calls
+    (match is
+      ((NoInss) acc)
+      ((Inss i rest) (calls_in rest (match i
+        ((WCall f) (Calls (int.of f) acc))
+        ((WIf value then other) (calls_in then (calls_in other acc)))
+        ((WBlock value body) (calls_in body acc))
+        ((WLoop value body) (calls_in body acc))
+        ((WConst n) acc) ((WLocalGet x) acc) ((WLocalSet x) acc) ((WLocalTee x) acc)
+        ((WGlobalGet x) acc) ((WGlobalSet x) acc) ((WOp code) acc) ((WLoad code align offset) acc)
+        ((WStore code align offset) acc) ((WHost slot) acc) ((WBr depth) acc) ((WBrIf depth) acc)
+        ((WCopy) acc) ((WFill) acc) ((WMemSize) acc) ((WMemGrow) acc))))))
+
+  (fn has_call ((cs Calls) (k Int)) Bool
+    (match cs ((NoCalls) false) ((Calls i rest) (or (= i k) (has_call rest k)))))
+
+  ; --- the program as a table ----------------------------------------------------------------
+  ; One row per function: its name, its two frame sizes, whom it calls, and whether something
+  ; about its body could not be read.
+  (record Row (name Str) (operand Int) (machine Int) (calls Calls) (bad Str))
+
+  (enum Rows (NoRows) (Rows (head Row) (rest Rows)))
+
+  (fn row_at ((rs Rows) (k Int)) (Option Row)
+    (match rs ((NoRows) (None)) ((Rows r rest) (if (<= k 0) (if (= k 0) (Some r) (None)) (row_at rest (- k 1))))))
+
+  (fn rows_of ((all Funcs) (imps Imports) (fs Funcs)) Rows
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) (NoRows))
+      ((Funcs f rest) (let w (heights all imps (get f body) (hw_at 0 0))
+        (Rows (make Row (name (get f name)) (operand (* 8 (+ (int.of (get f locals)) (get w top)))) (machine 16)
+                (calls (calls_in (get f body) (NoCalls))) (bad (get w bad)))
+          (rows_of all imps rest))))))
+
+  (fn rows_len ((rs Rows)) Int (ensures (<= 0 result)) (match rs ((NoRows) 0) ((Rows r rest) (+ 1 (rows_len rest)))))
+
+  (fn index_named ((rs Rows) (name Str) (at Int)) (Option Int)
+    (match rs ((NoRows) (None)) ((Rows r rest) (if (str.eq (get r name) name) (Some at) (index_named rest name (+ at 1))))))
+
+  (fn is_runtime ((name Str)) Bool
+    (uses Alloc)
+    (let b (str.encode name)
+      (and (byte_is b 0 114) (and (byte_is b 1 116) (byte_is b 2 95)))))
+
+  (fn byte_is ((b Bytes) (at Int) (c Int)) Bool
+    (match (bytes.at b (Octets at)) ((None) false) ((Some d) (= (int.of d) c))))
+
+  ; Whom a function calls, less release's calls where no block can be counted.
+  (fn callees ((rs Rows) (k Int) (heap Bool)) Calls
+    (match (row_at rs k)
+      ((None) (NoCalls))
+      ((Some r) (if (and (not heap) (str.eq (get r name) "rt_release")) (NoCalls) (get r calls)))))
+
+  ; --- what can be reached ----------------------------------------------------------------------
+  ; From `k`, every function some chain of calls arrives at, `k` itself only if it is on a cycle.
+  (fn reached ((rs Rows) (heap Bool) (todo Calls) (seen Calls) (left Int)) Calls
+    (requires (<= 0 left))
+    (if (<= left 0)
+      seen
+      (match todo
+        ((NoCalls) seen)
+        ((Calls i rest) (if (has_call seen i)
+          (reached rs heap rest seen (- left 1))
+          (reached rs heap (appended (callees rs i heap) rest) (Calls i seen) (- left 1)))))))
+
+  (fn appended ((a Calls) (b Calls)) Calls
+    (match a ((NoCalls) b) ((Calls i rest) (Calls i (appended rest b)))))
+
+  (fn reach_of ((rs Rows) (heap Bool) (k Int)) Calls
+    (reached rs heap (callees rs k heap) (NoCalls) (+ 1 (* 2 (calls_total rs)))))
+
+  ; Each step takes one call off the list, and a call goes on it only from a function seen for
+  ; the first time (the start once more, if a cycle comes back to it), so there are no more
+  ; steps than twice the calls in the program.
+  (fn calls_total ((rs Rows)) Int
+    (ensures (<= 0 result))
+    (match rs ((NoRows) 0) ((Rows r rest) (+ (calls_len (get r calls)) (calls_total rest)))))
+
+  (fn calls_len ((cs Calls)) Int
+    (ensures (<= 0 result))
+    (match cs ((NoCalls) 0) ((Calls i rest) (+ 1 (calls_len rest)))))
+
+  (fn on_cycle ((rs Rows) (heap Bool) (k Int)) Bool (has_call (reach_of rs heap k) k))
+
+  ; --- the bound ----------------------------------------------------------------------------------
+  (record Bound (operand Int) (machine Int))
+
+  (fn worse ((a Bound) (b Bound)) Bound
+    (make Bound (operand (if (< (get a operand) (get b operand)) (get b operand) (get a operand)))
+      (machine (if (< (get a machine) (get b machine)) (get b machine) (get a machine)))))
+
+  (fn plus ((a Bound) (b Bound)) Bound
+    (make Bound (operand (+ (get a operand) (get b operand))) (machine (+ (get a machine) (get b machine)))))
+
+  (fn frame ((r Row)) Bound (make Bound (operand (get r operand)) (machine (get r machine))))
+
+  (fn nothing () Bound (make Bound (operand 0) (machine 0)))
+
+  (record Cx (rows Rows) (depths Depths) (heap Bool))
+
+  ; The most a call of `k` can use, its own frame included. `left` is the longest chain there
+  ; can be without a cycle, which the table's length bounds.
+  (fn cost ((cx Cx) (k Int) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (deep)
+      (match (row_at (get cx rows) k)
+        ((None) (Err (fault "stack" "a call to a function that is not there")))
+        ((Some r) (if (not (str.eq (get r bad) ""))
+          (Err (fault "stack" (concat (get r name) (concat ": " (get r bad)))))
+          (if (on_cycle (get cx rows) (get cx heap) k)
+            (nest cx k r (- left 1))
+            (match (costliest cx (callees (get cx rows) k (get cx heap)) (- left 1))
+              ((Err f) (Err f))
+              ((Ok b) (Ok (plus (frame r) b))))))))))
+
+  ; The budget is spent one step per call between these, and a chain of calls with no cycle
+  ; is no longer than the program, so it runs out only on a table that is not one.
+  (fn deep () (Result Bound Fault) (Err (fault "stack" "a chain of calls longer than the program")))
+
+  (fn costliest ((cx Cx) (cs Calls) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (deep)
+    (match cs
+      ((NoCalls) (Ok (nothing)))
+      ((Calls i rest) (match (cost cx i (- left 1))
+        ((Err f) (Err f))
+        ((Ok a) (match (costliest cx rest (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (Ok (worse a b))))))))))
+
+  ; A function on a cycle: at most its declared depth of frames, each no larger than the
+  ; largest of the program's own functions it reaches, and the runtime's deepest chain on top.
+  (fn nest ((cx Cx) (k Int) (r Row) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (deep)
+    (match (depth_of (get cx depths) (unsuffixed (get r name)))
+      ((None) (Err (fault "stack" (concat (get r name) " reaches itself and declares no (bounds (depth N))"))))
+      ((Some d) (let all (Calls k (reach_of (get cx rows) (get cx heap) k))
+        (match (widest cx all (frame r))
+          ((Err f) (Err f))
+          ((Ok w) (match (on_top cx all (- left 1))
+            ((Err f) (Err f))
+            ((Ok t) (Ok (plus (make Bound (operand (* d (get w operand))) (machine (* d (get w machine)))) t)))))))))))
+
+  ; A copy of a generic function is named for the types it was called with: `id@Int`.
+  (fn unsuffixed ((name Str)) Str
+    (uses Alloc)
+    (unsuffixed_from (str.encode name) 0 (+ 1 (unwrap (bytes.len (str.encode name))))))
+
+  (fn unsuffixed_from ((b Bytes) (at Int) (left Int)) Str
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      ""
+      (if (byte_is b at 64)
+        (match (bytes.decode (bytes.slice b (Octets 0) (Octets at))) ((Ok s) s) ((Err e) ""))
+        (if (< at (unwrap (bytes.len b))) (unsuffixed_from b (+ at 1) (- left 1)) (match (bytes.decode b) ((Ok s) s) ((Err e) ""))))))
+
+  ; Every program function in the nest must be one the checker counted.
+  (fn widest ((cx Cx) (cs Calls) (w Bound)) (Result Bound Fault)
+    (uses Alloc)
+    (match cs
+      ((NoCalls) (Ok w))
+      ((Calls i rest) (match (row_at (get cx rows) i)
+        ((None) (Err (fault "stack" "a call to a function that is not there")))
+        ((Some r) (if (is_runtime (get r name))
+          (widest cx rest w)
+          (match (depth_of (get cx depths) (unsuffixed (get r name)))
+            ((None) (Err (fault "stack" (concat (get r name) " is called in a recursion and declares no (bounds (depth N))"))))
+            ((Some d) (widest cx rest (worse w (frame r)))))))))))
+
+  ; The runtime's functions on top of any frame of the nest: the costliest one called from it.
+  (fn on_top ((cx Cx) (cs Calls) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (deep)
+    (match cs
+      ((NoCalls) (Ok (nothing)))
+      ((Calls i rest) (match (runtime_calls cx (callees (get cx rows) i (get cx heap)) (- left 1))
+        ((Err f) (Err f))
+        ((Ok a) (match (on_top cx rest (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (Ok (worse a b))))))))))
+
+  (fn runtime_calls ((cx Cx) (cs Calls) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (deep)
+    (match cs
+      ((NoCalls) (Ok (nothing)))
+      ((Calls i rest) (match (row_at (get cx rows) i)
+        ((None) (Err (fault "stack" "a call to a function that is not there")))
+        ((Some r) (if (not (is_runtime (get r name)))
+          (runtime_calls cx rest (- left 1))
+          (if (on_cycle (get cx rows) (get cx heap) i)
+            (Err (fault "stack" (concat (get r name) " recurses in the runtime, with nothing to bound it")))
+            (match (cost cx i (- left 1))
+              ((Err f) (Err f))
+              ((Ok a) (match (runtime_calls cx rest (- left 1))
+                ((Err f) (Err f))
+                ((Ok b) (Ok (worse a b))))))))))))))
+
+  ; --- the whole image ------------------------------------------------------------------------------
+  ; What a run of `entry` can use of each stack, host functions aside.
+  (fn stack_bound ((m Module) (entry Str) (depths Depths)) (Result Bound Fault)
+    (uses Alloc)
+    (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
+      (match (index_named rs entry 0)
+        ((None) (Err (fault "stack" (concat "the program has no function named " entry))))
+        ((Some k) (let heap (allocates rs k)
+          (if heap
+            (Err (fault "stack" "the program allocates, and a heap has no bound here yet"))
+            (cost (make Cx (rows rs) (depths depths) (heap heap)) k (* 4 (+ 2 (rows_len rs))))))))))
+
+  ; Reached by some way other than a release: the first block has to be made before one can
+  ; be freed.
+  (fn allocates ((rs Rows) (k Int)) Bool
+    (match (index_named rs "rt_alloc" 0)
+      ((None) false)
+      ((Some a) (or (= a k) (has_call (reach_of rs false k) a)))))
+
+  ; Where an image's stacks are. Every bare-metal layout puts the wasm memory at the bottom of
+  ; its data RAM and the operand stack above it, growing down toward the memory's end, so the
+  ; two share `data` bytes; the machine stack has `machine` bytes of its own above them. The
+  ; images' frames are one walk's on every layout (16 bytes a call on the machine stack, the
+  ; operand slots eight bytes each), so the bound is the same and only the room differs.
+  (record Room (data Int) (machine Int))
+
+  ; Cortex-M: memory from 0x20000000, the operand stack down from 0x20060000, the machine
+  ; stack the 64 KB above it (native_thumb.wtn).
+  (fn thumb_room () Room (make Room (data 393216) (machine 65536)))
+
+  ; The ESP32: 0x3FFB0000 to 0x3FFF0000, then the machine stack to 0x3FFFE000
+  ; (native_xtensa.wtn, from tools/gen_xtensa.py's table).
+  (fn esp32_room () Room (make Room (data 262144) (machine 57344)))
+
+  ; The ESP32-S3: 0x3FCA8000 to 0x3FCF3000, then the machine stack to 0x3FCFF000
+  ; (native_xtensa_s3.wtn).
+  (fn esp32s3_room () Room (make Room (data 307200) (machine 49152)))
+
+  (fn operand_room ((m Module) (room Room)) Int (- (get room data) (* 65536 (int.of (get m pages)))))
+
+  (fn fits ((m Module) (b Bound) (room Room)) (Result Bound Fault)
+    (uses Alloc)
+    (if (< (operand_room m room) (get b operand))
+      (Err (fault "stack" (concat "the operand stack may need " (concat (num.to_str (get b operand)) (concat " bytes and has " (num.to_str (operand_room m room)))))))
+      (if (< (get room machine) (get b machine))
+        (Err (fault "stack" (concat "the machine stack may need " (concat (num.to_str (get b machine)) (concat " bytes and has " (num.to_str (get room machine)))))))
+        (Ok b))))
+
+  ; The bound, if it fits the room.
+  (fn checked_bound_in ((m Module) (entry Str) (src Str) (room Room)) (Result Bound Fault)
+    (uses Alloc)
+    (match (stack_bound m entry (depths_of_source src))
+      ((Err f) (Err f))
+      ((Ok b) (fits m b room))))
+
+  (fn checked_bound ((m Module) (entry Str) (src Str)) (Result Bound Fault)
+    (uses Alloc)
+    (checked_bound_in m entry src (thumb_room)))
+
+  (test "a declared depth is read off the bounds clause"
+    (match (depth_of (depths_of_source "(module m (fn f ((n Int)) Int (requires (<= 0 n)) (bounds (depth 7) (alloc 0)) n))") "f")
+      ((None) false) ((Some d) (= d 7))))
+
+  (test "a generic copy is known by its function's name" (str.eq "id" (unsuffixed "id@Int")))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/stack.wtn is exercised by tests/test_stack.py")))

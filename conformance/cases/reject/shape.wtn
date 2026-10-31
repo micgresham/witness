@@ -1,0 +1,2 @@
+(module m
+  (fn f ((x (tensor F32 (sample 4)))) (tensor F32 (batch 4)) x))

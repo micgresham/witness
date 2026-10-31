@@ -1,0 +1,4 @@
+(module m
+  (fn f ((n Int)) Int
+    (ensures (< 0 result))
+    n))

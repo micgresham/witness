@@ -1,0 +1,41 @@
+; Errors are values, and adding context is one operator. `Fault` and `context` come
+; from the prelude: `context` leaves an Ok alone and wraps an Err with where and why,
+; keeping the failure it came from as its cause.
+(module faults
+  (newtype Port Int)
+
+  (fn parse_port ((raw Str)) (Result Port Fault)
+    (uses Alloc)
+    (if (str.eq raw "8080")
+      (Ok (Port 8080))
+      (Err (fault "parse_port" (concat "not a port: " raw)))))
+
+  (fn read_setting ((raw Str)) (Result Port Fault)
+    (uses Alloc)
+    (context (parse_port raw) "read_setting" "the listen address"))
+
+  (fn start ((raw Str)) (Result Port Fault)
+    (uses Alloc)
+    (context (read_setting raw) "start" "bringing the service up"))
+
+  ; The cause chain is a record field, and a field is a part of its record, so walking
+  ; down it terminates — no annotation needed.
+  (fn trace ((f Fault)) Str
+    (uses Alloc)
+    (match (get f cause)
+      ((None) (concat (get f op) (concat ": " (get f why))))
+      ((Some inner) (concat (get f op) (concat " <- " (trace inner))))))
+
+  (fn depth ((f Fault)) Int
+    (ensures (<= 1 result))
+    (match (get f cause) ((None) 1) ((Some inner) (+ 1 (depth inner)))))
+
+  (fn report ((raw Str)) Str
+    (uses Alloc)
+    (match (start raw)
+      ((Ok p) (concat "listening on " (num.to_str (unwrap p))))
+      ((Err f) (concat (num.to_str (depth f)) (concat " deep: " (trace f))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq (print (report "8080")) (print (report "http")))))

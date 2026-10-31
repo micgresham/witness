@@ -1,0 +1,37 @@
+; Generic functions: one definition serves every type, and labels ride along with the
+; type argument. Inside the body nothing is known about T.
+(module generic
+  (enum (Stack T) (Empty) (Push (top T) (rest (Stack T))))
+
+  (fn (unwrap_or T) ((o (Option T)) (fallback T)) T
+    (match o ((None) fallback) ((Some v) v)))
+
+  ; `top` is a part of `s`, so the recursion runs out; T plays no part in that.
+  (fn (depth T) ((s (Stack T))) Int
+    (ensures (<= 0 result))
+    (match s ((Empty) 0) ((Push top rest) (+ 1 (depth rest)))))
+
+  (fn (peek T) ((s (Stack T))) (Option T)
+    (match s ((Empty) (None)) ((Push top rest) (Some top))))
+
+  ; The label on the secret survives the round trip through T, so it must be released
+  ; here, in a function whose signature says so, before it reaches a sink.
+  (fn tenant_or_default ((given (label tenant:acme Str))) Str
+    (declassifies tenant:acme)
+    (declassify tenant:acme (unwrap_or (Some given) "unknown")))
+
+  ; A label parameter keeps the base type fixed, so the body can still use concat. One
+  ; definition serves every label, and the caller's label comes back out.
+  (fn (labelled (label L)) ((s (label L Str))) (label L Str)
+    (uses Alloc)
+    (concat "[" (concat s "]")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (let s (Push "a" (Push "b" (Empty)))
+      (seq
+        (print (num.to_str (depth s)))
+        (print (unwrap_or (peek s) "empty"))
+        (print (num.to_str (unwrap_or (None) 0)))
+        (print (tenant_or_default "acme"))
+        (print (labelled "unlabelled"))))))

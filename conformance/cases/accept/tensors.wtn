@@ -1,0 +1,4 @@
+(module m
+  (fn project ((x (tensor F32 (sample 4) (feature 8))) (w (tensor F32 (feature 8) (class 2)))) (tensor F32 (sample 4) (class 2))
+    (uses Alloc)
+    (tensor.matmul x w)))

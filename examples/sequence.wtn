@@ -1,0 +1,39 @@
+; Arrays, and what they are for. An array is read by position and is a value: pushing
+; answers a new one rather than changing the one it was given, so nothing you hold is
+; ever altered from somewhere else.
+;
+; Walking one needs a budget. An index into a sequence does not get smaller on its own,
+; so there is nothing for the termination checker to see; carrying a count that falls at
+; every step is what makes the walk finite, and the length is where it starts.
+;   witness run examples/sequence.wtn --grant Alloc,Console
+(module sequence
+  (fn (or_else T) ((o (Option T)) (fallback T)) T (match o ((None) fallback) ((Some v) v)))
+
+  (fn readings () (Array I32)
+    (uses Alloc)
+    (array.push (array.push (array.push (array.push (array.empty) (i32.of 12)) (i32.of 30)) (i32.of 7))
+      (i32.of 19)))
+
+  ; The sum, walked from the front. `left` is the budget and `at` is where to look.
+  (fn total ((a (Array I32)) (at Int) (left Int)) I32
+    (if (or (<= left 0) (<= (unwrap (array.len a)) at))
+      (i32.of 0)
+      (sat.add (or_else (array.at a (Count at)) (i32.of 0)) (total a (+ at 1) (- left 1)))))
+
+  (fn sum ((a (Array I32))) I32 (total a 0 (unwrap (array.len a))))
+
+  ; The largest, which is where `(None)` on an empty array is the honest answer.
+  (fn largest ((a (Array I32)) (at Int) (left Int)) (Option I32)
+    (if (or (<= left 0) (<= (unwrap (array.len a)) at))
+      (None)
+      (match (largest a (+ at 1) (- left 1))
+        ((None) (array.at a (Count at)))
+        ((Some rest) (Some (if (< rest (or_else (array.at a (Count at)) rest)) (or_else (array.at a (Count at)) rest) rest))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (concat "how many: " (num.to_str (unwrap (array.len (readings))))))
+      (print (concat "total: " (num.to_str (sum (readings)))))
+      (print (concat "largest: " (num.to_str (or_else (largest (readings) 0 (unwrap (array.len (readings)))) (i32.of 0)))))
+      (print (concat "largest of none: " (num.to_str (or_else (largest (array.empty) 0 0) (i32.of 0))))))))

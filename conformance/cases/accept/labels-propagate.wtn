@@ -1,0 +1,2 @@
+(module m
+  (fn length ((s (label Secret Str))) (label Secret Int) (unwrap (str.chars s))))

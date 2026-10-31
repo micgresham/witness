@@ -1,0 +1,225 @@
+; Reading a type out of source, into the representation the kernel already uses.
+;
+; This is the first piece of the Phase 2 checker, and it starts here because everything
+; else in a checker needs it: a signature is types, a contract is about typed values, and
+; an expression is checked against one.
+;
+; It does not define a type of its own. `Ty` comes in from kernel/core.wtn by hash,
+; together with `ty_fits`, which is the information-flow rule -- a value fits where its
+; type matches and it carries no label the place refuses. There is one notion of a type
+; in this project rather than two that drift apart, and the way that is arranged is an
+; import rather than a copy.
+;
+; The tree comes in from compiler/parse.wtn the same way. A `Leaf` is a token's bytes and
+; a `Node` is a parenthesised list, so a type written `(Option Int)` arrives as a node of
+; two leaves and `Int` as one leaf.
+;
+;   witness run compiler/typecheck.wtn --grant Alloc,Console
+(module typecheck
+  (use "wtn:d7837b79884a33633245c445a48c56fd85852b5b0080d09c2497be1586280717" as ty_fits)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:0806fb421a4d2267c936e2efbc71aada4a3d2f76ac8116019678462d0ad0348a" as ty_plus)
+
+  (use "wtn:4aab89ca9b8d498c2f69d8799321ce4c6aae73c69e22950b63f8b9f8f4f63fbe"
+    as
+    names_union)
+
+  (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
+
+  (use "wtn:315e70b0830671f92192b9b7cff60d910b683354fdc3c37bb8da01d8eec89674" as is_digit)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:8c57814642c131658114d9a70dab4a9270c8c3fcb676090accb17aff2fa39aab"
+    as
+    trees_empty)
+
+  (use "wtn:0ac194f57800427d350e6b879c492d927ef50886c557823c0c5cfe1981329b01" as leaf_text)
+
+  ; --- names --------------------------------------------------------------
+  ; A leaf's bytes, as text. A name that is not valid UTF-8 is not a name, and saying so
+  ; here is what keeps every comparison below a comparison of text.
+  (fn named ((b Bytes)) (Result Str Fault)
+    (uses Alloc)
+    (match (bytes.decode b)
+      ((Ok s) (Ok s))
+      ((Err e) (Err (fault "type" "a name is not text")))))
+
+  ; --- reading a type -----------------------------------------------------
+  ; `Int` is a leaf; `(Option Int)` is a node whose first item names the type and whose
+  ; rest are its arguments. Nothing here resolves a name against a set of declarations:
+  ; that is the next piece. This says what was *written*, which is what a declaration
+  ; holds and what the kernel's `instantiate` expects to be given.
+  (fn type_of ((t Tree)) (Result Ty Fault)
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok base) (Ok (plain base)))))
+      ((Node items) (match items ((NoTrees) (Err (fault "type" "a type is not an empty list"))) ((Trees head rest) (match head ((Node inner) (Err (fault "type" "a type's name is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok base) (type_form base rest))))))))))
+
+  ; What follows the head of a list type. Two heads are not type names: `label` and
+  ; `tensor` are the language's spellings of a label set and a shape, and they are read
+  ; into the fields the kernel's `Ty` keeps for them -- `labels` and `dims` -- so that an
+  ; information-flow or shape rule has something to be stated about.
+  (fn type_form ((base Str) (rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (if (str.eq base "label")
+      (label_walk rest (NoNames))
+      (if (str.eq base "tensor")
+        (tensor_type rest)
+        (match (types_of rest)
+          ((Err e) (Err e))
+          ((Ok args) (Ok (make Ty (base base) (labels (NoNames)) (args args) (dims (NoDims)))))))))
+
+  ; `(label L ... T)`: every item but the last is a label, and the last is the type that
+  ; carries them. The labels are gathered going down so that the type, which is last, is
+  ; read from a piece of the list the descent has already taken out of it.
+  (fn label_walk ((rest Trees) (acc Names)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a label form needs a type at the end")))
+      ((Trees h more) (match more ((NoTrees) (match acc ((NoNames) (Err (fault "type" "a label form needs a label before its type"))) ((Names first others) (match (type_of h) ((Err e) (Err e)) ((Ok ty) (Ok (ty_plus ty acc))))))) ((Trees next after) (match (label_name h) ((Err e) (Err e)) ((Ok name) (label_walk more (names_union (Names name (NoNames)) acc)))))))))
+
+  (fn label_name ((t Tree)) (Result Str Fault)
+    (uses Alloc)
+    (match t
+      ((Node inner) (Err (fault "type" "a label is a name, not a list")))
+      ((Leaf text quoted) (named text))))
+
+  ; `(tensor F (axis size) ...)`: an element format and at least one named axis, which
+  ; the kernel keeps as `dims`, with the format as the one argument.
+  (fn tensor_type ((rest Trees)) (Result Ty Fault)
+    (uses Alloc)
+    (match rest
+      ((NoTrees) (Err (fault "type" "a tensor needs an element format and axes")))
+      ((Trees f axes) (match f ((Node inner) (Err (fault "type" "a tensor's element format is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok format) (match (axes_of axes) ((Err e) (Err e)) ((Ok dims) (match dims ((NoDims) (Err (fault "type" "a tensor needs at least one axis"))) ((Dims axis size more) (Ok (make Ty (base "Tensor") (labels (NoNames)) (args (Tys (plain format) (NoTys))) (dims dims))))))))))))))
+
+  (fn axes_of ((ts Trees)) (Result Dims Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (Ok (NoDims)))
+      ((Trees h more) (match (axis_of h) ((Err e) (Err e)) ((Ok one) (match (axes_of more) ((Err e) (Err e)) ((Ok others) (match one ((NoDims) (Err (fault "type" "an axis is (name size)"))) ((Dims name size none) (if (dims_has others name) (Err (fault "type" "an axis name appears twice; axes are named so they cannot be confused")) (Ok (Dims name size others))))))))))))
+
+  ; One axis, as a `Dims` of length one so that every outcome is a `Result` of the same
+  ; type; the caller takes it apart again.
+  (fn axis_of ((t Tree)) (Result Dims Fault)
+    (uses Alloc)
+    (match (node_items t)
+      ((None) (Err (fault "type" "an axis is (name size)")))
+      ((Some items) (match items ((NoTrees) (Err (fault "type" "an axis is (name size)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "type" "an axis is (name size)"))) ((Trees s tail) (if (trees_empty tail) (axis_named n s) (Err (fault "type" "an axis is (name size)"))))))))))
+
+  (fn axis_named ((n Tree) (s Tree)) (Result Dims Fault)
+    (uses Alloc)
+    (match (leaf_text n)
+      ((None) (Err (fault "type" "an axis name is a name")))
+      ((Some name) (match (leaf_text s) ((None) (Err (fault "type" "an axis size is a number"))) ((Some digits_) (match (named name) ((Err e) (Err e)) ((Ok axis) (match (digits digits_ 0 (unwrap (bytes.len digits_)) 0) ((None) (Err (fault "type" "an axis size is a whole number"))) ((Some size) (if (<= 1 size) (Ok (Dims axis size (NoDims))) (Err (fault "type" "an axis has a size of at least 1"))))))))))))
+
+  ; A whole number out of its decimal digits. `left` is how many bytes remain to be read,
+  ; which is what makes it end.
+  (fn digits ((b Bytes) (at Int) (left Int) (acc Int)) (Option Int)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len b)) at))
+      (Some acc)
+      (if (is_digit (byte_at b at))
+        (digits b (+ at 1) (- left 1) (+ (* acc 10) (- (byte_at b at) 48)))
+        (None))))
+
+  (fn dims_has ((ds Dims) (name Str)) Bool
+    (match ds
+      ((NoDims) false)
+      ((Dims axis size more) (or (str.eq axis name) (dims_has more name)))))
+
+  (fn types_of ((ts Trees)) (Result Tys Fault)
+    (uses Alloc)
+    (match ts
+      ((NoTrees) (Ok (NoTys)))
+      ((Trees head rest) (match (type_of head) ((Err e) (Err e)) ((Ok one) (match (types_of rest) ((Err e) (Err e)) ((Ok more) (Ok (Tys one more)))))))))
+
+  (fn plain ((base Str)) Ty
+    (make Ty (base base) (labels (NoNames)) (args (NoTys)) (dims (NoDims))))
+
+  ; --- what a literal is --------------------------------------------------
+  ; A token the reader marked as a number is an `Int` until a format is named for it, and
+  ; a quoted one is a `Str`. That is the whole of literal typing: the language gives a
+  ; decimal literal the type `Real`, which no declaration may name, so a literal never
+  ; decides a format on its own.
+  (fn type_of_number () Ty (plain "Int"))
+
+  (fn type_of_text () Ty (plain "Str"))
+
+  ; --- checking one against the other --------------------------------------
+  ; The one judgement this piece can already make: does a value of this type go where
+  ; that type is wanted? `ty_fits` is the kernel's, so the answer here is the answer the
+  ; kernel would give, by construction rather than by agreement.
+  (fn goes_where ((wanted Tree) (given Ty)) (Result Unit Fault)
+    (uses Alloc)
+    (match (type_of wanted)
+      ((Err e) (Err e))
+      ((Ok place) (if (ty_fits given place) (Ok unit) (Err (fault "type" "a value does not fit where it is put"))))))
+
+  ; --- showing one --------------------------------------------------------
+  ; A type as it is written, with its labels after it as `@L` and a tensor's axes as the
+  ; pairs they were written as.
+  (fn shown ((t Ty)) Str
+    (uses Alloc)
+    (concat (shown_core t) (shown_labels (get t labels))))
+
+  (fn shown_core ((t Ty)) Str
+    (uses Alloc)
+    (match (get t args)
+      ((NoTys) (get t base))
+      ((Tys a rest) (concat (concat "(" (get t base)) (concat (shown_all (get t args)) (concat (shown_dims (get t dims)) ")"))))))
+
+  (fn shown_all ((ts Tys)) Str
+    (uses Alloc)
+    (match ts ((NoTys) "") ((Tys a rest) (concat (concat " " (shown a)) (shown_all rest)))))
+
+  (fn shown_dims ((ds Dims)) Str
+    (uses Alloc)
+    (match ds
+      ((NoDims) "")
+      ((Dims axis size more) (concat (concat " (" (concat axis (concat " " (concat (num.to_str size) ")")))) (shown_dims more)))))
+
+  (fn shown_labels ((ns Names)) Str
+    (uses Alloc)
+    (match ns ((NoNames) "") ((Names n rest) (concat (concat " @" n) (shown_labels rest)))))
+
+  (fn read_and_show ((src Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err e) (concat "not a form: " (get e why)))
+      ((Ok tree) (match (type_of tree) ((Err e) (concat "not a type: " (get e why))) ((Ok t) (shown t))))))
+
+  (test "a bare name is a type" (str.eq "Int" (read_and_show "Int")))
+
+  (test "an applied name carries its arguments" (str.eq "(Option Int)" (read_and_show "(Option Int)")))
+
+  (test "arguments nest" (str.eq "(Result (Option Int) Fault)" (read_and_show "(Result (Option Int) Fault)")))
+
+  (test "a label goes on the type it ends with" (str.eq "Str @L" (read_and_show "(label L Str)")))
+
+  (test "a label written twice is carried once" (str.eq "Str @L" (read_and_show "(label L L Str)")))
+
+  (test "a label form with no label is refused" (str.eq "not a type: a label form needs a label before its type" (read_and_show "(label Str)")))
+
+  (test "a tensor keeps its format and its axes" (str.eq "(Tensor F32 (sample 4) (class 2))" (read_and_show "(tensor F32 (sample 4) (class 2))")))
+
+  (test "a tensor needs an axis" (str.eq "not a type: a tensor needs at least one axis" (read_and_show "(tensor F32)")))
+
+  (test "an axis name may not repeat" (str.eq "not a type: an axis name appears twice; axes are named so they cannot be confused" (read_and_show "(tensor F32 (a 1) (a 2))")))
+
+  (test "an axis has a positive size" (str.eq "not a type: an axis has a size of at least 1" (read_and_show "(tensor F32 (a 0))")))
+
+  (test "an empty list is not a type" (str.eq "not a type: a type is not an empty list" (read_and_show "()")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (seq
+      (print (read_and_show "Int"))
+      (print (read_and_show "(Result (Option Int) Fault)"))
+      (print (read_and_show "()")))))

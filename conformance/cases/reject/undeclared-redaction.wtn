@@ -1,0 +1,4 @@
+(module m
+  (fn f ((s (label Secret Str))) Unit
+    (uses Log)
+    (log.fields (who s))))

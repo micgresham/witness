@@ -1,0 +1,43 @@
+; Contracts: what a function needs (requires) and what it guarantees (ensures),
+; both proved at check time and erased before anything runs.
+(module budget
+  (record Budget (limit Int) (spent Int))
+
+  ; The contract is the reason no caller has to check for a negative result.
+  (fn remaining ((b Budget)) Int
+    (requires (<= (get b spent) (get b limit)))
+    (ensures (<= 0 result))
+    (- (get b limit) (get b spent)))
+
+  (fn fits ((b Budget) (amount Int)) Bool
+    (requires (<= 0 amount))
+    (<= (+ (get b spent) amount) (get b limit)))
+
+  ; Every caller of `remaining` below is inside a branch that establishes its requires.
+  (fn charge ((b Budget) (amount Int)) (Result Budget Str)
+    (uses Alloc)
+    (requires (and (<= 0 amount) (<= (get b spent) (get b limit))))
+    (if (fits b amount)
+      (Ok (with b (spent (+ (get b spent) amount))))
+      (Err (concat "over budget by " (num.to_str (- amount (remaining b)))))))
+
+  ; A numeric measure: `n` falls by one each time and never goes below zero.
+  (fn drain ((n Int)) Int
+    (requires (<= 0 n))
+    (ensures (= result 0))
+    (if (= n 0) 0 (drain (- n 1))))
+
+  ; A structural measure: `rest` is a part of `plan`, so the recursion runs out.
+  (enum Plan (Done) (Step (cost Int) (rest Plan)))
+
+  (fn steps ((plan Plan)) Int
+    (ensures (<= 0 result))
+    (match plan ((Done) 0) ((Step cost rest) (+ 1 (steps rest)))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (let b (make Budget (limit 100) (spent 40))
+      (seq
+        (print (num.to_str (remaining b)))
+        (print (num.to_str (drain 3)))
+        (print (num.to_str (steps (Step 10 (Step 30 (Done))))))))))

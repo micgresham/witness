@@ -1,0 +1,73 @@
+; The part of the runtime that is easier to write in Witness than as instructions.
+;
+; compiler/runtime.wtn holds what has to be instructions. This holds what does not: it is
+; compiled along with every program that needs it, as ordinary functions. The compiler
+; calls them by name, so a program that uses `bytes.decode` has to have `rt_utf8_check`
+; among its functions. Linking is concatenation: the declarations of this module are put
+; beside the program's before it is compiled, and every name here starts with `rt_`, which
+; a program may not use.
+;
+; `rt_utf8_check` is the validation `bytes.decode` does. It answers 0 for valid text and
+; otherwise the reason Python's decoder gives: 1 for a byte that cannot start a character,
+; 2 for a continuation byte out of its range, 3 for text that ends in the middle of one.
+; The rules are the standard ones -- no overlong forms, no surrogates, nothing past
+; U+10FFFF -- which is why the second byte of E0, ED, F0 and F4 has a narrower range.
+;
+;   witness test compiler/rtlib.wtn
+(module rtlib
+  (fn rt_byte ((b Bytes) (at Int)) Int
+    (match (bytes.at b (Octets at)) ((None) 0) ((Some x) (int.of x))))
+
+  ; Valid, or why not. The budget is four steps a byte, which is more than any text takes.
+  (fn rt_utf8_check ((b Bytes)) Int
+    (rt_utf8_from b 0 (unwrap (bytes.len b)) (+ (* 4 (unwrap (bytes.len b))) 8)))
+
+  (fn rt_utf8_from ((b Bytes) (at Int) (end Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= end at)) 0 (rt_utf8_lead b at end (- left 1) (rt_byte b at))))
+
+  (fn rt_utf8_lead ((b Bytes) (at Int) (end Int) (left Int) (c Int)) Int
+    (requires (<= 0 left))
+    (if (< c 128)
+      (rt_utf8_from b (+ at 1) end left)
+      (if (< c 194)
+        1
+        (if (< c 224)
+          (rt_utf8_cont b at end left 1 1 128 191)
+          (if (< c 240)
+            (rt_utf8_cont b at end left 1 2 (rt_lo c) (rt_hi c))
+            (if (< c 245) (rt_utf8_cont b at end left 1 3 (rt_lo c) (rt_hi c)) 1))))))
+
+  ; The range of the first continuation byte after a lead byte: narrower after E0, ED, F0
+  ; and F4, which is what keeps overlong forms, surrogates and anything past U+10FFFF out.
+  (fn rt_lo ((c Int)) Int (if (= c 224) 160 (if (= c 240) 144 128)))
+
+  (fn rt_hi ((c Int)) Int (if (= c 237) 159 (if (= c 244) 143 191)))
+
+  ; Continuation byte number `k` of `need`, which must lie in lo..hi.
+  (fn rt_utf8_cont ((b Bytes) (at Int) (end Int) (left Int) (k Int) (need Int) (lo Int) (hi Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      3
+      (if (< need k)
+        (rt_utf8_from b (+ at (+ need 1)) end (- left 1))
+        (if (<= end (+ at k))
+          3
+          (rt_utf8_next b at end (- left 1) k need lo hi (rt_byte b (+ at k)))))))
+
+  (fn rt_utf8_next ((b Bytes) (at Int) (end Int) (left Int) (k Int) (need Int) (lo Int) (hi Int) (d Int)) Int
+    (requires (<= 0 left))
+    (if (or (< d lo) (< hi d)) 2 (rt_utf8_cont b at end left (+ k 1) need 128 191)))
+
+  (fn rt_reason ((code Int)) Str
+    (if (= code 1)
+      "invalid start byte"
+      (if (= code 2) "invalid continuation byte" "unexpected end of data")))
+
+  (fn rt_check_str ((b Bytes)) Str (rt_reason (rt_utf8_check b)))
+
+  (test "ascii and multi-byte text are valid" (and (= (rt_utf8_check (str.encode "hello")) 0) (and (= (rt_utf8_check (str.encode "héllo")) 0) (= (rt_utf8_check (str.encode "")) 0))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (rt_check_str (str.encode "ok")))))

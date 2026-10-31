@@ -1,0 +1,6 @@
+(module m
+  (redact Secret hidden)
+
+  (fn trace ((key (label Secret Str))) Unit
+    (uses Log)
+    (log.fields (api_key key))))

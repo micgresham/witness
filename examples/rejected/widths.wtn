@@ -1,0 +1,10 @@
+; Rejected: machine arithmetic that is not proved to stay in range.
+(module overflow
+  ; 300 does not fit in a U8, and the checker says so where it is written.
+  (fn too_big () U8 (u8.of 300))
+
+  ; Nothing bounds a and b, so their sum may leave U8.
+  (fn unchecked ((a U8) (b U8)) U8 (+ a b))
+
+  ; Subtraction has a floor to respect as well: U8 stops at 0.
+  (fn under ((a U8) (b U8)) U8 (- a b)))

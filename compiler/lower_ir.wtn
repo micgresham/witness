@@ -1,0 +1,922 @@
+; An intermediate representation, lowered to WebAssembly with the reference counts it writes.
+;
+; compiler/ir.wtn says, for each function, who owns what: a value that is allocated, held by
+; another, moved or given up. This is the pass that believes it. A record or variant is a counted
+; block (`rt_make` with a mask of its counted words) holding its tag and fields; `retain` and
+; `drop` become `rt_retain` and `rt_release`; a literal is a string in static memory, which the
+; counts never touch. Strings, records and enums are all i64 addresses, as in compiler/lower.wtn.
+;
+; It reads the part of the language the intermediate representation does: Int, Bool, Str,
+; records, enums, Option and Result, calls and print. tests/test_lower_ir.py runs what it
+; writes against the interpreter and counts the memory it leaves behind.
+(module lower_ir
+  (use "wtn:9e4a1a22b723809e0ba4a9ccbdfbca08829d87c9b95d053917af1e0211c0682a" as Arms)
+
+  (use "wtn:9ea91d0e5b407d27e359871d1c38a036f84a475d47d71abb3541d270cef60ea9" as Atom)
+
+  (use "wtn:6cff790aafcf987853e0239aae9acea4d8e55a606ea767ec11368fdbbd4d173e" as Atoms)
+
+  (use "wtn:780cd5f1caffd09ae27df62731b93b0f47c18f7b93487643ce22510a7c5f029b" as Func)
+
+  (use "wtn:3e591891f9cf54232e04bb14b46fe1ad8efe8c82e1ddad2a481589bba3844f43" as Funcs)
+
+  (use "wtn:2246c36031ae9d98c0dcb67dfc9591483d4b9f520cbeedf2355dd9208a84d3ea" as Import)
+
+  (use "wtn:746b7af1483e2ad3bac5bd48a927f405dda763ad2e13285b41298d2d268a366f" as Imports)
+
+  (use "wtn:a21c39d745ed071e8a191a37f70dd1779e3f66cef78971e75cc5db8d15985d3a" as Ins)
+
+  (use "wtn:1073bcf7f2ec07adcc09eb7c2e8fe48e9f9e9761a767076f6172edba3db8cde8" as Inss)
+
+  (use "wtn:9330ee99b86b2123b720849b1a2e98ae02b1656c1b64414800232a3ff33e0d2f" as Ir)
+
+  (use "wtn:aaa5788594cd2f68165abd0f2e6560c4aa6aaf92e09822948cc887f7cd927be5" as Module)
+
+  (use "wtn:f6c54e6d951aa3f7e013c7fa5f9f0840509621aaf15317b626e4080e6f2fc1b5" as Rhs)
+
+  (use "wtn:6049eb96cd5bb0261e93f3b63d858e9295b28d4454c9d335d6fc6b7357255c97" as Segment)
+
+  (use "wtn:1d8850cc1eac3078061af0c4abac9ffb8c04c7f625724d647535443ad3cd3899" as Segments)
+
+  (use "wtn:c206f08c6ba2f3cb97d12d6c7648d77dade84876d9c4178770c4f9be12e58213" as Sig)
+
+  (use "wtn:3bcc88c4b8d4f930f2a55c2acf6bb2f8cbe4fc9229d75de114b4fc79d29764ae" as Sigs)
+
+  (use "wtn:cf17689a688441440d43b9eeee06259b6cbcd82351b5d23063af1d43bcce698f" as Strs)
+
+  (use "wtn:1a39dccc8d6e384d9b6aa884f6a7b0681683b4b5ccbfa6b1c396d06a5562b96e" as TEnv)
+
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:8f001b8eb331c35b82070b925765a08ae8e67c3f0971edbcf672934f1e75dea3" as Trees)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:e4c149ba3f059c4ca4c1315a32cc797ea261b37ca748c63d8fdeffa4d99f805c" as const)
+
+  (use "wtn:53c15f3eb52a0e02a22265e186132e4ef629fbe72c70fc1bf8d98ab1e3e0a690" as conv)
+
+  (use "wtn:7f605767659cf91d13d37c9c4a00f74ccb3f54984f19f8a705c4f0eafcbf8235" as drop)
+
+  (use "wtn:320dada2f786552b556d4d808782f8a42778e0dff5bd32206bfb6fd346fa5791" as encoded)
+
+  (use "wtn:c5785f0c0107163df2b58bd461877b7b94c690f4facc1b2347def61c568ac12c" as exposed)
+
+  (use "wtn:e815d7590abea808f60733d9bea1564c274ed88a3fdde998d7ef715cbabfa4f5" as find_sig)
+
+  (use "wtn:cd4cc382364f89e8d98dcea27516fe748de43225922a64e06ee9f496054de6de" as first_user)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:9007bdd92dd72f02966d2da58f5ba47b5ae8ab31ff5570274d06783cf9dbd465" as heap_marks)
+
+  (use "wtn:06d0e2ee22ec9fa38ad5f88325d6a078a7bbe20b06b597fb87f2c46e656ebdc0" as heap_ty)
+
+  (use "wtn:2f6e6fb9ae2b985873e1da37a007a2de5c00aebd0f4b9e10f26f4364348a3ec9" as i32_wrap)
+
+  (use "wtn:d6b757c223d307c2aed69a316b3ba21c7cfddd375d3f71187e286f9cab632feb" as i64_eq)
+
+  (use "wtn:984c550c73e730d53e2a1befcf24950d5d37f25efb7501504a67cbe5b0b7dd4c" as i64_eqz)
+
+  (use "wtn:60e04221f55a81090a4ec27166c65de3808c91db99bd66ce95b8f46aa739fcaa" as i64_extend_u)
+
+  (use "wtn:f0eb010458ad86a88b42b80e17a552a87604c922a6e9e1feacda314d87c34e0a" as i64_ge_s)
+
+  (use "wtn:d263c2bbb3df950712f2142bff2ac515308767aa9dd03a891d9afc081d71adde" as i64_gt_s)
+
+  (use "wtn:e07b7eec90974999ff3afdc47501adfce68dc4287c8733d0e0a09d5f479be8f3" as i64_le_s)
+
+  (use "wtn:faa84aa5a0431aeaf44ec05e82d426c9e74bccdc1716450153cf0fad9b82069c" as i64_lt_s)
+
+  (use "wtn:7eabcc9f94d563ca363e2b4362c2fd951fc4b074530fc82f672c84f22186d262" as i64_ne)
+
+  (use "wtn:89c9d51d608e0f05ec1b6a9446065fd5aab0f9717cdc63c015f0931932c66a32" as index_add)
+
+  (use "wtn:559e10b924501bc19db0ba6307ae8ce8db93524e959d8b2f671052934eab1cba" as index_concat)
+
+  (use "wtn:dc02872acd93206b3e1b21cd2366bdb3225e767c9284f3f35c726c9c4e602c3a" as index_eq)
+
+  (use "wtn:20fccad3cd67e8dc6ef4f40e7c5f62b7e2fd1719aa2c68ec606157e9c800b799" as index_make)
+
+  (use "wtn:34755009e5ddf79f1d4873f8fe58edeb444cadbc739829e7523c5138fbdf2ff6" as index_mul)
+
+  (use "wtn:9f313ef98f509e6dbf4b03b17a698fd9e559b974c0c5935cdff61c1135cca9e0" as index_release)
+
+  (use "wtn:130301271494fdf876adb4c0c26f568925b59237f836bd113231e3abb3d72e96" as index_retain)
+
+  (use "wtn:5065354d8960ba17d051e013ace8626175524c62a26eea0b1aaa4b2c805e8788" as index_sub)
+
+  (use "wtn:06843d0d71170625bfe7977ecdfbccbaf85813ca655e002afc3006366f08bcb8" as index_to_str)
+
+  (use "wtn:dc64f3a1e2454c942a39c661654b712edf5608405a2ecfd55e7fbd8528fffffc" as inss_join)
+
+  (use "wtn:b39ace52277dbf2d77bb138be2fa632f7a4fd0334d24f209d9bbe1bcfc1bc7f8" as inss_one)
+
+  (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
+
+  (use "wtn:bb0f678baeea7519218f358553ead8eb2d912e89f25ccd92149e48c4becd55a8" as local_get)
+
+  (use "wtn:c78c468a3c6b87cafc6941344f76922c8acef37928bc2aa1295c2928bc2d52ca" as local_set)
+
+  (use "wtn:554f4afd235e8664148acd81aca6e690b2aef41313d143799abae7b9d26e5568" as lookup_ty)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  (use "wtn:4395191374ed238dd424568dcae1a39733b7466150f3e56088ab68064e18c170" as octets_of)
+
+  (use "wtn:fbe67026cafb8a0c543c39634ac9579cc44f88a967013514b079bfb51a9bdcb3" as one)
+
+  (use "wtn:000ee7d66ad02777aeab4a4a4fc0f2e0ceda03392f20223e21c3c1d353355f76" as op)
+
+  (use "wtn:b0baab55c88211010c436266ce39ff8759ba3b50c40d5236ae8280d57b0b9ec3" as owned_body)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:d3b75190b88e9ebf0e44734df929a987ad921ad5f71dbe0a410a3457580ecae2" as prelude_sigs)
+
+  (use "wtn:5c5cf02c5075075508ccf8cfcdca66ae43e75e14d444a5482f59ffbd3d811065" as rounded)
+
+  (use "wtn:af98b7e00058a49e9aa5b9e1f7a88749d828c28c1f37b983f259b60dcacf3617" as runtime)
+
+  (use "wtn:765e5180c1029c7f77132180cbd10361b8b9ca32409ce5dcc19603e2692f2396" as sig_of)
+
+  (use "wtn:5ef202fb8bb6353d475b83429e665cf69191eee38923926c6f8af22b9803cee2" as parts_from)
+
+  (use "wtn:32956da5e8a3c8bbbe88e250922a6f027a14dd77ead0b691b475c51727573959" as bind_inst)
+
+  (use "wtn:95d9729c143f65e831cf5940b632fc4509c2a898cc2f2d756284ff35b5458266" as subst_params)
+
+  (use "wtn:fb853232c7a2e435aab199d1083643553dd89c27fb3b8b883e3a39a1aec38742" as subst_str)
+
+  (use "wtn:435c53cc8f952d4281d9106a3e8fff10eaf8b7418217ea71f877d37fbdd841e8" as fn_tree)
+
+  (use "wtn:080726da26120ca01b5f9374d73c65a48555b7828f69c765010b88a966cec300" as ir_calls)
+
+  (use "wtn:7c458720266cd80590714a9969d186d643cae25d1466d1ee381c9de800618f93" as has)
+
+  (use "wtn:b3f168204183fdd2ce0f08b1d9cc6bd074b8fe5bf60a181c8193892e5061dfb4" as is_instance)
+
+  (use "wtn:ca95db97880db6d5833994e3342a8ce1c104f0859c6566773a9a8cd13ade1da2" as is_array_op)
+
+  (use "wtn:cf16270b55cc77e2d3c4efc7205e509babbae97e9133cc36f820eb398ab1e0b5" as elem_of)
+
+  (use "wtn:717015ea7518fd1549bb358d14c2eb3bf360c2837e1261c0599cc77d46239c1f" as width_prim)
+
+  (use "wtn:928dc0f1e5f4fb19c0d19194713b58b2d6221bda3b276ff0f7256253930a1b0c" as bytes_prim)
+
+  (use "wtn:5a17fd5a17f2a4b9802af7e724100182857860fa8526ab7be742c86c229e226f" as with_prelude)
+
+  (use "wtn:570d8a7b17013b5704cc8a0c9c21d20f9cebce9ee0aff189a1623c95ad169f5d" as index_of)
+
+  (use "wtn:96e136769a0ba142df05391c9a135da076c45ac662703baad63c6fc882211455" as index_slice)
+
+  (use "wtn:0343c0c5c79374b851301e85d99d36e936b78ba5470fade22307e63c77a09bd6" as sigs_join)
+
+  (use "wtn:c7a3b964eeb17c5576b6f147a20bd97f6a94e6762ae7d8435948fd8c08671147" as sigs_of)
+
+  (use "wtn:a222782528e23aa29fbb4803ea70ddc0d4cffc6ed3936efb51acced592d2fd72" as strs_join)
+
+  (use "wtn:d34bdc8fe0ceff6f80eb52cde106b989cd19e2b4bbbc8b2340dccce1b6f0187a" as tenv_join)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:d781357a4f636b536433db54f99f6f421079bfa17a3dfe5c39918d86da7c42ed" as ty_head)
+
+  (use "wtn:c710139219bb05926895f9cda5bd52c40b57b0c57cb2e531c6a7f6c80b01dc27" as word_bytes)
+
+  (use "wtn:b8723d93d45a71e9f7f0aefdf3f7881baed80f27ad0aad79ac16058a7dd4faa3" as wrap)
+
+  (use "wtn:b46025923a0cbce2cb5f71cef9725876b6ab54111251656a705243246586873c" as Hosts)
+
+  (use "wtn:ce3a8a73ab8dfafd30318a0e6b2ce286237d0a74710cd896b0f35c583478a943" as hosts_used)
+
+  (use "wtn:1e8581a3b6a0a796d765f8a5a86a0104d2aedb1075e115d70bca79eb6c656a82" as host_named)
+
+  (use "wtn:a3ddc909191103f7b8885291f45d80759cd1d963632e0b7efa766286e62ef9e7" as host_imports)
+
+  (use "wtn:20c819e95530726b1cf0f6a510204a83fb9e0ecba87da3a439a2ccf27f6f7546" as capability_table)
+
+  ; --- names, literals and the layout -----------------------------------------------------------------
+  (enum LNames (NoLNames) (LNames (name Str) (rest LNames)))
+
+  (enum LPool (NoLPool) (LPool (text Str) (at U32) (rest LPool)))
+
+  ; `here` is the function being lowered, `arity` its parameters, `depth` how many blocks the
+  ; code sits inside, and `tail` whether its answer is the function's: a call to `here` that is
+  ; in tail position sets the parameters and jumps back to the start. `hosts` are the imports,
+  ; the capabilities the program uses, in compiler/lower.wtn's order.
+  (record LCtx (sigs Sigs) (names LNames) (pool LPool) (hosts Hosts) (here Str) (arity U32) (depth U32) (tail Bool))
+
+  (fn deeper ((c LCtx)) LCtx
+    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (wrap.add (get c depth) (u32.of 1))) (tail (get c tail))))
+
+  (fn tailed ((c LCtx) (tail Bool)) LCtx
+    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (get c depth)) (tail tail)))
+
+  (fn answers ((rest Ir) (x Str)) Bool
+    (match rest ((Done a) (match a ((AVar n) (str.eq n x)) ((AInt k) false) ((ABool b) false))) ((Let a b r m) false) ((Drop a m) false) ((Retain a m) false)))
+
+  (fn self_call ((c LCtx) (rhs Rhs)) Bool
+    (match rhs
+      ((RCall f args fx) (and (get c tail) (str.eq f (get c here))))
+      ((RAtom a) false) ((RLit t) false) ((RPrim o a e) false) ((RIf a t e) false) ((RMake k a) false) ((RField o f) false) ((RMatch o a) false)))
+
+  (fn call_args ((rhs Rhs)) Atoms
+    (match rhs
+      ((RCall f args fx) args)
+      ((RAtom a) (NoAtoms)) ((RLit t) (NoAtoms)) ((RPrim o a e) (NoAtoms)) ((RIf a t e) (NoAtoms)) ((RMake k a) (NoAtoms)) ((RField o f) (NoAtoms)) ((RMatch o a) (NoAtoms))))
+
+  ; The arguments into the parameters, last first, and back to the start.
+  (fn sets_down ((n U32)) Inss
+    (if (<= n (u32.of 0)) (NoInss) (Inss (local_set (- n (u32.of 1))) (sets_down (- n (u32.of 1))))))
+
+  (fn lnames_join ((a LNames) (b LNames)) LNames
+    (match a ((NoLNames) b) ((LNames h rest) (LNames h (lnames_join rest b)))))
+
+  (fn lname_index ((ns LNames) (n Str)) U32
+    (match ns
+      ((NoLNames) (u32.of 0))
+      ((LNames h rest) (if (str.eq h n) (u32.of 0) (wrap.add (u32.of 1) (lname_index rest n))))))
+
+  (fn lnames_count ((ns LNames)) U32
+    (match ns ((NoLNames) (u32.of 0)) ((LNames h rest) (wrap.add (u32.of 1) (lnames_count rest)))))
+
+  (fn tenv_names ((ts TEnv)) LNames
+    (match ts ((NoTEnv) (NoLNames)) ((TEnv n t rest) (LNames n (tenv_names rest)))))
+
+  (fn tenv_count ((ts TEnv)) U32
+    (match ts ((NoTEnv) (u32.of 0)) ((TEnv n t rest) (wrap.add (u32.of 1) (tenv_count rest)))))
+
+  ; Every name a block binds, in order; each is a local of the function.
+  (fn ir_binds ((ir Ir)) LNames
+    (match ir
+      ((Let x ty rhs rest) (LNames x (lnames_join (rhs_binds rhs) (ir_binds rest))))
+      ((Done a) (NoLNames))
+      ((Drop x rest) (ir_binds rest))
+      ((Retain x rest) (ir_binds rest))))
+
+  (fn rhs_binds ((rhs Rhs)) LNames
+    (match rhs
+      ((RIf c t e) (lnames_join (ir_binds t) (ir_binds e)))
+      ((RMatch c arms) (arms_binds arms))
+      ((RAtom a) (NoLNames))
+      ((RLit s) (NoLNames))
+      ((RPrim op args fx) (NoLNames))
+      ((RCall f args fx) (NoLNames))
+      ((RMake k args) (NoLNames))
+      ((RField o f) (NoLNames))))
+
+  (fn arms_binds ((arms Arms)) LNames
+    (match arms
+      ((NoArms) (NoLNames))
+      ((Arms k bs body rest) (lnames_join (tenv_names bs) (lnames_join (ir_binds body) (arms_binds rest))))))
+
+  ; The literals of a block, each to be put in static memory once.
+  (fn ir_lits ((ir Ir)) Strs
+    (uses Alloc)
+    (match ir
+      ((Let x ty rhs rest) (strs_join (rhs_lits rhs) (ir_lits rest)))
+      ((Done a) (NoStrs))
+      ((Drop x rest) (ir_lits rest))
+      ((Retain x rest) (ir_lits rest))))
+
+  (fn rhs_lits ((rhs Rhs)) Strs
+    (uses Alloc)
+    (match rhs
+      ((RLit s) (Strs s (NoStrs)))
+      ((RIf c t e) (strs_join (ir_lits t) (ir_lits e)))
+      ((RMatch c arms) (arms_lits arms))
+      ((RAtom a) (NoStrs))
+      ((RPrim op args fx) (NoStrs))
+      ((RCall f args fx) (NoStrs))
+      ((RMake k args) (NoStrs))
+      ((RField o f) (NoStrs))))
+
+  (fn arms_lits ((arms Arms)) Strs
+    (uses Alloc)
+    (match arms
+      ((NoArms) (NoStrs))
+      ((Arms k bs body rest) (strs_join (ir_lits body) (arms_lits rest)))))
+
+  (fn text_size ((s Str)) U32
+    (uses Alloc)
+    (wrap.add (u32.of 8) (rounded (octets_of (str.encode s)))))
+
+  (fn pool_of ((texts Strs) (at U32)) LPool
+    (uses Alloc)
+    (match texts
+      ((NoStrs) (NoLPool))
+      ((Strs t rest) (LPool t at (pool_of rest (wrap.add at (text_size t)))))))
+
+  (fn pool_end ((texts Strs) (at U32)) U32
+    (uses Alloc)
+    (match texts
+      ((NoStrs) at)
+      ((Strs t rest) (pool_end rest (wrap.add at (text_size t))))))
+
+  (fn pool_address ((p LPool) (s Str)) U32
+    (match p
+      ((NoLPool) (u32.of 0))
+      ((LPool t at rest) (if (str.eq t s) at (pool_address rest s)))))
+
+  (fn pool_segments ((p LPool)) Segments
+    (uses Alloc)
+    (match p
+      ((NoLPool) (NoSegments))
+      ((LPool t at rest) (Segments (make Segment (offset at) (bytes (bytes.concat (word_bytes (octets_of (str.encode t))) (str.encode t)))) (pool_segments rest)))))
+
+  ; --- what a name means ----------------------------------------------------------------------------------
+  (fn fn_slot ((sigs Sigs) (name Str)) U32
+    (match sigs
+      ((NoSigs) (u32.of 0))
+      ((Sigs h rest) (if (str.eq (get h kind) "fn")
+        (if (str.eq (get h name) name) (first_user) (wrap.add (u32.of 1) (fn_slot rest name)))
+        (fn_slot rest name)))))
+
+  ; The place of a constructor among those of its enum.
+  (fn tag_before ((sigs Sigs) (name Str) (en Str)) U32
+    (match sigs
+      ((NoSigs) (u32.of 0))
+      ((Sigs h rest) (if (str.eq (get h name) name)
+        (u32.of 0)
+        (if (and (str.eq (get h kind) "ctor") (str.eq (get h ret) en))
+          (wrap.add (u32.of 1) (tag_before rest name en))
+          (tag_before rest name en))))))
+
+  (fn tag_of ((sigs Sigs) (name Str)) U32
+    (match (find_sig sigs name)
+      ((None) (u32.of 0))
+      ((Some sig) (tag_before sigs name (get sig ret)))))
+
+  (fn field_at ((fields TEnv) (f Str)) U32
+    (match fields
+      ((NoTEnv) (u32.of 0))
+      ((TEnv n t rest) (if (str.eq n f) (u32.of 0) (wrap.add (u32.of 1) (field_at rest f))))))
+
+  (fn atom_ty ((tys TEnv) (a Atom)) Str
+    (match a
+      ((AVar n) (match (lookup_ty tys n) ((Some t) t) ((None) "Int")))
+      ((AInt n) "Int")
+      ((ABool b) "Bool")))
+
+  (fn atom_heap ((tys TEnv) (a Atom)) Bool
+    (uses Alloc)
+    (heap_ty tys (atom_ty tys a)))
+
+  ; --- instructions ---------------------------------------------------------------------------------------
+  (fn wide ((n U32)) I64 (i64.of n))
+
+  ; compiler/ir.wtn reads every number as a word, so a U64 above 2^63 is already the I64 with
+  ; the same bits.
+  (fn int_const ((n Int)) Ins
+    (const (if (and (<= (- (- 0 9223372036854775807) 1) n) (<= n 9223372036854775807)) (i64.of n) (i64.of 0))))
+
+  (fn low_atom ((c LCtx) (a Atom)) Inss
+    (match a
+      ((AVar n) (inss_one (local_get (lname_index (get c names) n))))
+      ((AInt n) (inss_one (int_const n)))
+      ((ABool b) (inss_one (const (if b (i64.of 1) (i64.of 0)))))))
+
+  (fn low_atoms ((c LCtx) (as Atoms)) Inss
+    (match as
+      ((NoAtoms) (NoInss))
+      ((Atoms h rest) (inss_join (low_atom c h) (low_atoms c rest)))))
+
+  (fn call_of ((f U32)) Inss (inss_one (WCall f)))
+
+  (fn after ((first Inss) (rest Inss)) Inss (inss_join first rest))
+
+  ; A reference given up, or taken: the answer of the runtime is not wanted.
+  (fn release_of ((c LCtx) (name Str)) Inss
+    (inss_join (inss_one (local_get (lname_index (get c names) name))) (Inss (WCall (index_release)) (inss_one (drop)))))
+
+  (fn retain_of ((c LCtx) (name Str)) Inss
+    (inss_join (inss_one (local_get (lname_index (get c names) name))) (Inss (WCall (index_retain)) (inss_one (drop)))))
+
+  (fn retain_atom ((c LCtx) (a Atom)) Inss
+    (inss_join (low_atom c a) (Inss (WCall (index_retain)) (inss_one (drop)))))
+
+  (fn compare_of ((c LCtx) (cmp Ins) (args Atoms)) Inss
+    (inss_join (low_atoms c args) (Inss cmp (inss_one (i64_extend_u)))))
+
+  (fn low_prim ((c LCtx) (tys TEnv) (op Str) (args Atoms)) (Result Inss Fault)
+    (uses Alloc)
+    (if (str.eq op "+") (Ok (inss_join (low_atoms c args) (call_of (index_add))))
+    (if (str.eq op "-") (Ok (inss_join (low_atoms c args) (call_of (index_sub))))
+    (if (str.eq op "*") (Ok (inss_join (low_atoms c args) (call_of (index_mul))))
+    (if (str.eq op "<") (Ok (compare_of c (if (u64_first tys args) (op_of (u8.of 84)) (i64_lt_s)) args))
+    (if (str.eq op "<=") (Ok (compare_of c (if (u64_first tys args) (op_of (u8.of 88)) (i64_le_s)) args))
+    (if (str.eq op ">") (Ok (compare_of c (if (u64_first tys args) (op_of (u8.of 86)) (i64_gt_s)) args))
+    (if (str.eq op ">=") (Ok (compare_of c (if (u64_first tys args) (op_of (u8.of 90)) (i64_ge_s)) args))
+    (if (str.eq op "=") (Ok (compare_of c (i64_eq) args))
+    (if (str.eq op "not") (Ok (inss_join (low_atoms c args) (Inss (i64_eqz) (inss_one (i64_extend_u)))))
+    (if (str.eq op "concat") (Ok (inss_join (low_atoms c args) (call_of (index_concat))))
+    (if (str.eq op "str.eq") (Ok (inss_join (low_atoms c args) (call_of (index_eq))))
+    (if (str.eq op "num.to_str") (Ok (inss_join (low_atoms c args) (Inss (const (if (u64_first tys args) (i64.of 1) (i64.of 0))) (call_of (index_to_str)))))
+    (match (host_named (get c hosts) op)
+      ((Some found) (low_host c found args))
+      ((None) (if (is_time_op op) (Ok (low_time c op args))
+        (Err (fault "lower_ir" (concat "not lowered yet: " op)))))))))))))))))))
+
+  ; A U64 is printed unsigned, and compared unsigned: every narrower width is kept zero- or
+  ; sign-extended in its word, so a signed comparison of the words is right for it, but a
+  ; U64 from 2^63 up is a word whose sign bit is set.
+  (fn u64_first ((tys TEnv) (args Atoms)) Bool
+    (match args ((NoAtoms) false) ((Atoms a rest) (str.eq (atom_ty tys a) "U64"))))
+
+  ; A call to the host: its import, and `unit` when it answers nothing.
+  (fn low_host ((c LCtx) (found Hosts) (args Atoms)) (Result Inss Fault)
+    (match found
+      ((NoHosts) (Err (fault "lower_ir" "a host function that is used and is not")))
+      ((Hosts name effect slot params results more) (if (str.eq name "store.get")
+        (Err (fault "lower_ir" "not lowered yet: store.get"))
+        (Ok (inss_join (low_atoms c args) (Inss (WHost slot) (if (= results (u32.of 0)) (inss_one (const (i64.of 0))) (NoInss)))))))))
+
+  ; Every time is a number of nanoseconds (or device ticks), as in compiler/lower.wtn.
+  (fn is_time_op ((op Str)) Bool
+    (or (or (or (str.eq op "instant.since") (str.eq op "wall.since")) (or (str.eq op "ticks.since") (str.eq op "instant.plus")))
+      (or (str.eq op "wall.plus") (or (str.eq op "duration.of_ms") (str.eq op "duration.ms")))))
+
+  ; Milliseconds are rounded down: the quotient, less one when the remainder is negative.
+  (fn low_time ((c LCtx) (op Str) (args Atoms)) Inss
+    (if (or (str.eq op "instant.plus") (str.eq op "wall.plus"))
+      (inss_join (low_atoms c args) (inss_one (WOp (u8.of 124))))
+      (if (str.eq op "duration.of_ms")
+        (inss_join (low_atoms c args) (Inss (const (i64.of 1000000)) (inss_one (WOp (u8.of 126)))))
+        (if (str.eq op "duration.ms")
+          (inss_join (inss_join (low_atoms c args) (Inss (const (i64.of 1000000)) (inss_one (WOp (u8.of 127)))))
+            (inss_join (low_atoms c args) (Inss (const (i64.of 1000000)) (Inss (WOp (u8.of 129)) (Inss (const (i64.of 0)) (Inss (i64_lt_s) (Inss (i64_extend_u) (inss_one (WOp (u8.of 125))))))))))
+          (inss_join (low_atoms c args) (inss_one (WOp (u8.of 125))))))))
+
+  ; --- blocks ---------------------------------------------------------------------------------------------
+  (fn low_ir ((c LCtx) (tys TEnv) (ir Ir)) (Result Inss Fault)
+    (uses Alloc)
+    (match ir
+      ((Done a) (Ok (low_atom c a)))
+      ((Drop x rest) (match (low_ir c tys rest)
+        ((Err f) (Err f))
+        ((Ok more) (Ok (inss_join (release_of c x) more)))))
+      ((Retain x rest) (match (low_ir c tys rest)
+        ((Err f) (Err f))
+        ((Ok more) (Ok (inss_join (retain_of c x) more)))))
+      ((Let x ty rhs rest) (let inner (tailed c (and (get c tail) (answers rest x)))
+        (if (self_call inner rhs)
+          (Ok (inss_join (low_atoms c (call_args rhs)) (inss_join (sets_down (get c arity)) (inss_one (WBr (get c depth))))))
+          (match (low_rhs inner tys ty rhs)
+            ((Err f) (Err f))
+            ((Ok code) (match (low_ir c (TEnv x ty tys) rest)
+              ((Err f) (Err f))
+              ((Ok more) (Ok (inss_join code (Inss (local_set (lname_index (get c names) x)) more))))))))))))
+
+  (fn low_rhs ((c LCtx) (tys TEnv) (ty Str) (rhs Rhs)) (Result Inss Fault)
+    (uses Alloc)
+    (match rhs
+      ((RAtom a) (Ok (low_atom c a)))
+      ((RLit s) (Ok (inss_one (const (wide (pool_address (get c pool) s))))))
+      ((RPrim op args fx) (if (is_array_op op) (Ok (low_array c tys op args)) (if (width_prim op) (Ok (low_width c tys op args)) (if (bytes_prim op) (Ok (low_bytes c tys op args)) (low_prim c tys op args)))))
+      ((RCall f args fx) (Ok (inss_join (low_atoms c args) (call_of (fn_slot (get c sigs) f)))))
+      ((RIf cond t e) (match (low_ir (deeper c) tys t)
+        ((Err f) (Err f))
+        ((Ok yes) (match (low_ir (deeper c) tys e)
+          ((Err f) (Err f))
+          ((Ok no) (Ok (inss_join (low_atom c cond) (Inss (const (i64.of 0)) (Inss (i64_ne) (inss_one (WIf true yes no))))))))))) 
+      ((RMake k args) (low_make c tys k args))
+      ((RField o f) (low_field c tys ty o f))
+      ((RMatch scrut arms) (low_arms c tys scrut arms))))
+
+  ; --- arrays ----------------------------------------------------------------------------------------------
+  ; An array is a counted block: its length, then one word for each element. One that holds
+  ; counted values has the top bit of its mask set, and the runtime releases every word after
+  ; the length when it goes; each element it holds is a reference of its own.
+  (fn lget ((c LCtx) (n Str)) Ins (local_get (lname_index (get c names) n)))
+
+  (fn lset ((c LCtx) (n Str)) Ins (local_set (lname_index (get c names) n)))
+
+  ; The address of element `index`'s word, less the length's eight.
+  (fn word_at ((base Inss) (index Inss)) Inss
+    (inss_join base (inss_join index (Inss (const (i64.of 8)) (Inss (WOp (u8.of 126)) (Inss (WOp (u8.of 124)) (inss_one (i32_wrap))))))))
+
+  (fn load_word ((off U32)) Ins (WLoad (u8.of 41) (u8.of 3) off))
+
+  (fn store_word ((off U32)) Ins (WStore (u8.of 55) (u8.of 3) off))
+
+  (fn kept ((heap Bool)) Inss (if heap (inss_one (WCall (index_retain))) (NoInss)))
+
+  (fn made_block ((c LCtx) (size Inss) (mask I64)) Inss
+    (inss_join size (Inss (const mask) (Inss (WCall (index_make)) (inss_one (lset c "%mk"))))))
+
+  (fn low_array ((c LCtx) (tys TEnv) (op Str) (args Atoms)) Inss
+    (uses Alloc)
+    (match args
+      ((NoAtoms) (array_empty c))
+      ((Atoms a rest) (if (str.eq op "bytes.as_text")
+        (inss_join (low_atom c a) (inss_one (WCall (index_retain))))
+      (if (str.eq op "array.len")
+        (inss_join (low_atom c a) (Inss (i32_wrap) (inss_one (load_word (u32.of 0)))))
+        (match rest
+          ((NoAtoms) (inss_one (const (i64.of 0))))
+          ((Atoms b more) (if (str.eq op "array.at")
+            (array_at c tys a b)
+            (array_push c tys a b)))))))))
+
+  (fn array_empty ((c LCtx)) Inss
+    (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
+      (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (i64.of 0)) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk"))))))))
+
+  ; Some element, with a reference of its own, or None.
+  (fn array_at ((c LCtx) (tys TEnv) (a Atom) (i Atom)) Inss
+    (uses Alloc)
+    (let heap (heap_ty tys (elem_of (atom_ty tys a)))
+      (let yes (inss_join (made_block c (inss_one (const (i64.of 16))) (if heap (i64.of 2) (i64.of 0)))
+        (inss_join (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "Some"))) (inss_one (store_word (u32.of 0))))))
+          (inss_join (Inss (lget c "%mk") (inss_one (i32_wrap)))
+            (inss_join (word_at (low_atom c a) (low_atom c i))
+              (Inss (load_word (u32.of 8)) (inss_join (kept heap) (Inss (store_word (u32.of 8)) (inss_one (lget c "%mk")))))))))
+        (let no (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
+          (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "None"))) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk")))))))
+          (inss_join (low_atom c i) (inss_join (low_atom c a) (Inss (i32_wrap) (Inss (load_word (u32.of 0)) (Inss (WOp (u8.of 84)) (inss_one (WIf true yes no)))))))))))
+
+  ; A new array one longer: the elements copied, each held once more, and the new one last.
+  (fn array_push ((c LCtx) (tys TEnv) (a Atom) (x Atom)) Inss
+    (uses Alloc)
+    (let heap (heap_ty tys (atom_ty tys x))
+      (inss_join (inss_join (low_atom c a) (Inss (i32_wrap) (Inss (load_word (u32.of 0)) (inss_one (lset c "%an")))))
+        (inss_join (made_block c (Inss (lget c "%an") (Inss (const (i64.of 2)) (Inss (WOp (u8.of 124)) (Inss (const (i64.of 8)) (inss_one (WOp (u8.of 126)))))))
+                     (if heap (i64.of -9223372036854775808) (i64.of 0)))
+          (inss_join (Inss (lget c "%mk") (Inss (lset c "%aa") (Inss (lget c "%aa") (Inss (i32_wrap) (Inss (lget c "%an") (Inss (const (i64.of 1)) (Inss (WOp (u8.of 124)) (inss_one (store_word (u32.of 0))))))))))
+            (inss_join (Inss (const (i64.of 0)) (inss_one (lset c "%ai")))
+              (inss_join (inss_one (WBlock false (inss_one (WLoop false (copy_step c heap a)))))
+                (inss_join (word_at (inss_one (lget c "%aa")) (inss_one (lget c "%an")))
+                  (inss_join (low_atom c x) (inss_join (kept heap) (Inss (store_word (u32.of 8)) (inss_one (lget c "%aa")))))))))))))
+
+  (fn copy_step ((c LCtx) (heap Bool) (a Atom)) Inss
+    (inss_join (Inss (lget c "%ai") (Inss (lget c "%an") (Inss (WOp (u8.of 90)) (inss_one (WBrIf (u32.of 1))))))
+      (inss_join (word_at (inss_one (lget c "%aa")) (inss_one (lget c "%ai")))
+        (inss_join (word_at (low_atom c a) (inss_one (lget c "%ai")))
+          (Inss (load_word (u32.of 8)) (inss_join (kept heap)
+            (Inss (store_word (u32.of 8)) (Inss (lget c "%ai") (Inss (const (i64.of 1)) (Inss (WOp (u8.of 124)) (Inss (lset c "%ai") (inss_one (WBr (u32.of 0))))))))))))))
+
+  ; --- fixed widths -----------------------------------------------------------------------------------------
+  ; A number of a fixed width is a word kept zero-extended (unsigned) or sign-extended
+  ; (signed), so that a comparison is the word's; what could leave the width is pulled back.
+  (fn width_bits ((t Str)) I64
+    (if (or (str.eq t "U8") (str.eq t "I8")) (i64.of 8)
+      (if (or (str.eq t "U16") (str.eq t "I16")) (i64.of 16)
+        (if (or (str.eq t "U32") (str.eq t "I32")) (i64.of 32) (i64.of 64)))))
+
+  (fn signed_ty ((t Str)) Bool (or (or (str.eq t "I8") (str.eq t "I16")) (or (str.eq t "I32") (str.eq t "I64"))))
+
+  (fn op_of ((n U8)) Ins (WOp n))
+
+  ; Back into the width.
+  (fn narrowed ((t Str)) Inss
+    (let bits (width_bits t)
+      (if (= bits (i64.of 64))
+        (NoInss)
+        (if (signed_ty t)
+          (Inss (const (wrap.sub (i64.of 64) bits)) (Inss (op_of (u8.of 134)) (Inss (const (wrap.sub (i64.of 64) bits)) (inss_one (op_of (u8.of 135))))))
+          (Inss (const (wrap.sub (bit.shl (i64.of 1) (int.of bits)) (i64.of 1))) (inss_one (op_of (u8.of 131))))))))
+
+  ; The width's bit pattern read as signed, whatever the type says.
+  (fn sign_spread ((t Str)) Inss
+    (let bits (width_bits t)
+      (if (or (= bits (i64.of 64)) (signed_ty t))
+        (NoInss)
+        (Inss (const (wrap.sub (i64.of 64) bits)) (Inss (op_of (u8.of 134)) (Inss (const (wrap.sub (i64.of 64) bits)) (inss_one (op_of (u8.of 135)))))))))
+
+  ; The width's bit pattern read as unsigned.
+  (fn zero_spread ((t Str)) Inss
+    (let bits (width_bits t)
+      (if (or (= bits (i64.of 64)) (not (signed_ty t)))
+        (NoInss)
+        (Inss (const (wrap.sub (bit.shl (i64.of 1) (int.of bits)) (i64.of 1))) (inss_one (op_of (u8.of 131)))))))
+
+  (fn low_width ((c LCtx) (tys TEnv) (op Str) (args Atoms)) Inss
+    (match args
+      ((NoAtoms) (inss_one (const (i64.of 0))))
+      ((Atoms a rest) (let t (atom_ty tys a)
+        (if (str.eq op "bit.not")
+          (inss_join (low_atom c a) (Inss (const (i64.of -1)) (Inss (op_of (u8.of 133)) (narrowed t))))
+          (match rest
+            ((NoAtoms) (low_atom c a))
+            ((Atoms b more) (width_two c t op a b))))))))
+
+  (fn width_two ((c LCtx) (t Str) (op Str) (a Atom) (b Atom)) Inss
+    (let plain (fn_code op)
+      (if (< (u32.of 0) plain)
+        (inss_join (low_atom c a) (inss_join (low_atom c b) (Inss (op_of (u8.of (bit.and plain (u32.of 255)))) (narrowed t))))
+        (let inside (inss_join (low_atom c b) (Inss (const (width_bits t)) (inss_one (op_of (u8.of 84)))))
+          (if (str.eq op "bit.shl")
+            (inss_join (low_atom c a) (inss_join (low_atom c b) (Inss (op_of (u8.of 134)) (inss_join (narrowed t) (Inss (const (i64.of 0)) (inss_join inside (inss_one (op_of (u8.of 27)))))))))
+            (if (str.eq op "bit.shr")
+              (inss_join (low_atom c a) (inss_join (zero_spread t) (inss_join (low_atom c b) (Inss (op_of (u8.of 136)) (inss_join (narrowed t) (Inss (const (i64.of 0)) (inss_join inside (inss_one (op_of (u8.of 27))))))))))
+              (inss_join (low_atom c a) (inss_join (sign_spread t)
+                (inss_join (low_atom c b) (Inss (const (wrap.sub (width_bits t) (i64.of 1))) (inss_join inside
+                  (Inss (op_of (u8.of 27)) (Inss (op_of (u8.of 135)) (narrowed t))))))))))))))
+
+  ; The instruction for the operations that are one, 0 for the shifts.
+  (fn fn_code ((op Str)) U32
+    (if (str.eq op "wrap.add") (u32.of 124)
+      (if (str.eq op "wrap.sub") (u32.of 125)
+        (if (str.eq op "wrap.mul") (u32.of 126)
+          (if (str.eq op "bit.and") (u32.of 131)
+            (if (str.eq op "bit.or") (u32.of 132)
+              (if (str.eq op "bit.xor") (u32.of 133) (u32.of 0))))))))
+
+  ; --- bytes ------------------------------------------------------------------------------------------------
+  ; Bytes are text's layout -- a counted block, its length, then the octets -- and `str.encode`
+  ; is the same block with one reference more.
+  (fn low_bytes ((c LCtx) (tys TEnv) (op Str) (args Atoms)) Inss
+    (if (str.eq op "str.encode") (inss_join (low_atoms c args) (inss_one (WCall (index_retain))))
+      (if (str.eq op "bytes.concat") (inss_join (low_atoms c args) (inss_one (WCall (index_concat))))
+        (if (str.eq op "bytes.eq") (inss_join (low_atoms c args) (inss_one (WCall (index_eq))))
+          (if (str.eq op "bytes.of") (inss_join (low_atoms c args) (inss_one (WCall (index_of))))
+            (if (str.eq op "bytes.slice") (inss_join (low_atoms c args) (inss_one (WCall (index_slice))))
+              (match args
+                ((NoAtoms) (inss_one (const (i64.of 0))))
+                ((Atoms a rest) (if (str.eq op "bytes.len")
+                  (inss_join (low_atom c a) (Inss (i32_wrap) (inss_one (load_word (u32.of 0)))))
+                  (match rest
+                    ((NoAtoms) (inss_one (const (i64.of 0))))
+                    ((Atoms b more) (if (str.eq op "bytes.at") (bytes_at c a b) (num_div c tys a b)))))))))))))
+
+  ; Some octet, or None.
+  (fn bytes_at ((c LCtx) (b Atom) (i Atom)) Inss
+    (let yes (inss_join (made_block c (inss_one (const (i64.of 16))) (i64.of 0))
+      (inss_join (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "Some"))) (inss_one (store_word (u32.of 0))))))
+        (inss_join (Inss (lget c "%mk") (inss_one (i32_wrap)))
+          (inss_join (low_atom c b) (inss_join (low_atom c i) (Inss (WOp (u8.of 124)) (Inss (i32_wrap)
+            (Inss (WLoad (u8.of 49) (u8.of 0) (u32.of 8)) (Inss (store_word (u32.of 8)) (inss_one (lget c "%mk")))))))))))
+      (let no (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
+        (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "None"))) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk")))))))
+        (inss_join (low_atom c i) (inss_join (low_atom c b) (Inss (i32_wrap) (Inss (load_word (u32.of 0)) (Inss (WOp (u8.of 84)) (inss_one (WIf true yes no))))))))))
+
+  ; Some quotient rounded down, as the interpreter has it, or None for a divisor of zero.
+  ; An unsigned width divides unsigned, and needs no rounding down.
+  (fn num_div ((c LCtx) (tys TEnv) (a Atom) (b Atom)) Inss
+    (let unsigned (unsigned_ty (atom_ty tys a))
+    (let q (inss_join (low_atom c a) (inss_join (low_atom c b) (inss_one (WOp (if unsigned (u8.of 128) (u8.of 127))))))
+      (let r (inss_join (low_atom c a) (inss_join (low_atom c b) (inss_one (WOp (u8.of 129)))))
+        (let down (if unsigned (inss_one (const (i64.of 0))) (inss_join r (Inss (const (i64.of 0)) (Inss (WOp (u8.of 82))
+                    (inss_join r (inss_join (low_atom c b) (Inss (WOp (u8.of 133)) (Inss (const (i64.of 0)) (Inss (WOp (u8.of 83)) (Inss (WOp (u8.of 113)) (inss_one (WOp (u8.of 173)))))))))))))
+          (let yes (inss_join (made_block c (inss_one (const (i64.of 16))) (i64.of 0))
+            (inss_join (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "Some"))) (inss_one (store_word (u32.of 0))))))
+              (inss_join (Inss (lget c "%mk") (inss_one (i32_wrap)))
+                (inss_join q (inss_join down (Inss (WOp (u8.of 125)) (Inss (store_word (u32.of 8)) (inss_one (lget c "%mk")))))))))
+            (let no (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
+              (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "None"))) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk")))))))
+              (inss_join (low_atom c b) (Inss (WOp (u8.of 80)) (inss_one (WIf true no yes)))))))))))
+
+  (fn unsigned_ty ((t Str)) Bool (or (or (str.eq t "U8") (str.eq t "U16")) (or (str.eq t "U32") (str.eq t "U64"))))
+
+  ; --- records and variants -------------------------------------------------------------------------------
+  (fn mask_of ((c LCtx) (tys TEnv) (args Atoms) (at U32)) U32
+    (uses Alloc)
+    (match args
+      ((NoAtoms) (u32.of 0))
+      ((Atoms h rest) (bit.or (if (atom_heap tys h) (bit.shl (u32.of 1) (int.of at)) (u32.of 0)) (mask_of c tys rest (wrap.add at (u32.of 1)))))))
+
+  (fn atoms_count ((as Atoms)) U32
+    (match as ((NoAtoms) (u32.of 0)) ((Atoms h rest) (wrap.add (u32.of 1) (atoms_count rest)))))
+
+  (fn low_make ((c LCtx) (tys TEnv) (k Str) (args Atoms)) (Result Inss Fault)
+    (uses Alloc)
+    (match (find_sig (get c sigs) k)
+      ((None) (Err (fault "lower_ir" (concat "no constructor named " k))))
+      ((Some sig) (let first (if (str.eq (get sig kind) "ctor") (u32.of 1) (u32.of 0))
+        (let words (wrap.add first (atoms_count args))
+          (let mask (mask_of c tys args first)
+            (let temp (lname_index (get c names) "%mk")
+              (Ok (inss_join (Inss (const (wide (wrap.mul words (u32.of 8)))) (Inss (const (wide mask)) (Inss (WCall (index_make)) (inss_one (local_set temp)))))
+                (inss_join (tag_store c sig temp)
+                  (inss_join (field_stores c tys temp args first)
+                    (inss_one (local_get temp)))))))))))))
+
+  (fn tag_store ((c LCtx) (sig Sig) (temp U32)) Inss
+    (if (str.eq (get sig kind) "ctor")
+      (Inss (local_get temp) (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) (get sig name)))) (inss_one (WStore (u8.of 55) (u8.of 3) (u32.of 0))))))
+      (NoInss)))
+
+  ; Each argument is stored, and a counted one is held by the value that now has it.
+  (fn field_stores ((c LCtx) (tys TEnv) (temp U32) (args Atoms) (at U32)) Inss
+    (uses Alloc)
+    (match args
+      ((NoAtoms) (NoInss))
+      ((Atoms h rest) (inss_join
+        (Inss (local_get temp) (Inss (i32_wrap) (inss_join (low_atom c h) (inss_one (WStore (u8.of 55) (u8.of 3) (wrap.mul at (u32.of 8)))))))
+        (inss_join (if (atom_heap tys h) (retain_atom c h) (NoInss))
+          (field_stores c tys temp rest (wrap.add at (u32.of 1))))))))
+
+  (fn low_field ((c LCtx) (tys TEnv) (ty Str) (o Atom) (f Str)) (Result Inss Fault)
+    (uses Alloc)
+    (match (find_sig (get c sigs) (ty_head (atom_ty tys o)))
+      ((None) (Err (fault "lower_ir" "a field of something that is not a record")))
+      ((Some sig) (Ok (inss_join (low_atom c o)
+        (Inss (i32_wrap) (Inss (WLoad (u8.of 41) (u8.of 3) (wrap.mul (field_at (get sig params) f) (u32.of 8)))
+          (if (heap_ty tys ty) (call_of (index_retain)) (NoInss)))))))))
+
+  ; --- match -----------------------------------------------------------------------------------------------
+  (fn low_arms ((c LCtx) (tys TEnv) (scrut Atom) (arms Arms)) (Result Inss Fault)
+    (uses Alloc)
+    (match arms
+      ((NoArms) (Ok (inss_one (const (i64.of 0)))))
+      ((Arms k bs body rest) (match rest
+        ((NoArms) (low_arm c tys scrut bs body))
+        ((Arms k2 bs2 body2 rest2) (match (low_arm (deeper c) tys scrut bs body)
+          ((Err f) (Err f))
+          ((Ok yes) (match (low_arms (deeper c) tys scrut rest)
+            ((Err f) (Err f))
+            ((Ok no) (Ok (inss_join (low_atom c scrut)
+              (Inss (i32_wrap) (Inss (WLoad (u8.of 41) (u8.of 3) (u32.of 0))
+                (Inss (const (wide (tag_of (get c sigs) k))) (Inss (i64_eq) (inss_one (WIf true yes no)))))))))))))))))
+
+  (fn low_arm ((c LCtx) (tys TEnv) (scrut Atom) (bs TEnv) (body Ir)) (Result Inss Fault)
+    (uses Alloc)
+    (match (low_ir c (tenv_join bs tys) body)
+      ((Err f) (Err f))
+      ((Ok code) (Ok (inss_join (binders_bound c tys scrut bs (u32.of 1)) code)))))
+
+  (fn binders_bound ((c LCtx) (tys TEnv) (scrut Atom) (bs TEnv) (at U32)) Inss
+    (uses Alloc)
+    (match bs
+      ((NoTEnv) (NoInss))
+      ((TEnv n t rest) (inss_join
+        (inss_join (low_atom c scrut) (Inss (i32_wrap) (Inss (WLoad (u8.of 41) (u8.of 3) (wrap.mul at (u32.of 8))) (Inss (local_set (lname_index (get c names) n)) (NoInss)))))
+        (inss_join (if (heap_ty tys t) (retain_of c n) (NoInss))
+          (binders_bound c tys scrut rest (wrap.add at (u32.of 1))))))))
+
+  ; --- functions and the module ---------------------------------------------------------------------------
+  (enum Irs (NoIrs) (Irs (sig Sig) (ir Ir) (rest Irs)))
+
+  (fn irs_lits ((is Irs)) Strs
+    (uses Alloc)
+    (match is ((NoIrs) (NoStrs)) ((Irs s ir rest) (strs_join (ir_lits ir) (irs_lits rest)))))
+
+  (fn func_of ((sigs Sigs) (pool LPool) (hosts Hosts) (sig Sig) (ir Ir)) (Result Func Fault)
+    (uses Alloc)
+    (let tys (heap_marks sigs (get sig params))
+      (let names (lnames_join (tenv_names (get sig params)) (LNames "%mk" (LNames "%ai" (LNames "%an" (LNames "%aa" (ir_binds ir))))))
+        (match (low_ir (make LCtx (sigs sigs) (names names) (pool pool) (hosts hosts) (here (get sig name)) (arity (tenv_count (get sig params))) (depth (u32.of 0)) (tail true)) tys ir)
+          ((Err f) (Err f))
+          ((Ok code) (Ok (make Func
+            (name (get sig name))
+            (params (tenv_count (get sig params)))
+            (results (u32.of 1))
+            (locals (wrap.add (u32.of 4) (lnames_count (ir_binds ir))))
+            (body (inss_one (WLoop true code)))
+            (exported true))))))))
+
+  (fn irs_funcs ((sigs Sigs) (pool LPool) (hosts Hosts) (is Irs)) (Result Funcs Fault)
+    (uses Alloc)
+    (match is
+      ((NoIrs) (Ok (NoFuncs)))
+      ((Irs sig ir rest) (match (func_of sigs pool hosts sig ir)
+        ((Err f) (Err f))
+        ((Ok one) (match (irs_funcs sigs pool hosts rest)
+          ((Err f) (Err f))
+          ((Ok more) (Ok (Funcs one more)))))))))
+
+  (fn fn_body ((h Tree)) (Option Tree)
+    (match (after_head h)
+      ((NoTrees) (None))
+      ((Trees n rest) (match rest
+        ((NoTrees) (None))
+        ((Trees params more) (match more
+          ((NoTrees) (None))
+          ((Trees ret clauses) (last_of clauses))))))))
+
+  (fn module_irs ((sigs Sigs) (items Trees)) (Result Irs Fault)
+    (uses Alloc)
+    (match items
+      ((NoTrees) (Ok (NoIrs)))
+      ((Trees h rest) (if (head_is h "fn")
+        (match (sig_of h)
+          ((None) (module_irs sigs rest))
+          ((Some sig) (match (get sig tparams)
+            ((TEnv ta tb tc) (module_irs sigs rest))
+            ((NoTEnv) (match (fn_body h)
+            ((None) (module_irs sigs rest))
+            ((Some body) (match (conv sigs (get sig params) body 0 400)
+              ((Err f) (Err f))
+              ((Ok cv) (match (module_irs sigs rest)
+                ((Err f) (Err f))
+                ((Ok more) (Ok (Irs sig (owned_body (heap_marks sigs (get sig params)) (wrap (get cv pend) (Done (get cv atom)))) more))))))))))))
+        (module_irs sigs rest)))))
+
+  (fn irs_calls ((is Irs)) Strs
+    (uses Alloc)
+    (match is
+      ((NoIrs) (NoStrs))
+      ((Irs sig ir rest) (strs_join (ir_calls ir) (irs_calls rest)))))
+
+  (fn irs_join ((a Irs) (b Irs)) Irs
+    (match a ((NoIrs) b) ((Irs sig ir rest) (Irs sig ir (irs_join rest b)))))
+
+  ; The copies of the generic functions that are called, and those they call (see compiler/ir.wtn).
+  (fn instance_irs ((sigs Sigs) (items Trees) (pending Strs) (done Strs) (left Int)) (Result Irs Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Ok (NoIrs))
+      (match pending
+        ((NoStrs) (Ok (NoIrs)))
+        ((Strs p rest) (if (has done p)
+          (instance_irs sigs items rest done (- left 1))
+          (match (parts_from (str.encode p) 0 (str.encode "") 400)
+            ((NoStrs) (instance_irs sigs items rest (Strs p done) (- left 1)))
+            ((Strs base targs) (match (find_sig sigs base)
+              ((None) (instance_irs sigs items rest (Strs p done) (- left 1)))
+              ((Some sig) (match (fn_tree items base)
+                ((None) (instance_irs sigs items rest (Strs p done) (- left 1)))
+                ((Some h) (match (fn_body h)
+                  ((None) (instance_irs sigs items rest (Strs p done) (- left 1)))
+                  ((Some body) (instance_one sigs items rest done left p sig body (bind_inst (get sig tparams) targs)))))))))))))))
+
+  (fn instance_sig ((sig Sig) (p Str) (m TEnv)) Sig
+    (uses Alloc)
+    (make Sig
+      (name p)
+      (params (subst_params (get sig params) m))
+      (ret (subst_str (get sig ret) m))
+      (effects (get sig effects))
+      (kind "fn")
+      (tparams (NoTEnv))))
+
+  (fn instance_one ((sigs Sigs) (items Trees) (rest Strs) (done Strs) (left Int) (p Str) (sig Sig) (body Tree) (m TEnv)) (Result Irs Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Ok (NoIrs))
+      (let sig2 (instance_sig sig p m)
+        (match (conv sigs (get sig2 params) body 0 400)
+          ((Err f) (Err f))
+          ((Ok cv) (let ir (owned_body (heap_marks sigs (get sig2 params)) (wrap (get cv pend) (Done (get cv atom))))
+            (match (instance_irs sigs items (strs_join rest (ir_calls ir)) (Strs p done) (- left 1))
+              ((Err f) (Err f))
+              ((Ok more) (Ok (Irs sig2 ir more))))))))))
+
+  (fn module_all ((sigs Sigs) (items Trees)) (Result Irs Fault)
+    (uses Alloc)
+    (match (module_irs sigs items)
+      ((Err f) (Err f))
+      ((Ok is) (match (instance_irs sigs items (irs_calls is) (NoStrs) 200)
+        ((Err f) (Err f))
+        ((Ok more) (Ok (irs_join is more)))))))
+
+  ; The functions a module is made of: the generic ones are not among them, their copies are.
+  (fn plain_sigs ((ss Sigs)) Sigs
+    (uses Alloc)
+    (match ss
+      ((NoSigs) (NoSigs))
+      ((Sigs h rest) (match (get h tparams)
+        ((NoTEnv) (Sigs h (plain_sigs rest)))
+        ((TEnv a b c) (if (str.eq (get h kind) "fn") (plain_sigs rest) (Sigs h (plain_sigs rest))))))))
+
+  (fn instance_sigs ((is Irs)) Sigs
+    (uses Alloc)
+    (match is
+      ((NoIrs) (NoSigs))
+      ((Irs sig ir rest) (if (is_instance (get sig name)) (Sigs sig (instance_sigs rest)) (instance_sigs rest)))))
+
+  (fn lfuncs_join ((a Funcs) (b Funcs)) Funcs
+    (match a ((NoFuncs) b) ((Funcs h rest) (Funcs h (lfuncs_join rest b)))))
+
+  (fn module_of ((sigs Sigs) (hosts Hosts) (is Irs)) (Result Module Fault)
+    (uses Alloc)
+    (let texts (irs_lits is)
+      (let end (pool_end texts (u32.of 64))
+        (let heap (rounded (if (< end (u32.of 1024)) (u32.of 1024) end))
+          (let pool (pool_of texts (u32.of 64))
+            (match (irs_funcs sigs pool hosts is)
+              ((Err f) (Err f))
+              ((Ok funcs) (Ok (make Module
+                (imports (host_imports hosts))
+                (funcs (lfuncs_join (exposed (runtime (i64.of 0) (i64.of 0) (wide heap))) funcs))
+                (segments (pool_segments pool))
+                (pages (wrap.add (bit.shr heap 16) (u32.of 2)))
+                (heap (wide heap)))))))))))
+
+  ; Witness source in, the module the backends read out, from the intermediate representation.
+  (fn module_ir ((src Str)) (Result Module Fault)
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (Err f))
+      ((Ok tree) (let items (with_prelude (module_items tree))
+        (let sigs (sigs_join (prelude_sigs) (sigs_of items))
+          (match (module_all sigs items)
+            ((Err f) (Err f))
+            ((Ok is) (module_of (sigs_join (plain_sigs sigs) (instance_sigs is)) (hosts_used (capability_table) items (u32.of 0)) is))))))))
+
+  ; Witness source in, a WebAssembly module out, from the intermediate representation.
+  (fn compile_ir ((src Str)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (module_ir src) ((Err f) (Err f)) ((Ok m) (Ok (encoded m)))))
+
+  ; The module, or the reason there is none (which does not begin with a module's magic number).
+  (fn compile_or_why ((src Str)) Bytes
+    (uses Alloc)
+    (match (compile_ir src) ((Ok b) b) ((Err f) (str.encode (get f why)))))
+
+  (fn main () Unit
+    (uses Console)
+    (print "compiler/lower_ir.wtn is exercised by tests/test_lower_ir.py")))
