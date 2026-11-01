@@ -18,13 +18,21 @@
 
   (use "wtn:5b123f88fe4b7128f93dd24d20649bd7d4698fd584f7abd052dcf27110bda4b1" as xtensa_s3_elf_of)
 
-  (use "wtn:29a5f535e1de9e8ff808a5b5d23ec9b246d8156f52ad0a3817047a07579323ac" as checked_bound)
+  (use "wtn:bd2c90aea81df7b80fefdefa085f4873de8414074cf014afbf91ff11a8730fcc" as checked_bound)
 
-  (use "wtn:88c73db9a8893b323b01e30609eff81feeebad5f82c12f7e62fdf716aaf9723f" as checked_bound_in)
+  (use "wtn:1cb1723bb5fb60aea560cf171d671082647b157b9561352ba849ce0ebcd33f3d" as checked_bound_in)
 
   (use "wtn:61b215edb2c7025de42e889ce2b3e73ee789f2b9ff345a30b6aad643572f3b6a" as esp32_room)
 
   (use "wtn:3b5197a59216c6648cb24412ef872cfb200d1b64f7af3e49c6030b2fd5fdb227" as esp32s3_room)
+
+  (use "wtn:285ec8ea602a2c6e2a86837e63b8b3381e2296c260aba42bc6e00edba7852e3e" as checked_bounds_in)
+
+  (use "wtn:eb01605a4ed93c26fd7b1776e3234637fd8fed5a5f96948a551ce1becd2d6280" as thumb_room)
+
+  (use "wtn:a4f3af076a5d9004f62397643122425483c1ef4ce32b6bde82ed46b511416f44" as esp32p4_room)
+
+  (use "wtn:5ba222511c6b121419a2adfe0d3a79142b281696dbc7c7fd4e0217b8aa88400a" as esp32p4_elf_of)
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
@@ -111,13 +119,29 @@
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
-  ; For a board whose stacks must not overflow (the `mcu` profile): the image only if what it
-  ; can use of each stack, bounded before it runs (compiler/stack.wtn), fits the room it has.
+  ; The same source as an ESP32-P4 (RISC-V, bare metal) image, and its bounded build.
+  (fn drive_esp32p4 ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_esp32p4_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32p4_room))
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
+  ; For a board whose stacks and heap must not overflow (the `mcu` and `esp32` profiles): the
+  ; image only if what it can use of each, bounded before it runs (compiler/stack.wtn), fits
+  ; the room it has.
   (fn drive_thumb_bounded ((src Str)) Bytes
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound m "main" src)
+      ((Ok m) (match (checked_bounds_in m "main" src (thumb_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
         ((Ok b) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
@@ -131,13 +155,12 @@
         ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
 
   ; The bounded build for the ESP32 and the ESP32-S3, the `esp32` profile's: each image only
-  ; if its stacks fit the room its layout has (compiler/stack.wtn). A program that allocates is
-  ; refused for now, as on Cortex-M, since a heap that grows has no bound yet.
+  ; if its stacks and heap fit the room its layout has (compiler/stack.wtn).
   (fn drive_xtensa_bounded ((src Str)) Bytes
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound_in m "main" src (esp32_room))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
         ((Ok b) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
@@ -145,7 +168,7 @@
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound_in m "main" src (esp32s3_room))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32s3_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
         ((Ok b) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
@@ -158,6 +181,17 @@
       ((Ok m) (match (checked_bound_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (esp32_room)))
         ((Err f) (concat "error: " (get f why)))
         ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
+
+  ; Every bound as text for a chip ("thumb", "esp32", "esp32s3" or "esp32p4"): the operand stack's bytes,
+  ; the machine stack's, the most the heap can grow by, and where it starts.
+  (fn bounds_text ((src Str) (chip Str)) Str
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (concat "error: " (get f why)))
+      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (thumb_room)))))
+        ((Err f) (concat "error: " (get f why)))
+        ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine))
+          (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))
 
   (fn drive_riscv_filter ((src Str)) Bytes
     (uses Alloc)

@@ -302,7 +302,10 @@
 
   (fn nothing () Bound (make Bound (operand 0) (machine 0)))
 
-  (record Cx (rows Rows) (depths Depths) (heap Bool))
+  ; `release` is how deep `rt_release`'s own recursion can go: a chain of releases frees one
+  ; distinct block at each step, and every counted block is at least 24 bytes (a count, a
+  ; size and a word), so the heap's bound over 24 bounds it. Without a heap it is never made.
+  (record Cx (rows Rows) (depths Depths) (heap Bool) (release Int))
 
   ; The most a call of `k` can use, its own frame included. `left` is the longest chain there
   ; can be without a cycle, which the table's length bounds.
@@ -316,7 +319,9 @@
         ((Some r) (if (not (str.eq (get r bad) ""))
           (Err (fault "stack" (concat (get r name) (concat ": " (get r bad)))))
           (if (on_cycle (get cx rows) (get cx heap) k)
-            (nest cx k r (- left 1))
+            (if (and (str.eq (get r name) "rt_release") (< 0 (get cx release)))
+              (Ok (released cx r))
+              (nest cx k r (- left 1)))
             (match (costliest cx (callees (get cx rows) k (get cx heap)) (- left 1))
               ((Err f) (Err f))
               ((Ok b) (Ok (plus (frame r) b))))))))))
@@ -392,6 +397,17 @@
           ((Err f) (Err f))
           ((Ok b) (Ok (worse a b))))))))))
 
+  ; A runtime function on a cycle: only release's, and only with the heap bounding its depth.
+  (fn cycled ((cx Cx) (r Row) (rest Calls) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (deep)
+      (if (and (str.eq (get r name) "rt_release") (< 0 (get cx release)))
+        (match (runtime_calls cx rest (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (Ok (worse (released cx r) b))))
+        (Err (fault "stack" (concat (get r name) " recurses in the runtime, with nothing to bound it"))))))
+
   (fn runtime_calls ((cx Cx) (cs Calls) (left Int)) (Result Bound Fault)
     (uses Alloc)
     (requires (<= 0 left))
@@ -403,12 +419,214 @@
         ((Some r) (if (not (is_runtime (get r name)))
           (runtime_calls cx rest (- left 1))
           (if (on_cycle (get cx rows) (get cx heap) i)
-            (Err (fault "stack" (concat (get r name) " recurses in the runtime, with nothing to bound it")))
+            (cycled cx r rest (- left 1))
             (match (cost cx i (- left 1))
               ((Err f) (Err f))
               ((Ok a) (match (runtime_calls cx rest (- left 1))
                 ((Err f) (Err f))
                 ((Ok b) (Ok (worse a b))))))))))))))
+
+  ; A chain of releases, `release` deep, and the allocation of the free lists' table, which
+  ; the first release to free anything makes, at the bottom of it.
+  (fn released ((cx Cx) (r Row)) Bound
+    (let alloc (match (index_named (get cx rows) "rt_alloc" 0)
+                 ((None) (nothing))
+                 ((Some a) (match (row_at (get cx rows) a) ((None) (nothing)) ((Some ar) (frame ar)))))
+      (plus (make Bound (operand (* (get cx release) (get r operand))) (machine (* (get cx release) (get r machine)))) alloc)))
+
+  ; --- the heap ---------------------------------------------------------------------------------------
+  ; How far the heap can grow, in bytes, read off the image the way the stacks are. A block's
+  ; size is a constant at every place the program makes one -- a record or a variant is
+  ; `make(n, mask)` with both written out -- so a body makes a known number of bytes, and a
+  ; run makes what its body does once for every time it can run: a function that goes round
+  ; again (a call to itself in tail position is a jump back to its start) at most its declared
+  ; depth of times, and a recursion `1 + k + ... + k^(d-1)` times for a depth of d and at most k
+  ; calls back into it from one body. Nothing freed is counted as given back, so this bounds
+  ; the heap pointer, which only moves up. A block whose size the program computes -- what
+  ; `concat` or `bytes.slice` make -- has no bound here and is refused by name, as is one made
+  ; in a loop of the runtime's own; `num.to_str` is the exception, its digits being at most a
+  ; sign and twenty (a 24-byte scratch block and a string of at most 24, 88 bytes in all).
+  (record Own (bytes Int) (calls Calls) (loops Bool) (bad Str))
+
+  (fn own_none () Own (make Own (bytes 0) (calls (NoCalls)) (loops false) (bad "")))
+
+  (fn own_bad ((o Own) (why Str)) Own (if (str.eq (get o bad) "") (with o (bad why)) o))
+
+  (fn own_add ((o Own) (n Int)) Own (with o (bytes (+ (get o bytes) n))))
+
+  ; What `make(n)` takes: n bytes in words, one at least, behind a count and a size.
+  (fn block ((n I64)) Int
+    (let w (int.of n) (+ 16 (* 8 (if (<= w 8) 1 (match (num.div (+ w 7) 8) ((Some q) q) ((None) 1)))))))
+
+  ; What `alloc(n)` takes: n rounded up to a word.
+  (fn rounded ((n I64)) Int
+    (let w (int.of n) (if (<= w 0) 0 (* 8 (match (num.div (+ w 7) 8) ((Some q) q) ((None) 0))))))
+
+  ; The function at a call's index, as the call graph counts them.
+  (fn fn_at ((fs Funcs) (k Int)) (Option Func)
+    (match fs ((NoFuncs) (None)) ((Funcs f rest) (if (<= k 0) (if (= k 0) (Some f) (None)) (fn_at rest (- k 1))))))
+
+  (fn callee_name ((fs Funcs) (f U32)) Str (match (func_at fs f) ((None) "") ((Some g) (get g name))))
+
+  ; One body. `nest` counts the blocks between here and the function's own loop, so a jump that
+  ; far goes round again; it starts at -1 for a function of the program, whose body is that
+  ; loop, and far below for the runtime's, which have none. `looped` is whether this is inside a
+  ; loop of another kind, and `a` and `b` the last two constants, which a call to `make`,
+  ; `alloc` or `new` takes its size from.
+  (fn own_walk ((fs Funcs) (is Inss) (nest Int) (looped Bool) (a (Option I64)) (b (Option I64)) (o Own)) Own
+    (uses Alloc)
+    (match is
+      ((NoInss) o)
+      ((Inss i rest) (match i
+        ((WConst n) (own_walk fs rest nest looped (Some n) a o))
+        ((WCall f) (own_walk fs rest nest looped (None) (None) (own_call (callee_name fs f) (int.of f) looped a b o)))
+        ((WIf v then other) (own_walk fs rest nest looped (None) (None)
+          (own_walk fs other (+ nest 1) looped (None) (None) (own_walk fs then (+ nest 1) looped (None) (None) o))))
+        ((WBlock v body) (own_walk fs rest nest looped (None) (None) (own_walk fs body (+ nest 1) looped (None) (None) o)))
+        ((WLoop v body) (own_walk fs rest nest looped (None) (None) (own_walk fs body (+ nest 1) (or looped (not (= nest -1))) (None) (None) o)))
+        ((WBr d) (own_walk fs rest nest looped (None) (None) (if (= (int.of d) nest) (with o (loops true)) o)))
+        ((WBrIf d) (own_walk fs rest nest looped (None) (None) (if (= (int.of d) nest) (with o (loops true)) o)))
+        ((WLocalGet x) (own_walk fs rest nest looped (None) (None) o))
+        ((WLocalSet x) (own_walk fs rest nest looped (None) (None) o))
+        ((WLocalTee x) (own_walk fs rest nest looped (None) (None) o))
+        ((WGlobalGet x) (own_walk fs rest nest looped (None) (None) o))
+        ((WGlobalSet x) (own_walk fs rest nest looped (None) (None) o))
+        ((WOp code) (own_walk fs rest nest looped (None) (None) o))
+        ((WLoad code align offset) (own_walk fs rest nest looped (None) (None) o))
+        ((WStore code align offset) (own_walk fs rest nest looped (None) (None) o))
+        ((WHost slot) (own_walk fs rest nest looped (None) (None) o))
+        ((WCopy) (own_walk fs rest nest looped (None) (None) o))
+        ((WFill) (own_walk fs rest nest looped (None) (None) o))
+        ((WMemSize) (own_walk fs rest nest looped (None) (None) o))
+        ((WMemGrow) (own_walk fs rest nest looped (None) (None) o))))))
+
+  (fn computed () Str "a block whose size it computes, which has no bound here")
+
+  (fn in_loop () Str "a block made in a loop, which has no bound here")
+
+  ; `make(size, mask)` has its size first, so it is the constant before the last.
+  (fn own_call ((name Str) (k Int) (looped Bool) (a (Option I64)) (b (Option I64)) (o Own)) Own
+    (uses Alloc)
+    (if (str.eq name "rt_make")
+      (match b ((None) (own_bad o (computed))) ((Some n) (if looped (own_bad o (in_loop)) (own_add o (block n)))))
+      (if (str.eq name "rt_alloc")
+        (match a ((None) (own_bad o (computed))) ((Some n) (if looped (own_bad o (in_loop)) (own_add o (rounded n)))))
+        (if (str.eq name "rt_new")
+          (match a ((None) (own_bad o (computed))) ((Some n) (if looped (own_bad o (in_loop)) (own_add o (block (wrap.add n (i64.of 8)))))))
+          (if (str.eq name "rt_to_str")
+            (if looped (own_bad o (in_loop)) (own_add o 88))
+            (if (or (str.eq name "rt_retain") (str.eq name "rt_release"))
+              o
+              (if looped
+                (own_bad o (concat "a call to " (concat name " in a loop, which has no bound here")))
+                (with o (calls (Calls k (get o calls)))))))))))
+
+  (fn own_of ((fs Funcs) (f Func)) Own
+    (uses Alloc)
+    (own_walk fs (get f body) (if (is_runtime (get f name)) -1000000 -1) false (None) (None) (own_none)))
+
+  (record Hx (funcs Funcs) (rows Rows) (depths Depths))
+
+  (fn heap_deep () (Result Int Fault) (Err (fault "heap" "a chain of calls longer than the program")))
+
+  ; How often a body runs for each time its function is called: its depth, if it goes round again.
+  (fn rounds ((hx Hx) (name Str) (o Own)) (Result Int Fault)
+    (uses Alloc)
+    (if (get o loops)
+      (match (depth_of (get hx depths) (unsuffixed name))
+        ((None) (Err (fault "heap" (concat name " goes round again and declares no (bounds (depth N))"))))
+        ((Some d) (Ok d)))
+      (Ok 1)))
+
+  ; What a call of `k` can make, everything it calls included.
+  (fn heap_cost ((hx Hx) (k Int) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (heap_deep)
+      (match (fn_at (get hx funcs) k)
+        ((None) (Err (fault "heap" "a call to a function that is not there")))
+        ((Some f) (let o (own_of (get hx funcs) f)
+          (if (not (str.eq (get o bad) ""))
+            (Err (fault "heap" (concat (get f name) (concat " makes " (get o bad)))))
+            (if (on_cycle (get hx rows) true k)
+              (group_heap hx k f (- left 1))
+              (match (rounds hx (get f name) o)
+                ((Err e) (Err e))
+                ((Ok n) (match (calls_heap hx (get o calls) (NoCalls) (- left 1))
+                  ((Err e) (Err e))
+                  ((Ok c) (Ok (* n (+ (get o bytes) c))))))))))))))
+
+  ; What the calls in `cs` can make, less those to the group `skip`.
+  (fn calls_heap ((hx Hx) (cs Calls) (skip Calls) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (heap_deep)
+      (match cs
+        ((NoCalls) (Ok 0))
+        ((Calls i rest) (if (has_call skip i)
+          (calls_heap hx rest skip (- left 1))
+          (match (heap_cost hx i (- left 1))
+            ((Err e) (Err e))
+            ((Ok a) (match (calls_heap hx rest skip (- left 1))
+              ((Err e) (Err e))
+              ((Ok b) (Ok (+ a b)))))))))))
+
+  ; A recursion: its members are the functions it reaches that reach it back. Each run is one
+  ; member's body, so a run makes at most what the members make between them, and there are at
+  ; most `1 + k + ... + k^(d-1)` runs for the declared depth d and k calls back into the group.
+  (fn group_heap ((hx Hx) (k Int) (f Func) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (depth_of (get hx depths) (unsuffixed (get f name)))
+      ((None) (Err (fault "heap" (concat (get f name) " reaches itself and declares no (bounds (depth N))"))))
+      ((Some d) (let group (members (get hx rows) k (Calls k (reach_of (get hx rows) true k)) (NoCalls))
+        (match (if (<= left 0) (Err (fault "heap" "a chain of calls longer than the program")) (members_heap hx group group (- left 1) 0 0))
+          ((Err e) (Err e))
+          ((Ok mk) (Ok (* (if (<= 0 d) (runs (get mk back) d) 0) (get mk bytes)))))))))
+
+  (record Made (bytes Int) (back Int))
+
+  (fn members ((rs Rows) (k Int) (cs Calls) (acc Calls)) Calls
+    (match cs
+      ((NoCalls) acc)
+      ((Calls i rest) (members rs k rest (if (or (has_call acc i) (not (or (= i k) (has_call (reach_of rs true i) k)))) acc (Calls i acc))))))
+
+  (fn members_heap ((hx Hx) (group Calls) (ms Calls) (left Int) (made Int) (back Int)) (Result Made Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0) (Err (fault "heap" "a chain of calls longer than the program"))
+      (match ms
+        ((NoCalls) (Ok (make Made (bytes made) (back back))))
+        ((Calls i rest) (match (fn_at (get hx funcs) i)
+          ((None) (Err (fault "heap" "a call to a function that is not there")))
+          ((Some f) (let o (own_of (get hx funcs) f)
+            (if (not (str.eq (get o bad) ""))
+              (Err (fault "heap" (concat (get f name) (concat " makes " (get o bad)))))
+              (match (rounds hx (get f name) o)
+                ((Err e) (Err e))
+                ((Ok n) (match (calls_heap hx (get o calls) group (- left 1))
+                  ((Err e) (Err e))
+                  ((Ok c) (members_heap hx group rest (- left 1) (+ made (* n (+ (get o bytes) c)))
+                    (let here (calls_into (get o calls) group 0) (if (< back here) here back)))))))))))))))
+
+  (fn calls_into ((cs Calls) (group Calls) (n Int)) Int
+    (match cs ((NoCalls) n) ((Calls i rest) (calls_into rest group (if (has_call group i) (+ n 1) n)))))
+
+  ; 1 + k + ... + k^(d-1).
+  (fn runs ((k Int) (d Int)) Int
+    (requires (<= 0 d))
+    (if (<= d 0) 0 (+ 1 (* k (runs k (- d 1))))))
+
+  ; The most a run of `entry` can grow the heap by, the free lists' table included.
+  (fn heap_bound ((m Module) (entry Str) (depths Depths)) (Result Int Fault)
+    (uses Alloc)
+    (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
+      (match (index_named rs entry 0)
+        ((None) (Err (fault "heap" (concat "the program has no function named " entry))))
+        ((Some k) (match (heap_cost (make Hx (funcs (get m funcs)) (rows rs) (depths depths)) k (* 4 (+ 2 (rows_len rs))))
+          ((Err e) (Err e))
+          ((Ok h) (Ok (+ h 512))))))))
 
   ; --- the whole image ------------------------------------------------------------------------------
   ; What a run of `entry` can use of each stack, host functions aside.
@@ -420,7 +638,15 @@
         ((Some k) (let heap (allocates rs k)
           (if heap
             (Err (fault "stack" "the program allocates, and a heap has no bound here yet"))
-            (cost (make Cx (rows rs) (depths depths) (heap heap)) k (* 4 (+ 2 (rows_len rs))))))))))
+            (cost (make Cx (rows rs) (depths depths) (heap heap) (release 0)) k (* 4 (+ 2 (rows_len rs))))))))))
+
+  ; The stacks of a program that allocates: `rt_release` may go `release` deep.
+  (fn stack_bound_with ((m Module) (entry Str) (depths Depths) (release Int)) (Result Bound Fault)
+    (uses Alloc)
+    (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
+      (match (index_named rs entry 0)
+        ((None) (Err (fault "stack" (concat "the program has no function named " entry))))
+        ((Some k) (cost (make Cx (rows rs) (depths depths) (heap (allocates rs k)) (release release)) k (* 4 (+ 2 (rows_len rs))))))))
 
   ; Reached by some way other than a release: the first block has to be made before one can
   ; be freed.
@@ -448,6 +674,10 @@
   ; (native_xtensa_s3.wtn).
   (fn esp32s3_room () Room (make Room (data 307200) (machine 49152)))
 
+  ; The ESP32-P4: 0x4FF20000 to 0x4FFA0000 of its L2 memory, then the machine stack to
+  ; 0x4FFB8000 (native_esp32p4.wtn, from tools/gen_esp32p4.py).
+  (fn esp32p4_room () Room (make Room (data 524288) (machine 98304)))
+
   (fn operand_room ((m Module) (room Room)) Int (- (get room data) (* 65536 (int.of (get m pages)))))
 
   (fn fits ((m Module) (b Bound) (room Room)) (Result Bound Fault)
@@ -464,6 +694,28 @@
     (match (stack_bound m entry (depths_of_source src))
       ((Err f) (Err f))
       ((Ok b) (fits m b room))))
+
+  ; Both bounds, for a program that may allocate: the heap's, then the stacks' with
+  ; release's chain bounded by it, and the room they need between them. The wasm memory grows
+  ; a page at a time as the heap does, and the operand stack has what the pages leave.
+  (record Bounds (stack Bound) (heap Int) (base Int))
+
+  (fn checked_bounds_in ((m Module) (entry Str) (src Str) (room Room)) (Result Bounds Fault)
+    (uses Alloc)
+    (let depths (depths_of_source src)
+      (match (heap_bound m entry depths)
+        ((Err f) (Err f))
+        ((Ok h) (match (stack_bound_with m entry depths (match (num.div h 24) ((Some q) q) ((None) 0)))
+          ((Err f) (Err f))
+          ((Ok b) (let base (int.of (get m heap))
+            (let pages (match (num.div (+ (+ base h) 65535) 65536) ((Some q) q) ((None) 0))
+              (let grown (if (< pages (int.of (get m pages))) (int.of (get m pages)) pages)
+                (if (< (- (get room data) (* 65536 grown)) (get b operand))
+                  (Err (fault "stack" (concat "the heap may need " (concat (num.to_str h) (concat " bytes, which leaves the operand stack "
+                    (concat (num.to_str (- (get room data) (* 65536 grown))) (concat " and it may need " (num.to_str (get b operand)))))))))
+                  (if (< (get room machine) (get b machine))
+                    (Err (fault "stack" (concat "the machine stack may need " (concat (num.to_str (get b machine)) (concat " bytes and has " (num.to_str (get room machine)))))))
+                    (Ok (make Bounds (stack b) (heap h) (base base))))))))))))))
 
   (fn checked_bound ((m Module) (entry Str) (src Str)) (Result Bound Fault)
     (uses Alloc)

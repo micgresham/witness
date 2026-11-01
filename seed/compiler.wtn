@@ -45,6 +45,8 @@
 
   (record Bound (operand Int) (machine Int))
 
+  (record Bounds (stack Bound) (heap Int) (base Int))
+
   (record Builtin
     (name Str)
     (params Wants)
@@ -70,7 +72,7 @@
 
   (enum Ctrl (NoCtrl) (Ctrl (target U32) (height U32) (carries U32) (rest Ctrl)))
 
-  (record Cx (rows Rows) (depths Depths) (heap Bool))
+  (record Cx (rows Rows) (depths Depths) (heap Bool) (release Int))
 
   (enum Depths (NoDepths) (Depths (name Str) (depth Int) (rest Depths)))
 
@@ -95,6 +97,8 @@
     (Hosts (name Str) (effect Str) (slot U32) (params U32) (results U32) (rest Hosts)))
 
   (record Hw (h Int) (top Int) (dead Bool) (bad Str))
+
+  (record Hx (funcs Funcs) (rows Rows) (depths Depths))
 
   (record IfParts (cond Atom) (then Ir) (other Ir))
 
@@ -159,11 +163,15 @@
 
   (enum Labels (NoLabels) (Labels (id U32) (offset U32) (rest Labels)))
 
+  (record Made (bytes Int) (back Int))
+
   (record MatchParts (scrut Atom) (arms Arms))
 
   (record Module (imports Imports) (funcs Funcs) (segments Segments) (pages U32) (heap I64))
 
   (enum Names (NoNames) (Names (head Str) (rest Names)))
+
+  (record Own (bytes Int) (calls Calls) (loops Bool) (bad Str))
 
   (record Parsed (tree Tree) (rest Tokens))
 
@@ -813,6 +821,8 @@
 
   (fn base_address_de8f01 () I64 (i64.of 134217728))
 
+  (fn base_address_fcdab8 () I64 (i64.of 1341128704))
+
   (fn base_sib ((base U32)) Bytes
     (uses Alloc)
     (if (= (bit.and base (u32.of 7)) (u32.of 4))
@@ -949,6 +959,10 @@
     (uses Alloc)
     (long_jump (i64.of 53248) off))
 
+  (fn block ((n I64)) Int
+    (let w (int.of n)
+      (+ 16 (* 8 (if (<= w 8) 1 (match (num.div (+ w 7) 8) ((Some q) q) ((None) 1)))))))
+
   (fn block_result ((inside AWalked) (end U32) (h0 U32) (value Bool)) AWalked
     (make AWalked
       (items (items_join (get inside items) (item (AMark end))))
@@ -1025,6 +1039,12 @@
     (match fs
       ((NoFuncs) (VNoBodies))
       ((Funcs f rest) (VBodies (function_items_a4f235 f shapes hosts) (bodies_of_ac805a rest shapes hosts)))))
+
+  (fn bodies_of_b388f5 ((fs Funcs) (shapes VShapes) (hosts VHostfns)) VBodies
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) (VNoBodies))
+      ((Funcs f rest) (VBodies (function_items_2899f3 f shapes hosts) (bodies_of_b388f5 rest shapes hosts)))))
 
   (fn bodies_of_c7adb1 ((fs Funcs) (shapes Shapes) (hosts Hostfns)) Bodies
     (uses Alloc)
@@ -1254,15 +1274,32 @@
       ((None) (nothing_033f44 st))
       ((Some found) (match found ((VNoShapes) (nothing_033f44 st)) ((VShapes params results more) (let after (wrap.add (less (get st h) params) results) (make VWalked (items (items_join_0db805 (item_2201a5 (VCallFn f)) (if (= results (u32.of 0)) (VNoItems) (raw_665b8e (pushp (r0_6d8cf6) (r1_3864b0)))))) (st (with_h_ce987b st after)))))))))
 
+  (fn callee_name ((fs Funcs) (f U32)) Str
+    (match (func_at fs f) ((None) "") ((Some g) (get g name))))
+
   (fn callees ((rs Rows) (k Int) (heap Bool)) Calls
     (match (row_at rs k)
       ((None) (NoCalls))
       ((Some r) (if (and (not heap) (str.eq (get r name) "rt_release")) (NoCalls) (get r calls)))))
 
+  (fn calls_heap ((hx Hx) (cs Calls) (skip Calls) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (heap_deep)
+      (match cs
+        ((NoCalls) (Ok 0))
+        ((Calls i rest) (if (has_call skip i) (calls_heap hx rest skip (- left 1)) (match (heap_cost hx i (- left 1)) ((Err e) (Err e)) ((Ok a) (match (calls_heap hx rest skip (- left 1)) ((Err e) (Err e)) ((Ok b) (Ok (+ a b)))))))))))
+
   (fn calls_in ((is Inss) (acc Calls)) Calls
     (match is
       ((NoInss) acc)
       ((Inss i rest) (calls_in rest (match i ((WCall f) (Calls (int.of f) acc)) ((WIf value then other) (calls_in then (calls_in other acc))) ((WBlock value body) (calls_in body acc)) ((WLoop value body) (calls_in body acc)) ((WConst n) acc) ((WLocalGet x) acc) ((WLocalSet x) acc) ((WLocalTee x) acc) ((WGlobalGet x) acc) ((WGlobalSet x) acc) ((WOp code) acc) ((WLoad code align offset) acc) ((WStore code align offset) acc) ((WHost slot) acc) ((WBr depth) acc) ((WBrIf depth) acc) ((WCopy) acc) ((WFill) acc) ((WMemSize) acc) ((WMemGrow) acc))))))
+
+  (fn calls_into ((cs Calls) (group Calls) (n Int)) Int
+    (match cs
+      ((NoCalls) n)
+      ((Calls i rest) (calls_into rest group (if (has_call group i) (+ n 1) n)))))
 
   (fn calls_len ((cs Calls)) Int
     (ensures (<= 0 result))
@@ -1375,6 +1412,13 @@
       ((Err f) (Err f))
       ((Ok b) (fits m b room))))
 
+  (fn checked_bounds_in ((m Module) (entry Str) (src Str) (room Room)) (Result Bounds Fault)
+    (uses Alloc)
+    (let depths (depths_of_source src)
+      (match (heap_bound m entry depths)
+        ((Err f) (Err f))
+        ((Ok h) (match (stack_bound_with m entry depths (match (num.div h 24) ((Some q) q) ((None) 0))) ((Err f) (Err f)) ((Ok b) (let base (int.of (get m heap)) (let pages (match (num.div (+ (+ base h) 65535) 65536) ((Some q) q) ((None) 0)) (let grown (if (< pages (int.of (get m pages))) (int.of (get m pages)) pages) (if (< (- (get room data) (* 65536 grown)) (get b operand)) (Err (fault "stack" (concat "the heap may need " (concat (num.to_str h) (concat " bytes, which leaves the operand stack " (concat (num.to_str (- (get room data) (* 65536 grown))) (concat " and it may need " (num.to_str (get b operand))))))))) (if (< (get room machine) (get b machine)) (Err (fault "stack" (concat "the machine stack may need " (concat (num.to_str (get b machine)) (concat " bytes and has " (num.to_str (get room machine))))))) (Ok (make Bounds (stack b) (heap h) (base base))))))))))))))
+
   (fn chunk ((n I64) (hw U32)) U32
     (let low (bit.and (bit.shr n (int.of (wrap.mul hw (u32.of 16)))) (i64.of 65535))
       (if (and (<= (i64.of 0) low) (<= low (i64.of 65535))) (u32.of low) (u32.of 0))))
@@ -1394,6 +1438,13 @@
         (adds_i (r0_6d8cf6) (r0_6d8cf6) (i64.of 4))
         (subs_i (r2_1e3b3c) (r2_1e3b3c) (i64.of 1))
         (bcond (u32.of 1) (i64.of -12)))))
+
+  (fn cleared_655f03 () Bytes
+    (uses Alloc)
+    (cat4 (mov_rr_2cd3c0 (r0_9b3694) (mem))
+      (mov_imm_8f3fd1 (r2_20fcca) (i64.of 131072))
+      (cat (sw (zero) (r0_9b3694) (i64.of 0)) (addi (r0_9b3694) (r0_9b3694) (i64.of 4)))
+      (cat (addi (r2_20fcca) (r2_20fcca) (i64.of -1)) (bne (r2_20fcca) (zero) (i64.of -12)))))
 
   (fn cleared_98b975 () Bytes
     (uses Alloc)
@@ -1430,6 +1481,13 @@
       (mov_imm_1f2325 (r1_dc0287) divide)
       (host_call_914f24 (u32.of 2))
       (pushp_d01b29 (r0_559e10) (r1_dc0287))))
+
+  (fn clock_code_143d60 ((which I64) (divide I64)) Bytes
+    (uses Alloc)
+    (cat4 (mov_imm_8f3fd1 (r0_9b3694) which)
+      (mov_imm_8f3fd1 (r1_06843d) divide)
+      (host_call_7d0d0e (u32.of 2))
+      (pushp_aa9cba (r0_9b3694) (r1_06843d))))
 
   (fn clock_code_3ef1c5 ((which I64) (divide I64)) Bytes
     (uses Alloc)
@@ -1730,6 +1788,8 @@
   (fn compile_ir ((src Str)) (Result Bytes Fault)
     (uses Alloc)
     (match (module_ir src) ((Err f) (Err f)) ((Ok m) (Ok (encoded m)))))
+
+  (fn computed () Str "a block whose size it computes, which has no bound here")
 
   (fn concat_body () Inss
     (cat_b770a6 (five (lget_b9ffcc (u32.of 0)) (i32_wrap) (WLoad (u8.of 41) (u8.of 3) (u32.of 0)) (lset_6210e1 (u32.of 2)) (lget_b9ffcc (u32.of 1)))
@@ -2148,7 +2208,7 @@
       (deep)
       (match (row_at (get cx rows) k)
         ((None) (Err (fault "stack" "a call to a function that is not there")))
-        ((Some r) (if (not (str.eq (get r bad) "")) (Err (fault "stack" (concat (get r name) (concat ": " (get r bad))))) (if (on_cycle (get cx rows) (get cx heap) k) (nest cx k r (- left 1)) (match (costliest cx (callees (get cx rows) k (get cx heap)) (- left 1)) ((Err f) (Err f)) ((Ok b) (Ok (plus_61e53c (frame r) b))))))))))
+        ((Some r) (if (not (str.eq (get r bad) "")) (Err (fault "stack" (concat (get r name) (concat ": " (get r bad))))) (if (on_cycle (get cx rows) (get cx heap) k) (if (and (str.eq (get r name) "rt_release") (< 0 (get cx release))) (Ok (released cx r)) (nest cx k r (- left 1))) (match (costliest cx (callees (get cx rows) k (get cx heap)) (- left 1)) ((Err f) (Err f)) ((Ok b) (Ok (plus_61e53c (frame r) b))))))))))
 
   (fn costliest ((cx Cx) (cs Calls) (left Int)) (Result Bound Fault)
     (uses Alloc)
@@ -2191,6 +2251,17 @@
     (match c
       ((NoCtrl) (None))
       ((Ctrl t h a rest) (if (<= depth (u32.of 0)) (Some c) (ctrl_at_bde761 rest (- depth (u32.of 1)))))))
+
+  (fn cycled ((cx Cx) (r Row) (rest Calls) (left Int)) (Result Bound Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (deep)
+      (if (and (str.eq (get r name) "rt_release") (< 0 (get cx release)))
+        (match (runtime_calls cx rest (- left 1))
+          ((Err f) (Err f))
+          ((Ok b) (Ok (worse (released cx r) b))))
+        (Err (fault "stack" (concat (get r name) " recurses in the runtime, with nothing to bound it"))))))
 
   (fn data_section ((m Module)) Bytes
     (uses Alloc)
@@ -2417,6 +2488,25 @@
           (le64 (base_address))
           (le64 total)
           (cat (le64 total) (le64 (i64.of 4096)))))))
+
+  (fn elf_header_5897cf ((entry I64) (total I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat4 (cat4 (bytes.of (u8.of 127)) (bytes.of (u8.of 69)) (bytes.of (u8.of 76)) (bytes.of (u8.of 70))) (bytes.of (u8.of 1)) (bytes.of (u8.of 1)) (cat (bytes.of (u8.of 1)) (zeros (u32.of 9) (u32.of 8))))
+      (cat4 (le16 (u32.of 2)) (le16 (u32.of 243)) (le32 (i64.of 1)) (le32 entry))
+      (cat4 (le32 (i64.of 52))
+        (le32 (i64.of 0))
+        (le32 (i64.of 0))
+        (cat4 (le16 (u32.of 52))
+          (le16 (u32.of 32))
+          (le16 (u32.of 1))
+          (cat3 (le16 (u32.of 0)) (le16 (u32.of 0)) (le16 (u32.of 0)))))
+      (cat4 (le32 (i64.of 1))
+        (le32 (i64.of 0))
+        (le32 (base_address_fcdab8))
+        (cat4 (le32 (base_address_fcdab8))
+          (le32 total)
+          (le32 total)
+          (cat (le32 (i64.of 7)) (le32 (i64.of 4096)))))))
 
   (fn elf_header_70b91a ((entry I64) (total I64)) Bytes
     (uses Alloc)
@@ -2656,11 +2746,23 @@
 
   (fn esp32_room () Room (make Room (data 262144) (machine 57344)))
 
+  (fn esp32p4_elf_of ((m Module) (entry_name Str) (filter Bool)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (index_of_func (get m funcs) entry_name (u32.of 0))
+      ((None) (Err (fault "native" (concat "the program has no function named " entry_name))))
+      ((Some index) (let shapes (shapes_of_76ee1b (get m funcs)) (let bodies (bodies_of_b388f5 (get m funcs) shapes (hostfns_of_fedf5f (get m imports))) (let heap (get m heap) (let image (image_of (get m segments) (zeros (narrow heap) (u32.of 40))) (let image_at (wrap.add (base_address_fcdab8) (i64.of 128)) (let entry (main_entry_e7a8e0 index) (let stub (stub_items_b7a7c1 entry image_at (i64.of (octets image)) heap (widen (get m pages))) (let stub_end (items_size_2a4c5a stub) (let starts (starts_from_b07613 bodies stub_end) (let code (joined_8ded15 (code_to_1d7267 stub (u32.of 0) (labels_of_d272f8 stub (u32.of 0)) starts (bodies_to_7c42ee bodies stub_end starts (VNoChunks)))) (let code_offset (wrap.add (i64.of 128) (i64.of (octets image))) (let total (wrap.add code_offset (i64.of (octets code))) (if (< (i64.of 131072) total) (Err (fault "native" (concat "the image is " (concat (num.to_str total) " bytes, more than the 131072 of L2 memory the ESP32-P4's layout has for code")))) (Ok (cat4 (elf_header_5897cf (wrap.add (base_address_fcdab8) code_offset) total) (zeros (u32.of 44) (u32.of 8)) image code))))))))))))))))))
+
+  (fn esp32p4_room () Room (make Room (data 524288) (machine 98304)))
+
   (fn esp32s3_room () Room (make Room (data 307200) (machine 49152)))
 
   (fn exit_code ((status I64)) Bytes
     (uses Alloc)
     (cat (mov_imm (r0) status) (syscall_with (i64.of 93))))
+
+  (fn exit_code_0e0718 ((status I64)) Bytes
+    (uses Alloc)
+    (cat3 (mov_imm_8f3fd1 (r0_9b3694) status) (host_call_7d0d0e (u32.of 0)) (ebreak)))
 
   (fn exit_code_0fac99 ((status I64)) Bytes
     (uses Alloc)
@@ -2858,6 +2960,11 @@
         (cat_b770a6 (four_42c22c (i64_ne) (lget_b9ffcc (u32.of 4)) (lget_b9ffcc (u32.of 1)) (i64_xor))
           (cat_b770a6 (three_b1c33e (lit (i64.of 0)) (i64_lt_s) (WOp (u8.of 113)))
             (one (WIf false (four_42c22c (lget_b9ffcc (u32.of 3)) (lit (i64.of 1)) (i64_sub) (lset_6210e1 (u32.of 3))) (NoInss))))))))
+
+  (fn fn_at ((fs Funcs) (k Int)) (Option Func)
+    (match fs
+      ((NoFuncs) (None))
+      ((Funcs f rest) (if (<= k 0) (if (= k 0) (Some f) (None)) (fn_at rest (- k 1))))))
 
   (fn fn_body ((h Tree)) (Option Tree)
     (match (after_head h)
@@ -3060,6 +3167,13 @@
         (items_join_19c4cb (raw_7f4a41 (prologue_cee643 fx))
           (items_join_19c4cb (get walked_body items) (raw_7f4a41 (epilogue_ae7cb7 fx)))))))
 
+  (fn function_items_2899f3 ((f Func) (shapes VShapes) (hosts VHostfns)) VItems
+    (uses Alloc)
+    (let fx (make VFx (params (get f params)) (locals (get f locals)) (results (get f results)) (shapes shapes) (hosts hosts))
+      (let walked_body (walk_6b41d5 fx (VNoCtrl) (get f body) (make VSt (h (u32.of 0)) (next (u32.of 0)) (dead false)))
+        (items_join_0db805 (raw_665b8e (prologue_c22df7 fx))
+          (items_join_0db805 (get walked_body items) (raw_665b8e (epilogue_57cdb8 fx)))))))
+
   (fn function_items_5a5f36 ((f Func) (shapes VShapes) (hosts VHostfns)) VItems
     (uses Alloc)
     (let fx (make VFx (params (get f params)) (locals (get f locals)) (results (get f results)) (shapes shapes) (hosts hosts))
@@ -3130,6 +3244,13 @@
       (if more (u8.of (+ part (i64.of 128))) (u8.of part))
       (u8.of 0)))
 
+  (fn group_heap ((hx Hx) (k Int) (f Func) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (match (depth_of (get hx depths) (unsuffixed (get f name)))
+      ((None) (Err (fault "heap" (concat (get f name) " reaches itself and declares no (bounds (depth N))"))))
+      ((Some d) (let group (members (get hx rows) k (Calls k (reach_of (get hx rows) true k)) (NoCalls)) (match (if (<= left 0) (Err (fault "heap" "a chain of calls longer than the program")) (members_heap hx group group (- left 1) 0 0)) ((Err e) (Err e)) ((Ok mk) (Ok (* (if (<= 0 d) (runs (get mk back) d) 0) (get mk bytes)))))))))
+
   (fn grown ((tys TEnv) (x Str) (ty Str) (held Strs)) Strs
     (uses Alloc)
     (if (heap_ty tys ty) (Strs x held) held))
@@ -3161,6 +3282,25 @@
     (match bs
       ((NoTEnv) held)
       ((TEnv n t rest) (if (heap_ty tys t) (Strs n (heap_binders tys rest held)) (heap_binders tys rest held)))))
+
+  (fn heap_bound ((m Module) (entry Str) (depths Depths)) (Result Int Fault)
+    (uses Alloc)
+    (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
+      (match (index_named rs entry 0)
+        ((None) (Err (fault "heap" (concat "the program has no function named " entry))))
+        ((Some k) (match (heap_cost (make Hx (funcs (get m funcs)) (rows rs) (depths depths)) k (* 4 (+ 2 (rows_len rs)))) ((Err e) (Err e)) ((Ok h) (Ok (+ h 512))))))))
+
+  (fn heap_cost ((hx Hx) (k Int) (left Int)) (Result Int Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (heap_deep)
+      (match (fn_at (get hx funcs) k)
+        ((None) (Err (fault "heap" "a call to a function that is not there")))
+        ((Some f) (let o (own_of (get hx funcs) f) (if (not (str.eq (get o bad) "")) (Err (fault "heap" (concat (get f name) (concat " makes " (get o bad))))) (if (on_cycle (get hx rows) true k) (group_heap hx k f (- left 1)) (match (rounds hx (get f name) o) ((Err e) (Err e)) ((Ok n) (match (calls_heap hx (get o calls) (NoCalls) (- left 1)) ((Err e) (Err e)) ((Ok c) (Ok (* n (+ (get o bytes) c))))))))))))))
+
+  (fn heap_deep () (Result Int Fault)
+    (Err (fault "heap" "a chain of calls longer than the program")))
 
   (fn heap_marks ((sigs Sigs) (tys TEnv)) TEnv
     (uses Alloc)
@@ -3233,6 +3373,11 @@
     (uses Alloc)
     (cat (mov_imm_1f2325 (tmp_130301) (wrap.add (i64.of 1077346304) (i64.of (wrap.mul k (u32.of 16)))))
       (callx0 (tmp_130301))))
+
+  (fn host_call_7d0d0e ((k U32)) Bytes
+    (uses Alloc)
+    (cat (mov_imm_8f3fd1 (tmp) (wrap.add (i64.of 1341911040) (i64.of (wrap.mul k (u32.of 16)))))
+      (jalr (u32.of 1) (tmp) (i64.of 0))))
 
   (fn host_call_914f24 ((k U32)) Bytes
     (uses Alloc)
@@ -3309,6 +3454,20 @@
               (clock_code_3ef1c5 (i64.of 1) (i64.of 1000))
               (bkpt)))))))
 
+  (fn host_code_baf00b ((name Str)) Bytes
+    (uses Alloc)
+    (if (str.eq name "print")
+      (print_code_6a0d75 (i64.of 1) (no_bytes))
+      (if (str.eq name "log")
+        (print_code_6a0d75 (i64.of 2) (no_bytes))
+        (if (str.eq name "clock.now")
+          (clock_code_143d60 (i64.of 1) (i64.of 1))
+          (if (str.eq name "clock.wall")
+            (clock_code_143d60 (i64.of 0) (i64.of 1))
+            (if (str.eq name "clock.ticks")
+              (clock_code_143d60 (i64.of 1) (i64.of 1000))
+              (ebreak)))))))
+
   (fn host_code_cd8640 ((name Str)) Bytes
     (uses Alloc)
     (if (str.eq name "print")
@@ -3372,6 +3531,12 @@
     (match (host_at_1dd0e7 (get fx hosts) slot)
       ((None) (nothing_033f44 st))
       ((Some found) (match found ((VNoHostfns) (nothing_033f44 st)) ((VHostfns name params results more) (let after (wrap.add (less (get st h) params) results) (walked_108341 (host_code_1ef0d0 name) st after)))))))
+
+  (fn host_step_65a882 ((fx VFx) (slot U32) (st VSt)) VWalked
+    (uses Alloc)
+    (match (host_at_1dd0e7 (get fx hosts) slot)
+      ((None) (nothing_033f44 st))
+      ((Some found) (match found ((VNoHostfns) (nothing_033f44 st)) ((VHostfns name params results more) (let after (wrap.add (less (get st h) params) results) (walked_108341 (host_code_baf00b name) st after)))))))
 
   (fn host_step_895173 ((fx Fx) (slot U32) (st St)) Walked
     (uses Alloc)
@@ -3583,6 +3748,8 @@
       (b1 (u32.of 15))
       (b1 (u32.of 175))
       (modrm (u32.of 3) dst src)))
+
+  (fn in_loop () Str "a block made in a loop, which has no bound here")
 
   (fn index_add () U32 (u32.of 7))
 
@@ -4682,6 +4849,11 @@
     (items_join_0db805 (item_2201a5 (VCallFn main_index))
       (raw_665b8e (exit_code_7b253a (i64.of 0)))))
 
+  (fn main_entry_e7a8e0 ((main_index U32)) VItems
+    (uses Alloc)
+    (items_join_0db805 (item_2201a5 (VCallFn main_index))
+      (raw_665b8e (exit_code_0e0718 (i64.of 0)))))
+
   (fn make_body () Inss
     (cat_b770a6 (make_words)
       (cat_b770a6 (rt_num (i64.of 0))
@@ -4772,6 +4944,20 @@
   (fn mem_63d92b () U32 (wrap.sub (u32.of 25) (u32.of 16)))
 
   (fn mem_copy () Ins (WCopy))
+
+  (fn members ((rs Rows) (k Int) (cs Calls) (acc Calls)) Calls
+    (match cs
+      ((NoCalls) acc)
+      ((Calls i rest) (members rs k rest (if (or (has_call acc i) (not (or (= i k) (has_call (reach_of rs true i) k)))) acc (Calls i acc))))))
+
+  (fn members_heap ((hx Hx) (group Calls) (ms Calls) (left Int) (made Int) (back Int)) (Result Made Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Err (fault "heap" "a chain of calls longer than the program"))
+      (match ms
+        ((NoCalls) (Ok (make Made (bytes made) (back back))))
+        ((Calls i rest) (match (fn_at (get hx funcs) i) ((None) (Err (fault "heap" "a call to a function that is not there"))) ((Some f) (let o (own_of (get hx funcs) f) (if (not (str.eq (get o bad) "")) (Err (fault "heap" (concat (get f name) (concat " makes " (get o bad))))) (match (rounds hx (get f name) o) ((Err e) (Err e)) ((Ok n) (match (calls_heap hx (get o calls) group (- left 1)) ((Err e) (Err e)) ((Ok c) (members_heap hx group rest (- left 1) (+ made (* n (+ (get o bytes) c))) (let here (calls_into (get o calls) group 0) (if (< back here) here back)))))))))))))))
 
   (fn memory_section ((m Module)) Bytes
     (uses Alloc)
@@ -4900,7 +5086,7 @@
     (uses Alloc)
     (let texts (irs_lits is)
       (let end (pool_end texts (u32.of 64))
-        (let heap (rounded (if (< end (u32.of 1024)) (u32.of 1024) end))
+        (let heap (rounded_5c5cf0 (if (< end (u32.of 1024)) (u32.of 1024) end))
           (let pool (pool_of texts (u32.of 64))
             (match (irs_funcs sigs pool hosts is)
               ((Err f) (Err f))
@@ -5474,6 +5660,8 @@
       (drops (dead_in held ir later)
         (own_live tys ir (keep_live held ir later) later (- left 1)))))
 
+  (fn own_add ((o Own) (n Int)) Own (with o (bytes (+ (get o bytes) n))))
+
   (fn own_alias ((tys TEnv) (x Str) (ty Str) (a Atom) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
     (uses Alloc)
     (requires (<= 0 left))
@@ -5492,6 +5680,8 @@
         ((NoArms) (NoArms))
         ((Arms c bs body more) (Arms c bs (own (tenv_join bs tys) body (heap_binders tys bs held) after left) (own_arms tys more held after (- left 1)))))))
 
+  (fn own_bad ((o Own) (why Str)) Own (if (str.eq (get o bad) "") (with o (bad why)) o))
+
   (fn own_branches ((tys TEnv) (x Str) (ty Str) (c Atom) (t Ir) (e Ir) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
     (uses Alloc)
     (requires (<= 0 left))
@@ -5500,6 +5690,29 @@
         ty
         (RIf c (own tys t held after left) (own tys e held after left))
         (own (TEnv x ty tys) rest (grown tys x ty (keep_after held after)) later left))))
+
+  (fn own_call ((name Str) (k Int) (looped Bool) (a (Option I64)) (b (Option I64)) (o Own)) Own
+    (uses Alloc)
+    (if (str.eq name "rt_make")
+      (match b
+        ((None) (own_bad o (computed)))
+        ((Some n) (if looped (own_bad o (in_loop)) (own_add o (block n)))))
+      (if (str.eq name "rt_alloc")
+        (match a
+          ((None) (own_bad o (computed)))
+          ((Some n) (if looped (own_bad o (in_loop)) (own_add o (rounded n)))))
+        (if (str.eq name "rt_new")
+          (match a
+            ((None) (own_bad o (computed)))
+            ((Some n) (if looped (own_bad o (in_loop)) (own_add o (block (wrap.add n (i64.of 8)))))))
+          (if (str.eq name "rt_to_str")
+            (if looped (own_bad o (in_loop)) (own_add o 88))
+            (if (or (str.eq name "rt_retain") (str.eq name "rt_release"))
+              o
+              (if looped
+                (own_bad o
+                  (concat "a call to " (concat name " in a loop, which has no bound here")))
+                (with o (calls (Calls k (get o calls)))))))))))
 
   (fn own_done ((tys TEnv) (a Atom) (held Strs) (later Strs)) Ir
     (uses Alloc)
@@ -5540,6 +5753,8 @@
       (Let x ty (RAtom a) (own (TEnv x ty tys) rest (Strs x (without held v)) later left))
       (Retain v (Let x ty (RAtom a) (own (TEnv x ty tys) rest (Strs x held) later left)))))
 
+  (fn own_none () Own (make Own (bytes 0) (calls (NoCalls)) (loops false) (bad "")))
+
   (fn own_not_atom ((tys TEnv) (x Str) (ty Str) (rhs Rhs) (rest Ir) (held Strs) (later Strs) (left Int)) Ir
     (uses Alloc)
     (requires (<= 0 left))
@@ -5553,6 +5768,22 @@
     (match (as_match rhs)
       ((Some parts) (own_match tys x ty (get parts scrut) (get parts arms) rest held later left))
       ((None) (Let x ty rhs (own (TEnv x ty tys) rest (grown tys x ty held) later left)))))
+
+  (fn own_of ((fs Funcs) (f Func)) Own
+    (uses Alloc)
+    (own_walk fs
+      (get f body)
+      (if (is_runtime (get f name)) -1000000 -1)
+      false
+      (None)
+      (None)
+      (own_none)))
+
+  (fn own_walk ((fs Funcs) (is Inss) (nest Int) (looped Bool) (a (Option I64)) (b (Option I64)) (o Own)) Own
+    (uses Alloc)
+    (match is
+      ((NoInss) o)
+      ((Inss i rest) (match i ((WConst n) (own_walk fs rest nest looped (Some n) a o)) ((WCall f) (own_walk fs rest nest looped (None) (None) (own_call (callee_name fs f) (int.of f) looped a b o))) ((WIf v then other) (own_walk fs rest nest looped (None) (None) (own_walk fs other (+ nest 1) looped (None) (None) (own_walk fs then (+ nest 1) looped (None) (None) o)))) ((WBlock v body) (own_walk fs rest nest looped (None) (None) (own_walk fs body (+ nest 1) looped (None) (None) o))) ((WLoop v body) (own_walk fs rest nest looped (None) (None) (own_walk fs body (+ nest 1) (or looped (not (= nest -1))) (None) (None) o))) ((WBr d) (own_walk fs rest nest looped (None) (None) (if (= (int.of d) nest) (with o (loops true)) o))) ((WBrIf d) (own_walk fs rest nest looped (None) (None) (if (= (int.of d) nest) (with o (loops true)) o))) ((WLocalGet x) (own_walk fs rest nest looped (None) (None) o)) ((WLocalSet x) (own_walk fs rest nest looped (None) (None) o)) ((WLocalTee x) (own_walk fs rest nest looped (None) (None) o)) ((WGlobalGet x) (own_walk fs rest nest looped (None) (None) o)) ((WGlobalSet x) (own_walk fs rest nest looped (None) (None) o)) ((WOp code) (own_walk fs rest nest looped (None) (None) o)) ((WLoad code align offset) (own_walk fs rest nest looped (None) (None) o)) ((WStore code align offset) (own_walk fs rest nest looped (None) (None) o)) ((WHost slot) (own_walk fs rest nest looped (None) (None) o)) ((WCopy) (own_walk fs rest nest looped (None) (None) o)) ((WFill) (own_walk fs rest nest looped (None) (None) o)) ((WMemSize) (own_walk fs rest nest looped (None) (None) o)) ((WMemGrow) (own_walk fs rest nest looped (None) (None) o))))))
 
   (fn owned_body ((tys TEnv) (body Ir)) Ir
     (uses Alloc)
@@ -5803,6 +6034,13 @@
       (add_rr_4c3fa1 (r0_559e10) (mem_20fcca) (r4_570d8a))
       (mov_imm_1f2325 (r1_dc0287) fd)
       (host_call_914f24 (u32.of 1))))
+
+  (fn print_code_6a0d75 ((fd I64) (prefix Bytes)) Bytes
+    (uses Alloc)
+    (cat4 (pop_e9c506 (r4_9f313e))
+      (add_rr_68ae87 (r0_9b3694) (mem) (r4_9f313e))
+      (mov_imm_8f3fd1 (r1_06843d) fd)
+      (host_call_7d0d0e (u32.of 1))))
 
   (fn print_code_6b5e4c ((fd I64)) Bytes
     (uses Alloc)
@@ -6249,6 +6487,11 @@
         (cat_b770a6 (rt_set (u32.of 5))
           (rt_store (rt_num (i64.of 0)) (rt_local (u32.of 5)))))))
 
+  (fn released ((cx Cx) (r Row)) Bound
+    (let alloc (match (index_named (get cx rows) "rt_alloc" 0) ((None) (nothing_98bdea)) ((Some a) (match (row_at (get cx rows) a) ((None) (nothing_98bdea)) ((Some ar) (frame ar)))))
+      (plus_61e53c (make Bound (operand (* (get cx release) (get r operand))) (machine (* (get cx release) (get r machine))))
+        alloc)))
+
   (fn rem_rr ((d U32) (n U32) (m U32)) Bytes
     (uses Alloc)
     (alu (i64.of 1) (i64.of 6) d n m))
@@ -6401,7 +6644,19 @@
 
   (fn rn ((r U32)) I64 (shifted (bit.and r (u32.of 31)) (u32.of 5)))
 
-  (fn rounded ((n U32)) U32 (bit.and (wrap.add n (u32.of 7)) (bit.not (u32.of 7))))
+  (fn rounded ((n I64)) Int
+    (let w (int.of n)
+      (if (<= w 0) 0 (* 8 (match (num.div (+ w 7) 8) ((Some q) q) ((None) 0))))))
+
+  (fn rounded_5c5cf0 ((n U32)) U32 (bit.and (wrap.add n (u32.of 7)) (bit.not (u32.of 7))))
+
+  (fn rounds ((hx Hx) (name Str) (o Own)) (Result Int Fault)
+    (uses Alloc)
+    (if (get o loops)
+      (match (depth_of (get hx depths) (unsuffixed name))
+        ((None) (Err (fault "heap" (concat name " goes round again and declares no (bounds (depth N))"))))
+        ((Some d) (Ok d)))
+      (Ok 1)))
 
   (fn row_at ((rs Rows) (k Int)) (Option Row)
     (match rs
@@ -6457,6 +6712,10 @@
     (uses Alloc)
     (word (plus (plus (at f7 (u32.of 25)) (reg m (u32.of 20))) (plus (plus (reg n (u32.of 15)) (at f3 (u32.of 12))) (plus (reg d (u32.of 7)) op)))))
 
+  (fn runs ((k Int) (n Int)) Int
+    (requires (<= 0 n))
+    (if (<= n 0) 0 (+ 1 (* k (runs k (- n 1))))))
+
   (fn runtime ((none I64) (some I64) (base I64)) Funcs
     (Funcs (function "rt_alloc" (u32.of 1) (u32.of 2) (alloc_body) true)
       (Funcs (function "rt_new" (u32.of 1) (u32.of 1) (new_body) false)
@@ -6482,7 +6741,7 @@
       (deep)
       (match cs
         ((NoCalls) (Ok (nothing_98bdea)))
-        ((Calls i rest) (match (row_at (get cx rows) i) ((None) (Err (fault "stack" "a call to a function that is not there"))) ((Some r) (if (not (is_runtime (get r name))) (runtime_calls cx rest (- left 1)) (if (on_cycle (get cx rows) (get cx heap) i) (Err (fault "stack" (concat (get r name) " recurses in the runtime, with nothing to bound it"))) (match (cost cx i (- left 1)) ((Err f) (Err f)) ((Ok a) (match (runtime_calls cx rest (- left 1)) ((Err f) (Err f)) ((Ok b) (Ok (worse a b))))))))))))))
+        ((Calls i rest) (match (row_at (get cx rows) i) ((None) (Err (fault "stack" "a call to a function that is not there"))) ((Some r) (if (not (is_runtime (get r name))) (runtime_calls cx rest (- left 1)) (if (on_cycle (get cx rows) (get cx heap) i) (cycled cx r rest (- left 1)) (match (cost cx i (- left 1)) ((Err f) (Err f)) ((Ok a) (match (runtime_calls cx rest (- left 1)) ((Err f) (Err f)) ((Ok b) (Ok (worse a b))))))))))))))
 
   (fn s32i ((t U32) (s U32) (off I64)) Bytes
     (uses Alloc)
@@ -6894,7 +7153,14 @@
     (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
       (match (index_named rs entry 0)
         ((None) (Err (fault "stack" (concat "the program has no function named " entry))))
-        ((Some k) (let heap (allocates rs k) (if heap (Err (fault "stack" "the program allocates, and a heap has no bound here yet")) (cost (make Cx (rows rs) (depths depths) (heap heap)) k (* 4 (+ 2 (rows_len rs))))))))))
+        ((Some k) (let heap (allocates rs k) (if heap (Err (fault "stack" "the program allocates, and a heap has no bound here yet")) (cost (make Cx (rows rs) (depths depths) (heap heap) (release 0)) k (* 4 (+ 2 (rows_len rs))))))))))
+
+  (fn stack_bound_with ((m Module) (entry Str) (depths Depths) (release Int)) (Result Bound Fault)
+    (uses Alloc)
+    (let rs (rows_of (get m funcs) (get m imports) (get m funcs))
+      (match (index_named rs entry 0)
+        ((None) (Err (fault "stack" (concat "the program has no function named " entry))))
+        ((Some k) (cost (make Cx (rows rs) (depths depths) (heap (allocates rs k)) (release release)) k (* 4 (+ 2 (rows_len rs))))))))
 
   (fn start_code ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
     (uses Alloc)
@@ -6927,6 +7193,16 @@
         (mov_imm_cfbebf (r1_06843d) (i64.of 2147483648))
         (add_rr_68ae87 (os) (r0_9b3694) (r1_06843d))
         (cat (mov_imm_cfbebf (hp) heap) (mov_imm_cfbebf (pg) pages)))))
+
+  (fn start_code_7bfa2e ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat3 (mov_imm_8f3fd1 (sp_559e10) (i64.of 1341882368)) (mov_imm_8f3fd1 (os) (i64.of 1341784064)) (mov_imm_8f3fd1 (mem) (i64.of 1341259776)))
+      (cleared_655f03)
+      (cat4 (mov_rr_2cd3c0 (r0_9b3694) (mem))
+        (mov_imm_8f3fd1 (r1_06843d) image_at)
+        (mov_imm_8f3fd1 (r2_20fcca) image_size)
+        (copy_loop_9b04f9))
+      (cat (mov_imm_8f3fd1 (hp) heap) (mov_imm_8f3fd1 (pg) pages))))
 
   (fn start_code_b78b10 ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
     (uses Alloc)
@@ -7052,6 +7328,30 @@
       ((WFill) (make AWalked (items (raw (brk))) (st (make ASt (h (get st h)) (next (get st next)) (dead true)))))
       ((WMemSize) (walked (push (r21)) st (wrap.add (get st h) (u32.of 1))))
       ((WMemGrow) (walked (cat4 (pop (r0)) (mov_rr (r1) (r21)) (add_rr (r21) (r21) (r0)) (push (r1))) st (get st h)))))
+
+  (fn step_1462f5 ((fx VFx) (ctrl VCtrl) (i Ins) (st VSt)) VWalked
+    (uses Alloc)
+    (match i
+      ((WConst n) (walked_108341 (cat3 (mov_imm_8f3fd1 (r0_9b3694) n) (mov_imm_8f3fd1 (r1_06843d) (high32 n)) (pushp_aa9cba (r0_9b3694) (r1_06843d))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalGet x) (walked_108341 (cat (frame_loadp_3e1215 (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x)) (pushp_aa9cba (r0_9b3694) (r1_06843d))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalSet x) (walked_108341 (cat (popp_aa7796 (r0_9b3694) (r1_06843d)) (frame_storep_a7168e (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x))) st (less (get st h) (u32.of 1))))
+      ((WLocalTee x) (walked_108341 (cat (peekp_8e3bce (r0_9b3694) (r1_06843d)) (frame_storep_a7168e (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x))) st (get st h)))
+      ((WGlobalGet x) (walked_108341 (push_c8c4b4 (hp)) st (wrap.add (get st h) (u32.of 1))))
+      ((WGlobalSet x) (walked_108341 (pop_e9c506 (hp)) st (less (get st h) (u32.of 1))))
+      ((WOp code) (op_step_50554d fx code st))
+      ((WLoad code align offset) (walked_108341 (load_code_f90275 code offset) st (get st h)))
+      ((WStore code align offset) (walked_108341 (store_code_bb401e code offset) st (less (get st h) (u32.of 2))))
+      ((WCall f) (call_step_833b52 fx f st))
+      ((WHost slot) (host_step_65a882 fx slot st))
+      ((WIf value then other) (let otherwise (get st next) (let end (wrap.add otherwise (u32.of 1)) (let h0 (less (get st h) (u32.of 1)) (let inner (VCtrl end h0 (arity value) ctrl) (let yes (walk_6b41d5 fx inner then (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) (let no (walk_6b41d5 fx inner other (with_h_ce987b (get yes st) h0)) (if_result_22828f yes no otherwise end h0 value))))))))
+      ((WBlock value body) (let end (get st next) (let h0 (get st h) (block_result_0845e6 (walk_6b41d5 fx (VCtrl end h0 (arity value) ctrl) body (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) end h0 value))))
+      ((WLoop value body) (let start (get st next) (let h0 (get st h) (loop_result_2764b0 (walk_6b41d5 fx (VCtrl start h0 (u32.of 0) ctrl) body (make VSt (h h0) (next (wrap.add start (u32.of 1))) (dead false))) start h0 value))))
+      ((WBr depth) (branch_step_fe4ca0 fx ctrl depth false st))
+      ((WBrIf depth) (branch_step_fe4ca0 fx ctrl depth true st))
+      ((WCopy) (walked_108341 (copy_code_24691d) st (less (get st h) (u32.of 3))))
+      ((WFill) (make VWalked (items (raw_665b8e (ebreak))) (st (make VSt (h (get st h)) (next (get st next)) (dead true)))))
+      ((WMemSize) (walked_108341 (push_c8c4b4 (pg)) st (wrap.add (get st h) (u32.of 1))))
+      ((WMemGrow) (walked_108341 (cat4 (pop_e9c506 (r0_9b3694)) (mov_rr_2cd3c0 (r1_06843d) (pg)) (add_rr_68ae87 (pg) (pg) (r0_9b3694)) (push_c8c4b4 (r1_06843d))) st (get st h)))))
 
   (fn step_1c5ee9 ((fx VFx) (ctrl VCtrl) (i Ins) (st VSt)) VWalked
     (uses Alloc)
@@ -7353,6 +7653,11 @@
     (items_join_0db805 (raw_665b8e (start_code_d5bd15 image_at image_size heap pages))
       entry))
 
+  (fn stub_items_b7a7c1 ((entry VItems) (image_at I64) (image_size I64) (heap I64) (pages I64)) VItems
+    (uses Alloc)
+    (items_join_0db805 (raw_665b8e (start_code_7bfa2e image_at image_size heap pages))
+      entry))
+
   (fn stub_items_ca1c84 ((entry Items) (image_at I64) (image_size I64) (heap I64) (pages I64)) Items
     (uses Alloc)
     (items_join_19c4cb (raw_7f4a41 (start_code_c9076d image_at image_size heap pages))
@@ -7553,7 +7858,7 @@
 
   (fn text_size ((s Str)) U32
     (uses Alloc)
-    (wrap.add (u32.of 8) (rounded (octets_of (str.encode s)))))
+    (wrap.add (u32.of 8) (rounded_5c5cf0 (octets_of (str.encode s)))))
 
   (fn the_world () Builtins
     (Builtins (make Builtin (name "print") (params (Wants (WantType "Str") (NoWants))) (ret (RetBase "Unit")) (effects (Names "Console" (NoNames))) (sink true) (ret_labels (NoNames)) (fixed false))
@@ -7946,6 +8251,12 @@
     (match is
       ((NoInss) (nothing_033f44 st))
       ((Inss i rest) (if (get st dead) (nothing_033f44 st) (let first (step_c4f6d6 fx ctrl i st) (walked_join_ce682f first (walk_4d2c4b fx ctrl rest (get first st))))))))
+
+  (fn walk_6b41d5 ((fx VFx) (ctrl VCtrl) (is Inss) (st VSt)) VWalked
+    (uses Alloc)
+    (match is
+      ((NoInss) (nothing_033f44 st))
+      ((Inss i rest) (if (get st dead) (nothing_033f44 st) (let first (step_1462f5 fx ctrl i st) (walked_join_ce682f first (walk_6b41d5 fx ctrl rest (get first st))))))))
 
   (fn walk_c24e44 ((fx Fx) (ctrl Ctrl) (is Inss) (st St)) Walked
     (uses Alloc)
@@ -8395,11 +8706,23 @@
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
+  (fn drive_esp32p4 ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_esp32p4_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32p4_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
   (fn drive_thumb_bounded ((src Str)) Bytes
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound m "main" src) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+      ((Ok m) (match (checked_bounds_in m "main" src (thumb_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
   (fn thumb_stack ((src Str)) Str
     (uses Alloc)
@@ -8411,19 +8734,25 @@
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound_in m "main" src (esp32_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
   (fn drive_xtensa_s3_bounded ((src Str)) Bytes
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (str.encode (concat "error: " (get f why))))
-      ((Ok m) (match (checked_bound_in m "main" src (esp32s3_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32s3_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
   (fn xtensa_stack ((src Str) (chip Str)) Str
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (concat "error: " (get f why)))
       ((Ok m) (match (checked_bound_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (esp32_room))) ((Err f) (concat "error: " (get f why))) ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
+
+  (fn bounds_text ((src Str) (chip Str)) Str
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (concat "error: " (get f why)))
+      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (thumb_room))))) ((Err f) (concat "error: " (get f why))) ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine)) (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))
 
   (fn drive_riscv_filter ((src Str)) Bytes
     (uses Alloc)

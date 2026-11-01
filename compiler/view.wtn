@@ -162,7 +162,7 @@
     (uses Alloc)
     (match args
       ((NoTrees) (misshapen))
-      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees f rest) (concat (one_line r) (concat "." (head_name f))))))))
+      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees f rest) (concat (operand_line r) (concat "." (head_name f))))))))
 
   ; The label is in the brackets, so what was released is on the page next to where.
   (fn one_line_declassify ((args Trees)) Str
@@ -189,13 +189,13 @@
     (uses Alloc)
     (match args
       ((NoTrees) (misshapen))
-      ((Trees r more) (concat (one_line r) (concat " with { " (concat (one_line_inits more) " }"))))))
+      ((Trees r more) (concat (operand_line r) (concat " with { " (concat (one_line_inits more) " }"))))))
 
   (fn one_line_update ((args Trees)) Str
     (uses Alloc)
     (match args
       ((NoTrees) (misshapen))
-      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees p rest) (concat (one_line r) (concat " updated by " (one_line p))))))))
+      ((Trees r more) (match more ((NoTrees) (misshapen)) ((Trees p rest) (concat (operand_line r) (concat " updated by " (operand_line p))))))))
 
   (fn one_line_infer ((args Trees)) Str
     (uses Alloc)
@@ -213,7 +213,19 @@
     (uses Alloc)
     (match args
       ((NoTrees) (misshapen))
-      ((Trees a more) (match more ((NoTrees) (misshapen)) ((Trees b rest) (concat "(" (concat (one_line a) (concat " " (concat op (concat " " (concat (one_line b) ")")))))))))))
+      ((Trees a more) (match more ((NoTrees) (misshapen)) ((Trees b rest) (concat "(" (concat (operand_line a) (concat " " (concat op (concat " " (concat (operand_line b) ")")))))))))))
+
+  ; An expression inside another on one line. An `if` there is bracketed: its `else` runs to
+  ; the end of what follows, so `(if c then a else 0 * x)` would read back as `0 * x`.
+  (fn operand_line ((t Tree)) Str
+    (uses Alloc)
+    (if (is_if t) (concat "(" (concat (one_line t) ")")) (one_line t)))
+
+  (fn is_if ((t Tree)) Bool
+    (uses Alloc)
+    (match t
+      ((Leaf text quoted) false)
+      ((Node items) (match items ((NoTrees) false) ((Trees h more) (and (is_leaf h) (and (is_word h "if") (= 3 (trees_count more)))))))))
 
   (fn one_line_inits ((ts Trees)) Str
     (uses Alloc)

@@ -1080,7 +1080,14 @@ that has to emit bytes — every item below was blocked behind three missing pri
       for. **The effects are decided** (SPEC 5.13: `Alloc Clock Log Net`, placement up to
       `inline thread core`, bounds required). The memory above is the ESP32-S3's, which the
       Xtensa backend has a layout for beside the original ESP32's; the ESP32-S31 and -P4 are
-      RISC-V parts, for the RV32 backend with layouts of their own. **The stack bounds are
+      RISC-V parts, for the RV32 backend with layouts of their own. **The ESP32-P4 has one**
+      ([compiler/native_esp32p4.wtn](../compiler/native_esp32p4.wtn), made from the RV32
+      backend by [tools/gen_esp32p4.py](../tools/gen_esp32p4.py)): only the parts that spoke
+      to Linux are replaced -- memory from mmap becomes fixed places in the P4's 768 KiB of
+      L2 memory, cleared at start, and the system calls become calls to the board -- so the
+      walk and the 64-bit operations are RV32's, run in Unicorn's RV32 against the
+      interpreter, on RAM filled with 0xA5. The stack and heap bounds hold for it too (its
+      room is 512 KiB for data and 96 KiB of machine stack). The S31's map is still to come. **The stack bounds are
       done** for both Xtensa layouts: compiler/stack.wtn's bound is one walk's, so the
       ESP32 and ESP32-S3 images have the Cortex-M image's bound and only the room differs
       (`checked_bound_in`, with a room per layout, checked against the generator's table);
@@ -1088,8 +1095,18 @@ that has to emit bytes — every item below was blocked behind three missing pri
       On QEMU the board measures the machine stack at exit (RAM is filled first and that
       stack is left as it was), and no run exceeds its bound; the chain of calls meets it
       exactly, 80 bytes, as on Cortex-M ([tests/test_stack_xtensa.py](../tests/test_stack_xtensa.py)).
-      **Not yet:** a bound for a heap that grows, so a program that allocates is still
-      refused, which is most of what the profile's `Alloc` is for
+      **The heap is bounded too**, for every block whose size is a constant where it is
+      made -- records, variants, `num.to_str` -- in compiler/stack.wtn: a body makes what its
+      blocks add up to, a function that goes round again (a self tail call is a jump) makes
+      it up to its declared depth of times, and a recursion `1 + k + ... + k^(d-1)` times;
+      nothing freed is counted as given back. Every counted block is at least 24 bytes, so
+      the heap's bound over 24 also bounds how deep releasing can recurse, which is what lets
+      a program that allocates have a stack bound at all; the wasm memory grows a page at a
+      time and the operand stack has what the pages leave. The bounded builds for Cortex-M,
+      the ESP32 and the ESP32-S3 take such programs now, and on all three the heap pointer
+      at exit is read back and never past its bound ([tests/test_heap.py](../tests/test_heap.py)).
+      **Not yet:** a block whose size the program computes -- what `concat` or `bytes.slice`
+      makes -- which needs bounds on lengths, and is refused by name
 - [x] **Proven stack and heap bounds enforced for the `mcu` profile**
       ([compiler/stack.wtn](../compiler/stack.wtn)). Before a Cortex-M image is written, what
       it can use of each of its two stacks is bounded in bytes from the compiled module:

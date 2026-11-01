@@ -24,7 +24,7 @@ reference implementation.
 
 | Path | What |
 |---|---|
-| [compiler/](compiler/) | The compiler: reader, parser, type reader, verifier, intermediate representation, runtime, and backends for WebAssembly, x86-64, AArch64, RISC-V (RV64, RV32), Cortex-M, ESP32 and ESP32-S3; `driver.wtn` is the whole of it as one function |
+| [compiler/](compiler/) | The compiler: reader, parser, type reader, verifier, intermediate representation, runtime, and backends for WebAssembly, x86-64, AArch64, RISC-V (RV64, RV32), Cortex-M, ESP32, ESP32-S3 and ESP32-P4; `driver.wtn` is the whole of it as one function |
 | [kernel/](kernel/) | The trusted kernel, [reviewed line by line](kernel/REVIEW.md), that re-checks derivations, declarations, bounds and certificates |
 | [seed/](seed/) | The compiler, compiled, and its source as one module: what `./build.sh` starts from |
 | [tools/](tools/) | `wasmc.js` and `irc.js`, the node hosts that run a compiled compiler |
@@ -58,8 +58,8 @@ Stated plainly, so nothing here claims more than it does:
   `seed/compiler.wtn`, is still the reference's (`witness store`, `witness bootstrap`). A
   change to `compiler/` is built there and brought here with a new seed.
 - **The backends' instruction tables.** `native_riscv32.wtn`, `native_thumb.wtn`,
-  `native_xtensa.wtn` and `native_xtensa_s3.wtn` are made from the RISC-V backend by
-  generators in witness-bootstrap's `tools/`; edit those, not the files here.
+  `native_xtensa.wtn`, `native_xtensa_s3.wtn` and `native_esp32p4.wtn` are made from the
+  RISC-V backend by generators in witness-bootstrap's `tools/`; edit those, not the files here.
 - **The tests.** The evidence for every claim the roadmap makes -- emulator runs of each
   backend against the interpreter, the conformance suite, the kernel compared with the
   prototype -- runs there.
