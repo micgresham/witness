@@ -4,9 +4,9 @@
 document: witness-kernel-review
 phase: 1
 reviewed_by: Michael Gresham <micgresham@gmail.com>
-reviewed_on: 2026-10-31
-commit: 5d95586
-lines: 2449
+reviewed_on: 2026-11-01
+commit: 9c97898
+lines: 2465
 findings: one -- `names_union` (core.wtn) declares Alloc and never performs it (the unused-effect warning, tests/test_env.py); not a soundness matter, left for the next change to the kernel
 ```
 
@@ -22,7 +22,7 @@ here instead, with what was read and the exact text that was read.
 |---|---|---|
 | [`arith.wtn`](arith.wtn) | 452 | `f3b8e214b8a5ae8aeb8ac67f64103073` |
 | [`core.wtn`](core.wtn) | 1,279 | `0b38704d4786dd874ad5b9043514c6b9` |
-| [`costs.wtn`](costs.wtn) | 332 | `1decbddea01eaa8e878120c0e3629779` |
+| [`costs.wtn`](costs.wtn) | 348 | `78b78a7de3b628509500f7baa34ef977` |
 | [`decls.wtn`](decls.wtn) | 386 | `20b6c8f1b1fc82697b74150d75ed33ac` |
 
 Those hashes are not decoration. [`tests/test_review.py`](../tests/test_review.py)
@@ -53,7 +53,7 @@ Stated plainly, because a review record that overstates its reach is worse than 
   kernel refuse, not accept, so they are outside the trusted base by construction — but
   they are also outside this review.
 - **The size target.** [EVIDENCE.md §1](../docs/EVIDENCE.md) hoped for "a few hundred
-  lines". The four modules are 2,449, of which about 260 are the primitive table of
+  lines". The four modules are 2,465, of which about 260 are the primitive table of
   SPEC §6.3 written out as data and a good deal more is the same list and set handling
   repeated in each module, because a Witness module imports nothing. The review happening
   is the stronger evidence that the kernel is readable; the number is recorded here

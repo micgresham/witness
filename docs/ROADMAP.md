@@ -15,6 +15,7 @@ Phases 0–3 are the bootstrap stages of DESIGN.md §5 (Phase 0 = Stage 0, and s
 | 2 | Self-hosted compiler with its own backends | **in progress** |
 | 3 | Verified backend: proof chain to machine code | not started |
 | 4 | Platform: ML, scale range, concurrency runtime, fleet | not started |
+| 5 | Tools: an optimising backend beside the reference ones | not started |
 | H | Optional hardening against trusting-trust | not started |
 
 ---
@@ -406,8 +407,11 @@ Witness module imports nothing. A module system is Phase 2's work.
 
 ## Phase 2 — self-hosting — in progress
 
-The Witness compiler written in Witness, with its own backends (no LLVM). Phase 0 is
-retired at the end.
+The Witness compiler written in Witness, with its own backends (no LLVM). Phase 0 is not
+retired: it stays as the reference implementation, in
+[witness-bootstrap](https://github.com/micgresham/witness-bootstrap), and Phase 2 ends with
+[witness](https://github.com/micgresham/witness), a repository with no Python in it, standing
+on its own.
 
 **Where it stands.** The exit criteria below are met: the compiler compiles itself to
 byte-identical output, and the build is deterministic and content-hashed. What is open is
@@ -471,8 +475,8 @@ the rest of the list, and each open item is waiting on something other than effo
   is a jump, and the deeper non-tail recursion of the reader wants node's stack at 200000.
   `lower.wtn` stays: the IR reuses its tables and helpers, and its own tests still run.
 - *The front end in Witness* lacks several contract forms (`effect-under-label` for `match`,
-  the wire-form half of `placement`, termination and resource bounds are done); **Retire Phase 0**
-  cannot happen before it does, and deleting the prototype is not something to do unasked.
+  the wire-form half of `placement`, termination and resource bounds are done); the **new
+  repository standing on its own** cannot happen before it does.
 
 Starting it found that **none of it was possible**, and not for want of effort. Nothing
 could look inside a `Str` or a `Bytes`: the complete set of primitives that touched text
@@ -1052,18 +1056,21 @@ that has to emit bytes — every item below was blocked behind three missing pri
       **The same translation** is what Cortex-M, RV32 and Xtensa need: another register file
       and another encoder behind the same walk. They are 32-bit machines, though, and every
       value here is 64 bits wide, so they want a word-size parameter first. Those are the next items
-- [ ] **32-bit targets: narrow types only (decided).** `mcu` and `esp32` have 32-bit words,
+- [x] **32-bit targets: narrow types only (decided).** `mcu` and `esp32` have 32-bit words,
       and every value in the backends is one machine word, so a type that needs two is not
       available there. **Done:** the `profile-type` rule -- a definition that writes `Int`,
       `I64` or `U64` among its declared types does not fit `mcu` or `esp32`, as one whose
       effects are not provided does not -- in the Python checker, in
       [compiler/effects.wtn](../compiler/effects.wtn) (compared with it on every example and
       conformance case under every profile), in SPEC 5.13, the primer and a conformance case.
-      **Not yet:** the backends that make use of it. Because a narrow value is the same bits in
-      a 32-bit register as in the low half of a 64-bit one, and a shift by 48 is a shift by 16
-      once the count is taken modulo 32, the instruction-level translation of the 64-bit
-      backends carries over; what does not is the runtime (its checked `Int` arithmetic is
-      64-bit) and the container formats
+      **Moved to Phase 5:** backends that make use of it, a narrow value in one word rather
+      than a pair, are the optimising backend's (Phase 5). The reference backends keep every
+      value in two words on 32-bit targets, which is correct and is what their bounds and
+      Phase 3 are about. Because a narrow value is the same bits in a 32-bit register as in
+      the low half of a 64-bit one, and a shift by 48 is a shift by 16 once the count is
+      taken modulo 32, the instruction-level translation of the 64-bit backends carries
+      over; what does not is the runtime (its checked `Int` arithmetic is 64-bit) and the
+      container formats
 - [ ] Native freestanding backend for microcontrollers: **Cortex-M** (ARMv6-M/v7-M/v8-M),
       **RISC-V** (RV32I and RV32E, with and without M), and **Xtensa LX6/LX7** for the
       ESP32 family. Xtensa is there for one reason: the ESP32, ESP32-S2 and ESP32-S3 are
@@ -1087,7 +1094,14 @@ that has to emit bytes — every item below was blocked behind three missing pri
       L2 memory, cleared at start, and the system calls become calls to the board -- so the
       walk and the 64-bit operations are RV32's, run in Unicorn's RV32 against the
       interpreter, on RAM filled with 0xA5. The stack and heap bounds hold for it too (its
-      room is 512 KiB for data and 96 KiB of machine stack). The S31's map is still to come. **The stack bounds are
+      room is 512 KiB for data and 96 KiB of machine stack). **So has the ESP32-S31**
+      ([compiler/native_esp32s31.wtn](../compiler/native_esp32s31.wtn), from the same
+      generator's second layout): its 512 KiB of SRAM is at 0x2F000000, and its boot ROM keeps
+      what is above 0x2F07AFC0 (ESP-IDF's `ld.hp_mem_defs`), so the code has 128 KiB, the data
+      288 KiB and the machine stack 72 KiB under 0x2F07A000; every P4 test runs on it too,
+      and the bounds hold. Neither the S31 nor the P4 has been run on silicon: the evidence is
+      the emulator's, and the S31's addresses are ESP-IDF's for a part whose datasheet is still
+      preliminary (v0.5). **The stack bounds are
       done** for both Xtensa layouts: compiler/stack.wtn's bound is one walk's, so the
       ESP32 and ESP32-S3 images have the Cortex-M image's bound and only the room differs
       (`checked_bound_in`, with a room per layout, checked against the generator's table);
@@ -1130,7 +1144,20 @@ that has to emit bytes — every item below was blocked behind three missing pri
       those tests. What a board's host functions use of the machine stack is the board's
       own, outside the bound. **Not yet:** a bound on a heap that grows, which `esp32` will
       need, since a block's size is data-dependent
-- [ ] Retire Phase 0
+- [ ] ~~Retire Phase 0~~ (decided against: the prototype stays, as witness-bootstrap, the
+      reference every implementation is checked against.) Instead, **the `witness` repository
+      stands on its own**: it has the compiler, the kernel, the documents and a seed, fresh
+      history, and `./build.sh` reaches the fixpoint with node alone. What it still takes from
+      witness-bootstrap, each to be done in Witness:
+  - [ ] **Checking a program**: the front end in Witness as the whole checker (above), one
+        `check` that gives the Python checker's verdict on every conformance case
+  - [ ] **The store and the bootstrap**: resolving the content-hashed `use`s and flattening the
+        driver into the seed's one text (`witness store`, `witness bootstrap`), so a change to
+        `compiler/` is built there rather than brought over with a new seed
+  - [ ] **The backend generators**: the Thumb, RV32, Xtensa, ESP32-P4 and ESP32-S31 modules
+        are made from the RISC-V one by Python in `tools/`
+  - [ ] **The tests**: the conformance suite run by the Witness checker, and the backends'
+        agreement with the interpreter, which today runs in Python emulators
 
 **Exit criteria:** the compiler compiles itself to byte-identical output (fixpoint),
 and deterministic content-hashed builds make that verifiable by anyone.
@@ -1169,8 +1196,8 @@ Can start once the Phase 2 Wasm backend works; items do not wait for Phase 3.
       language about where data is allowed to go does not begin by sending a program to
       somebody's server, and anyone can serve it from a static file. It is the Phase 2
       backend's first external user, which is also why it waits for it: a playground
-      built sooner would be a server running the Python prototype, and Phase 0 is retired
-      at the end of Phase 2 — a throwaway with a known shelf life. Worth revisiting if
+      built sooner would be a server running the Python prototype, which Phase 2 leaves
+      as a reference and not as the toolchain. Worth revisiting if
       teaching the language turns out to need one before then
 - [ ] What the playground shows, which is the part that makes it a Witness playground
       rather than a text box with a Run button. Five panes, each an existing verb:
@@ -1209,6 +1236,37 @@ Can start once the Phase 2 Wasm backend works; items do not wait for Phase 3.
 **Exit criteria:** one program runs on a microcontroller and on a cluster, with only
 the target profile changing; and the language, its reference and a place to run it are
 one static bundle that works offline.
+
+---
+
+## Phase 5 — tools
+
+Can start once the Phase 2 backends work; items do not wait for Phase 3 or 4.
+
+- [ ] **An optimising backend, as a tool.** The Phase 2 backends are native, but they
+      emit each IR operation as it comes: every intermediate value is stored to and
+      loaded from an operand stack in RAM, eight bytes a slot, and on the 32-bit targets
+      every value is a pair of registers. That is what keeps their stack and heap bounds
+      one walk over the code, and what Phase 3 proves things about, so they stay as they
+      are: the reference backends. The optimiser sits beside them, opted into, never in
+      their place. It caches the top of the operand stack in registers, allocates
+      registers across a function, gives the narrow types one word on 32-bit targets
+      (moved here from Phase 2, where the `profile-type` rule that allows it is done), and
+      does the folding and inlining a straight emitter does not
+- [ ] What the optimiser may not do is weaken a guarantee. Its output is checked rather
+      than trusted. The same programs run through both backends must print the same, as
+      the reference backends are checked against the interpreter now; and its stack and
+      heap bounds are derived again from the code it writes, not inherited from the
+      reference build, so a board profile that needs proven bounds still gets them, or
+      the optimised build is refused. Translation validation (a proof per compilation
+      that the two agree, checked by the kernel) is where this ends; differential
+      testing is where it starts
+- [ ] Its first targets are the boards (Cortex-M, ESP32, ESP32-S3, ESP32-P4, ESP32-S31),
+      where the reference code's cost in speed, size and RAM is felt most
+
+**Exit criteria:** an optimised build of the conformance suite and the example programs
+agrees with the reference build on every program and target it supports, and each
+board image's bounds are proven against its own code.
 
 ---
 

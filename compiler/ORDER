@@ -36,4 +36,5 @@ compiler/xtensa.wtn
 compiler/native_xtensa.wtn
 compiler/native_xtensa_s3.wtn
 compiler/native_esp32p4.wtn
+compiler/native_esp32s31.wtn
 compiler/driver.wtn

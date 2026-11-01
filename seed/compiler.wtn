@@ -819,6 +819,8 @@
 
   (fn base_address_5acd22 () I64 (i64.of 1077379072))
 
+  (fn base_address_a08d19 () I64 (i64.of 788529152))
+
   (fn base_address_de8f01 () I64 (i64.of 134217728))
 
   (fn base_address_fcdab8 () I64 (i64.of 1341128704))
@@ -1015,6 +1017,12 @@
     (match fs
       ((NoFuncs) (ANoBodies))
       ((Funcs f rest) (ABodies (function_items f shapes hosts) (bodies_of rest shapes hosts)))))
+
+  (fn bodies_of_47a04a ((fs Funcs) (shapes VShapes) (hosts VHostfns)) VBodies
+    (uses Alloc)
+    (match fs
+      ((NoFuncs) (VNoBodies))
+      ((Funcs f rest) (VBodies (function_items_c54c0a f shapes hosts) (bodies_of_47a04a rest shapes hosts)))))
 
   (fn bodies_of_4d9f2f ((fs Funcs) (shapes VShapes) (hosts VHostfns)) VBodies
     (uses Alloc)
@@ -1439,6 +1447,13 @@
         (subs_i (r2_1e3b3c) (r2_1e3b3c) (i64.of 1))
         (bcond (u32.of 1) (i64.of -12)))))
 
+  (fn cleared_40d0b5 () Bytes
+    (uses Alloc)
+    (cat4 (mov_rr_2cd3c0 (r0_9b3694) (mem))
+      (mov_imm_8f3fd1 (r2_20fcca) (i64.of 73728))
+      (cat (sw (zero) (r0_9b3694) (i64.of 0)) (addi (r0_9b3694) (r0_9b3694) (i64.of 4)))
+      (cat (addi (r2_20fcca) (r2_20fcca) (i64.of -1)) (bne (r2_20fcca) (zero) (i64.of -12)))))
+
   (fn cleared_655f03 () Bytes
     (uses Alloc)
     (cat4 (mov_rr_2cd3c0 (r0_9b3694) (mem))
@@ -1562,6 +1577,13 @@
       (cat3 (if (= divide (i64.of 1)) (no_bytes) (cat3 (mov_imm_8f3fd1 (r2_20fcca) divide) (addi (r3_130301) (zero) (i64.of 0)) (cat (cat4 (addi (u32.of 14) (u32.of 0) (i64.of 0)) (addi (u32.of 15) (u32.of 0) (i64.of 0)) (addi (u32.of 6) (u32.of 0) (i64.of 64)) (cat4 (srli (u32.of 7) (u32.of 11) (u32.of 31)) (slli (u32.of 11) (u32.of 11) (u32.of 1)) (srli (u32.of 28) (u32.of 10) (u32.of 31)) (cat4 (or_rr (u32.of 11) (u32.of 11) (u32.of 28)) (slli (u32.of 10) (u32.of 10) (u32.of 1)) (srli (u32.of 5) (u32.of 15) (u32.of 31)) (cat4 (slli (u32.of 15) (u32.of 15) (u32.of 1)) (srli (u32.of 28) (u32.of 14) (u32.of 31)) (or_rr (u32.of 15) (u32.of 15) (u32.of 28)) (cat4 (slli (u32.of 14) (u32.of 14) (u32.of 1)) (or_rr (u32.of 14) (u32.of 14) (u32.of 7)) (bne (u32.of 5) (u32.of 0) (i64.of 32)) (cat4 (sltu_rr (u32.of 28) (u32.of 15) (u32.of 13)) (xor_rr (u32.of 29) (u32.of 15) (u32.of 13)) (sltiu (u32.of 29) (u32.of 29) (i64.of 1)) (cat4 (sltu_rr (u32.of 7) (u32.of 14) (u32.of 12)) (and_rr_08a1eb (u32.of 29) (u32.of 29) (u32.of 7)) (or_rr (u32.of 28) (u32.of 28) (u32.of 29)) (cat4 (bne (u32.of 28) (u32.of 0) (i64.of 24)) (sltu_rr (u32.of 29) (u32.of 14) (u32.of 12)) (sub_rr_55a44e (u32.of 14) (u32.of 14) (u32.of 12)) (cat4 (sub_rr_55a44e (u32.of 15) (u32.of 15) (u32.of 13)) (sub_rr_55a44e (u32.of 15) (u32.of 15) (u32.of 29)) (ori (u32.of 10) (u32.of 10) (i64.of 1)) (cat (addi (u32.of 6) (u32.of 6) (i64.of -1)) (bne (u32.of 6) (u32.of 0) (i64.of -100)))))))))))) (cat (mov_rr_2cd3c0 (r0_9b3694) (r0_9b3694)) (no_bytes)))))
         (pushp_aa9cba (r0_9b3694) (r1_06843d))
         (no_bytes))))
+
+  (fn clock_code_dcfde1 ((which I64) (divide I64)) Bytes
+    (uses Alloc)
+    (cat4 (mov_imm_8f3fd1 (r0_9b3694) which)
+      (mov_imm_8f3fd1 (r1_06843d) divide)
+      (host_call_192363 (u32.of 2))
+      (pushp_aa9cba (r0_9b3694) (r1_06843d))))
 
   (fn cmovz ((dst U32) (src U32)) Bytes
     (uses Alloc)
@@ -2603,6 +2625,25 @@
           (le64 total)
           (cat (le64 total) (le64 (i64.of 4096)))))))
 
+  (fn elf_header_db82dc ((entry I64) (total I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat4 (cat4 (bytes.of (u8.of 127)) (bytes.of (u8.of 69)) (bytes.of (u8.of 76)) (bytes.of (u8.of 70))) (bytes.of (u8.of 1)) (bytes.of (u8.of 1)) (cat (bytes.of (u8.of 1)) (zeros (u32.of 9) (u32.of 8))))
+      (cat4 (le16 (u32.of 2)) (le16 (u32.of 243)) (le32 (i64.of 1)) (le32 entry))
+      (cat4 (le32 (i64.of 52))
+        (le32 (i64.of 0))
+        (le32 (i64.of 0))
+        (cat4 (le16 (u32.of 52))
+          (le16 (u32.of 32))
+          (le16 (u32.of 1))
+          (cat3 (le16 (u32.of 0)) (le16 (u32.of 0)) (le16 (u32.of 0)))))
+      (cat4 (le32 (i64.of 1))
+        (le32 (i64.of 0))
+        (le32 (base_address_a08d19))
+        (cat4 (le32 (base_address_a08d19))
+          (le32 total)
+          (le32 total)
+          (cat (le32 (i64.of 7)) (le32 (i64.of 4096)))))))
+
   (fn elf_header_f2f67e ((entry I64) (total I64)) Bytes
     (uses Alloc)
     (cat4 (cat4 (cat4 (bytes.of (u8.of 127)) (bytes.of (u8.of 69)) (bytes.of (u8.of 76)) (bytes.of (u8.of 70))) (bytes.of (u8.of 1)) (bytes.of (u8.of 1)) (cat (bytes.of (u8.of 1)) (zeros (u32.of 9) (u32.of 8))))
@@ -2754,6 +2795,14 @@
 
   (fn esp32p4_room () Room (make Room (data 524288) (machine 98304)))
 
+  (fn esp32s31_elf_of ((m Module) (entry_name Str) (filter Bool)) (Result Bytes Fault)
+    (uses Alloc)
+    (match (index_of_func (get m funcs) entry_name (u32.of 0))
+      ((None) (Err (fault "native" (concat "the program has no function named " entry_name))))
+      ((Some index) (let shapes (shapes_of_76ee1b (get m funcs)) (let bodies (bodies_of_47a04a (get m funcs) shapes (hostfns_of_fedf5f (get m imports))) (let heap (get m heap) (let image (image_of (get m segments) (zeros (narrow heap) (u32.of 40))) (let image_at (wrap.add (base_address_a08d19) (i64.of 128)) (let entry (main_entry_e6415b index) (let stub (stub_items_f3561a entry image_at (i64.of (octets image)) heap (widen (get m pages))) (let stub_end (items_size_2a4c5a stub) (let starts (starts_from_b07613 bodies stub_end) (let code (joined_8ded15 (code_to_1d7267 stub (u32.of 0) (labels_of_d272f8 stub (u32.of 0)) starts (bodies_to_7c42ee bodies stub_end starts (VNoChunks)))) (let code_offset (wrap.add (i64.of 128) (i64.of (octets image))) (let total (wrap.add code_offset (i64.of (octets code))) (if (< (i64.of 131072) total) (Err (fault "native" (concat "the image is " (concat (num.to_str total) " bytes, more than the 131072 of SRAM the ESP32-S31's layout has for code")))) (Ok (cat4 (elf_header_db82dc (wrap.add (base_address_a08d19) code_offset) total) (zeros (u32.of 44) (u32.of 8)) image code))))))))))))))))))
+
+  (fn esp32s31_room () Room (make Room (data 294912) (machine 73728)))
+
   (fn esp32s3_room () Room (make Room (data 307200) (machine 49152)))
 
   (fn exit_code ((status I64)) Bytes
@@ -2767,6 +2816,10 @@
   (fn exit_code_0fac99 ((status I64)) Bytes
     (uses Alloc)
     (cat (mov_imm_61cc82 (rdi) status) (syscall_with_667898 (i64.of 60))))
+
+  (fn exit_code_4bf5d2 ((status I64)) Bytes
+    (uses Alloc)
+    (cat3 (mov_imm_8f3fd1 (r0_9b3694) status) (host_call_192363 (u32.of 0)) (ebreak)))
 
   (fn exit_code_534da6 ((status I64)) Bytes
     (uses Alloc)
@@ -3202,6 +3255,13 @@
         (items_join_0db805 (raw_665b8e (prologue_227227 fx))
           (items_join_0db805 (get walked_body items) (raw_665b8e (epilogue_ebc07d fx)))))))
 
+  (fn function_items_c54c0a ((f Func) (shapes VShapes) (hosts VHostfns)) VItems
+    (uses Alloc)
+    (let fx (make VFx (params (get f params)) (locals (get f locals)) (results (get f results)) (shapes shapes) (hosts hosts))
+      (let walked_body (walk_6d4061 fx (VNoCtrl) (get f body) (make VSt (h (u32.of 0)) (next (u32.of 0)) (dead false)))
+        (items_join_0db805 (raw_665b8e (prologue_c22df7 fx))
+          (items_join_0db805 (get walked_body items) (raw_665b8e (epilogue_57cdb8 fx)))))))
+
   (fn function_items_e689bf ((f Func) (shapes VShapes) (hosts VHostfns)) VItems
     (uses Alloc)
     (let fx (make VFx (params (get f params)) (locals (get f locals)) (results (get f results)) (shapes shapes) (hosts hosts))
@@ -3369,6 +3429,11 @@
     (cat (mov_imm_20e3ac (tmp_c64b64) (wrap.add (i64.of 150994944) (i64.of (wrap.add (wrap.mul k (u32.of 16)) (u32.of 1)))))
       (blx_r (tmp_c64b64))))
 
+  (fn host_call_192363 ((k U32)) Bytes
+    (uses Alloc)
+    (cat (mov_imm_8f3fd1 (tmp) (wrap.add (i64.of 789028864) (i64.of (wrap.mul k (u32.of 16)))))
+      (jalr (u32.of 1) (tmp) (i64.of 0))))
+
   (fn host_call_23141c ((k U32)) Bytes
     (uses Alloc)
     (cat (mov_imm_1f2325 (tmp_130301) (wrap.add (i64.of 1077346304) (i64.of (wrap.mul k (u32.of 16)))))
@@ -3439,6 +3504,20 @@
             (if (str.eq name "clock.ticks")
               (clock_code_9697c1 (i64.of 1) (i64.of 1000))
               (ill)))))))
+
+  (fn host_code_a81de7 ((name Str)) Bytes
+    (uses Alloc)
+    (if (str.eq name "print")
+      (print_code_3d4a36 (i64.of 1) (no_bytes))
+      (if (str.eq name "log")
+        (print_code_3d4a36 (i64.of 2) (no_bytes))
+        (if (str.eq name "clock.now")
+          (clock_code_dcfde1 (i64.of 1) (i64.of 1))
+          (if (str.eq name "clock.wall")
+            (clock_code_dcfde1 (i64.of 0) (i64.of 1))
+            (if (str.eq name "clock.ticks")
+              (clock_code_dcfde1 (i64.of 1) (i64.of 1000))
+              (ebreak)))))))
 
   (fn host_code_b9b13c ((name Str)) Bytes
     (uses Alloc)
@@ -3537,6 +3616,12 @@
     (match (host_at_1dd0e7 (get fx hosts) slot)
       ((None) (nothing_033f44 st))
       ((Some found) (match found ((VNoHostfns) (nothing_033f44 st)) ((VHostfns name params results more) (let after (wrap.add (less (get st h) params) results) (walked_108341 (host_code_baf00b name) st after)))))))
+
+  (fn host_step_71b11a ((fx VFx) (slot U32) (st VSt)) VWalked
+    (uses Alloc)
+    (match (host_at_1dd0e7 (get fx hosts) slot)
+      ((None) (nothing_033f44 st))
+      ((Some found) (match found ((VNoHostfns) (nothing_033f44 st)) ((VHostfns name params results more) (let after (wrap.add (less (get st h) params) results) (walked_108341 (host_code_a81de7 name) st after)))))))
 
   (fn host_step_895173 ((fx Fx) (slot U32) (st St)) Walked
     (uses Alloc)
@@ -4849,6 +4934,11 @@
     (items_join_0db805 (item_2201a5 (VCallFn main_index))
       (raw_665b8e (exit_code_7b253a (i64.of 0)))))
 
+  (fn main_entry_e6415b ((main_index U32)) VItems
+    (uses Alloc)
+    (items_join_0db805 (item_2201a5 (VCallFn main_index))
+      (raw_665b8e (exit_code_4bf5d2 (i64.of 0)))))
+
   (fn main_entry_e7a8e0 ((main_index U32)) VItems
     (uses Alloc)
     (items_join_0db805 (item_2201a5 (VCallFn main_index))
@@ -6027,6 +6117,13 @@
         (add_rr (r1) (r19) (r4))
         (add_imm (r1) (r1) (u32.of 8)))
       (cat (write_code fd) (write_constant fd (i64.of 10) (i64.of 1)))))
+
+  (fn print_code_3d4a36 ((fd I64) (prefix Bytes)) Bytes
+    (uses Alloc)
+    (cat4 (pop_e9c506 (r4_9f313e))
+      (add_rr_68ae87 (r0_9b3694) (mem) (r4_9f313e))
+      (mov_imm_8f3fd1 (r1_06843d) fd)
+      (host_call_192363 (u32.of 1))))
 
   (fn print_code_5dd8f7 ((fd I64)) Bytes
     (uses Alloc)
@@ -7227,6 +7324,16 @@
         (add_imm_4129b0 (rsp) (i64.of 1073741808)))
       (cat (mov_imm_61cc82 (r14) heap) (mov_imm_61cc82 (r13) pages))))
 
+  (fn start_code_cb62a1 ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
+    (uses Alloc)
+    (cat4 (cat3 (mov_imm_8f3fd1 (sp_559e10) (i64.of 789028864)) (mov_imm_8f3fd1 (os) (i64.of 788955136)) (mov_imm_8f3fd1 (mem) (i64.of 788660224)))
+      (cleared_40d0b5)
+      (cat4 (mov_rr_2cd3c0 (r0_9b3694) (mem))
+        (mov_imm_8f3fd1 (r1_06843d) image_at)
+        (mov_imm_8f3fd1 (r2_20fcca) image_size)
+        (copy_loop_9b04f9))
+      (cat (mov_imm_8f3fd1 (hp) heap) (mov_imm_8f3fd1 (pg) pages))))
+
   (fn start_code_d5bd15 ((image_at I64) (image_size I64) (heap I64) (pages I64)) Bytes
     (uses Alloc)
     (cat4 (cat3 (mov_imm_1f2325 (sp_49b684) (i64.of 1070592000)) (mov_imm_1f2325 (os_cd4cc3) (i64.of 1070542848)) (mov_imm_1f2325 (mem_20fcca) (i64.of 1070235648)))
@@ -7497,6 +7604,30 @@
       ((WMemSize) (walked_108341 (cat (cell_get (r0_6d8cf6) (i64.of 537391108)) (push_431459 (r0_6d8cf6))) st (wrap.add (get st h) (u32.of 1))))
       ((WMemGrow) (walked_108341 (cat4 (pop_b2a25c (r0_6d8cf6)) (cell_get (r1_3864b0) (i64.of 537391108)) (cat (add_rr_ac932d (r2_1e3b3c) (r1_3864b0) (r0_6d8cf6)) (cell_set (r2_1e3b3c) (i64.of 537391108))) (push_431459 (r1_3864b0))) st (get st h)))))
 
+  (fn step_c927ac ((fx VFx) (ctrl VCtrl) (i Ins) (st VSt)) VWalked
+    (uses Alloc)
+    (match i
+      ((WConst n) (walked_108341 (cat3 (mov_imm_8f3fd1 (r0_9b3694) n) (mov_imm_8f3fd1 (r1_06843d) (high32 n)) (pushp_aa9cba (r0_9b3694) (r1_06843d))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalGet x) (walked_108341 (cat (frame_loadp_3e1215 (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x)) (pushp_aa9cba (r0_9b3694) (r1_06843d))) st (wrap.add (get st h) (u32.of 1))))
+      ((WLocalSet x) (walked_108341 (cat (popp_aa7796 (r0_9b3694) (r1_06843d)) (frame_storep_a7168e (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x))) st (less (get st h) (u32.of 1))))
+      ((WLocalTee x) (walked_108341 (cat (peekp_8e3bce (r0_9b3694) (r1_06843d)) (frame_storep_a7168e (r0_9b3694) (r1_06843d) (local_disp_86a6bd fx x))) st (get st h)))
+      ((WGlobalGet x) (walked_108341 (push_c8c4b4 (hp)) st (wrap.add (get st h) (u32.of 1))))
+      ((WGlobalSet x) (walked_108341 (pop_e9c506 (hp)) st (less (get st h) (u32.of 1))))
+      ((WOp code) (op_step_50554d fx code st))
+      ((WLoad code align offset) (walked_108341 (load_code_f90275 code offset) st (get st h)))
+      ((WStore code align offset) (walked_108341 (store_code_bb401e code offset) st (less (get st h) (u32.of 2))))
+      ((WCall f) (call_step_833b52 fx f st))
+      ((WHost slot) (host_step_71b11a fx slot st))
+      ((WIf value then other) (let otherwise (get st next) (let end (wrap.add otherwise (u32.of 1)) (let h0 (less (get st h) (u32.of 1)) (let inner (VCtrl end h0 (arity value) ctrl) (let yes (walk_6d4061 fx inner then (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) (let no (walk_6d4061 fx inner other (with_h_ce987b (get yes st) h0)) (if_result_22828f yes no otherwise end h0 value))))))))
+      ((WBlock value body) (let end (get st next) (let h0 (get st h) (block_result_0845e6 (walk_6d4061 fx (VCtrl end h0 (arity value) ctrl) body (make VSt (h h0) (next (wrap.add end (u32.of 1))) (dead false))) end h0 value))))
+      ((WLoop value body) (let start (get st next) (let h0 (get st h) (loop_result_2764b0 (walk_6d4061 fx (VCtrl start h0 (u32.of 0) ctrl) body (make VSt (h h0) (next (wrap.add start (u32.of 1))) (dead false))) start h0 value))))
+      ((WBr depth) (branch_step_fe4ca0 fx ctrl depth false st))
+      ((WBrIf depth) (branch_step_fe4ca0 fx ctrl depth true st))
+      ((WCopy) (walked_108341 (copy_code_24691d) st (less (get st h) (u32.of 3))))
+      ((WFill) (make VWalked (items (raw_665b8e (ebreak))) (st (make VSt (h (get st h)) (next (get st next)) (dead true)))))
+      ((WMemSize) (walked_108341 (push_c8c4b4 (pg)) st (wrap.add (get st h) (u32.of 1))))
+      ((WMemGrow) (walked_108341 (cat4 (pop_e9c506 (r0_9b3694)) (mov_rr_2cd3c0 (r1_06843d) (pg)) (add_rr_68ae87 (pg) (pg) (r0_9b3694)) (push_c8c4b4 (r1_06843d))) st (get st h)))))
+
   (fn store ((base U32) (disp I64) (src U32)) Bytes
     (uses Alloc)
     (cat4 (rex true src (u32.of 0) base)
@@ -7661,6 +7792,11 @@
   (fn stub_items_ca1c84 ((entry Items) (image_at I64) (image_size I64) (heap I64) (pages I64)) Items
     (uses Alloc)
     (items_join_19c4cb (raw_7f4a41 (start_code_c9076d image_at image_size heap pages))
+      entry))
+
+  (fn stub_items_f3561a ((entry VItems) (image_at I64) (image_size I64) (heap I64) (pages I64)) VItems
+    (uses Alloc)
+    (items_join_0db805 (raw_665b8e (start_code_cb62a1 image_at image_size heap pages))
       entry))
 
   (fn stur ((d U32) (n U32) (off I64)) Bytes
@@ -8258,6 +8394,12 @@
       ((NoInss) (nothing_033f44 st))
       ((Inss i rest) (if (get st dead) (nothing_033f44 st) (let first (step_1462f5 fx ctrl i st) (walked_join_ce682f first (walk_6b41d5 fx ctrl rest (get first st))))))))
 
+  (fn walk_6d4061 ((fx VFx) (ctrl VCtrl) (is Inss) (st VSt)) VWalked
+    (uses Alloc)
+    (match is
+      ((NoInss) (nothing_033f44 st))
+      ((Inss i rest) (if (get st dead) (nothing_033f44 st) (let first (step_c927ac fx ctrl i st) (walked_join_ce682f first (walk_6d4061 fx ctrl rest (get first st))))))))
+
   (fn walk_c24e44 ((fx Fx) (ctrl Ctrl) (is Inss) (st St)) Walked
     (uses Alloc)
     (match is
@@ -8718,6 +8860,18 @@
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (esp32p4_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
+  (fn drive_esp32s31 ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (esp32s31_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_esp32s31_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bounds_in m "main" src (esp32s31_room)) ((Err f) (str.encode (concat "error: " (get f why)))) ((Ok b) (match (esp32s31_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
   (fn drive_thumb_bounded ((src Str)) Bytes
     (uses Alloc)
     (match (module_ir src)
@@ -8752,7 +8906,7 @@
     (uses Alloc)
     (match (module_ir src)
       ((Err f) (concat "error: " (get f why)))
-      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (thumb_room))))) ((Err f) (concat "error: " (get f why))) ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine)) (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))
+      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (if (str.eq chip "esp32s31") (esp32s31_room) (thumb_room)))))) ((Err f) (concat "error: " (get f why))) ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine)) (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))
 
   (fn drive_riscv_filter ((src Str)) Bytes
     (uses Alloc)
