@@ -2,6 +2,10 @@
 // produced by compiler/driver.wtn) on a source file and write the module it produces.
 //
 //   node --stack-size=200000 tools/wasmc.js compiler.wasm source.wtn out.wasm
+//   node --stack-size=200000 tools/wasmc.js compiler.wasm source.wtn - drive_check
+//
+// The second checks the source instead (drive_check_mcu, _esp32 and _embedded for the other
+// profiles), prints what it found and exits with the verdict.
 //
 // The host does three things the language does not: it loads the module, it puts the
 // source in the module's memory as a length word and the bytes, and it reads the answer
@@ -37,8 +41,29 @@ module.exports = {compile};
 if (require.main === module) {
   const [wasmPath, srcPath, outPath, entry] = process.argv.slice(2);
   if (!outPath) { console.error('usage: wasmc.js compiler.wasm source.wtn out [entry]'); process.exit(2); }
-  const {out, printed, memory} = compile(fs.readFileSync(wasmPath), fs.readFileSync(srcPath), entry || 'drive');
+  const checking = (entry || '').startsWith('drive_check');
+  let answer;
+  try {
+    answer = compile(fs.readFileSync(wasmPath), fs.readFileSync(srcPath), entry || 'drive');
+  } catch (ex) {
+    if (!checking || !(ex instanceof WebAssembly.RuntimeError)) throw ex;
+    // A trap is the compiled checker stopping, not a verdict: its Int is 64 bits where
+    // the language's is unbounded, so a proof about a wide range can overflow it. Say so,
+    // and never let it pass for an answer.
+    console.log(`unread module the compiled checker stopped (${ex.message}), so no verdict is given\nunread`);
+    process.exit(3);
+  }
+  const {out, printed, memory} = answer;
   for (const line of printed) console.log(line);
+  if (checking) {
+    // The checker answers its findings and, last, the verdict; the exit status is the
+    // verdict's, as `witness check` has it: 0 accepted (with or without warnings), 1
+    // rejected, 3 not read, so a script cannot take "not read" for "accepted".
+    const text = out.toString('utf8');
+    process.stdout.write(text.endsWith('\n') ? text : text + '\n');
+    const verdict = text.trimEnd().split('\n').pop();
+    process.exit(verdict === 'accept' || verdict === 'warn' ? 0 : verdict === 'reject' ? 1 : 3);
+  }
   const isWasm = out[0] === 0 && out[1] === 0x61 && out[2] === 0x73 && out[3] === 0x6d;
   const isElf = out[0] === 0x7f && out[1] === 0x45 && out[2] === 0x4c && out[3] === 0x46;
   if (isWasm || isElf) {

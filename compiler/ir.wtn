@@ -338,9 +338,11 @@
               (conv_decode sigs vars args n (- left 1))
             (if (or (or (str.eq name "Count") (str.eq name "Octets")) (str.eq name "unwrap"))
               (conv_erased sigs vars args n (- left 1))
+              (if (str.eq name "context")
+                (conv_context sigs vars args n (- left 1))
               (match (find_sig sigs name)
                 ((Some sig) (conv_sig sigs vars sig args n (- left 1)))
-                ((None) (conv_prim sigs vars name args n (- left 1))))))))))))))
+                ((None) (conv_prim sigs vars name args n (- left 1)))))))))))))))
 
   ; `bytes.decode` is the check rtlib.wtn has, and then the same octets read as text or the
   ; reason Python's decoder gives -- written out as the code it is.
@@ -430,6 +432,18 @@
         ((Trees h rest) (match (conv sigs vars h n (- left 1))
           ((Err f) (Err f))
           ((Ok c) (Ok (make Conv (pend (get c pend)) (atom (get c atom)) (ty "Int") (next (get c next))))))))))
+
+  ; `(context r op why)` is `r`: the prelude's `context` names a failure for whoever reads
+  ; it and changes nothing, so it is its first argument; the other two are text built for
+  ; no one, and pure.
+  (fn conv_context ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a context needs the result it is about"))
+        ((Trees h rest) (conv sigs vars h n (- left 1))))))
 
   (fn conv_sig ((sigs Sigs) (vars TEnv) (sig Sig) (args Trees) (n Int) (left Int)) (Result Conv Fault)
     (uses Alloc)

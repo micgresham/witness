@@ -8,6 +8,8 @@
 ;
 ;   witness run compiler/driver.wtn --grant Alloc,Console
 (module driver
+  (use "wtn:f0a7631545c378e8397a4dc5cec1f8766ded854fa9f772b3eb384d762a5b7fff" as check_source)
+
   (use "wtn:04852b0bc4bbba2ffbb78275cfe77192e76f28ec12528c975b2558092906f0f9" as arm_elf_of)
 
   (use "wtn:d36fcd57bb45f66081e3fb1a111df0b2308c6017a061dc178703caa341226978" as riscv_elf_of)
@@ -40,11 +42,11 @@
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
-  (use "wtn:5650ba4318f0f6dae18f381fa6944f08d89f44ecc80bcc9d70ed3a067dae097f" as module_ir)
+  (use "wtn:39da186bd6f9f2f88102709f450f2ede2d162e918f037244e795094aa258be8a" as module_ir)
 
   (use "wtn:dc55715dcac24a1489129d0f2e28460470bbabf0de7086cfa46e5806d3435145" as elf_of)
 
-  (use "wtn:fc4d501f2627d2dfc1878dda5df39fe67eba400e3920d5c9cb2c1b00c2f9fb3d" as compile_ir)
+  (use "wtn:81d4b5c4fde86af3dde51c57f8b6d6eeb2dfa4eb3010aac4d1e4625b227c034b" as compile_ir)
 
   (fn drive ((src Str)) Bytes
     (uses Alloc)
@@ -211,6 +213,24 @@
         ((Err f) (concat "error: " (get f why)))
         ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine))
           (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))
+
+  ; The checker (compiler/check.wtn): every finding, a line each, and the verdict last --
+  ; `accept`, `warn`, `reject` or `unread` -- under each target profile.
+  (fn drive_check ((src Str)) Bytes
+    (uses Alloc)
+    (str.encode (check_source "host" src)))
+
+  (fn drive_check_embedded ((src Str)) Bytes
+    (uses Alloc)
+    (str.encode (check_source "embedded" src)))
+
+  (fn drive_check_mcu ((src Str)) Bytes
+    (uses Alloc)
+    (str.encode (check_source "mcu" src)))
+
+  (fn drive_check_esp32 ((src Str)) Bytes
+    (uses Alloc)
+    (str.encode (check_source "esp32" src)))
 
   (fn drive_riscv_filter ((src Str)) Bytes
     (uses Alloc)

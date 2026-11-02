@@ -79,32 +79,32 @@
   ; `(record Name [(schema S N)] (field Type)...)`. No schema is `schema ""`; a version
   ; that is not a whole number is 0, which the rule below refuses like any other
   ; non-positive one.
-  (record Rec (name Str) (wire Str) (version Int) (fields Trees))
+  (record RecInfo (name Str) (wire Str) (version Int) (fields Trees))
 
-  (enum Recs (NoRecs) (Recs (head Rec) (rest Recs)))
+  (enum Recs (NoRecs) (Recs (head RecInfo) (rest Recs)))
 
-  (fn unschemed ((name Str) (fields Trees)) Rec
-    (make Rec (name name) (wire "") (version 0) (fields fields)))
+  (fn unschemed ((name Str) (fields Trees)) RecInfo
+    (make RecInfo (name name) (wire "") (version 0) (fields fields)))
 
-  (fn rec_of ((after Trees)) Rec
+  (fn rec_of ((after Trees)) RecInfo
     (uses Alloc)
     (match after
       ((NoTrees) (unschemed "" (NoTrees)))
       ((Trees n more) (schema_clause (word_of n) more))))
 
-  (fn schema_clause ((name Str) (more Trees)) Rec
+  (fn schema_clause ((name Str) (more Trees)) RecInfo
     (uses Alloc)
     (match more
       ((NoTrees) (unschemed name more))
       ((Trees h rest) (if (head_is h "schema") (schema_parts name (after_head h) rest) (unschemed name more)))))
 
-  (fn schema_parts ((name Str) (parts Trees) (rest Trees)) Rec
+  (fn schema_parts ((name Str) (parts Trees) (rest Trees)) RecInfo
     (uses Alloc)
     (match parts
       ((NoTrees) (unschemed name rest))
       ((Trees s more) (match more
-        ((NoTrees) (make Rec (name name) (wire (word_of s)) (version 0) (fields rest)))
-        ((Trees v none) (make Rec (name name) (wire (word_of s)) (version (version_of v)) (fields rest)))))))
+        ((NoTrees) (make RecInfo (name name) (wire (word_of s)) (version 0) (fields rest)))
+        ((Trees v none) (make RecInfo (name name) (wire (word_of s)) (version (version_of v)) (fields rest)))))))
 
   (fn records_of ((items Trees)) Recs
     (uses Alloc)
@@ -112,7 +112,7 @@
       ((NoTrees) (NoRecs))
       ((Trees h more) (if (head_is h "record") (Recs (rec_of (after_head h)) (records_of more)) (records_of more)))))
 
-  (fn find_rec ((rs Recs) (which Str)) (Option Rec)
+  (fn find_rec ((rs Recs) (which Str)) (Option RecInfo)
     (uses Alloc)
     (match rs
       ((NoRecs) (None))
@@ -147,7 +147,7 @@
   ; --- the version before this one -------------------------------------------
   ; The record of the same schema with the greatest version below this one. Every version
   ; is compared with its predecessor, so a gap (1, then 3) is read as 3 against 1.
-  (fn earlier ((rs Recs) (r Rec) (best (Option Rec))) (Option Rec)
+  (fn earlier ((rs Recs) (r RecInfo) (best (Option RecInfo))) (Option RecInfo)
     (uses Alloc)
     (match rs
       ((NoRecs) best)
@@ -155,7 +155,7 @@
         (earlier more r (better o best))
         (earlier more r best)))))
 
-  (fn better ((o Rec) (best (Option Rec))) (Option Rec)
+  (fn better ((o RecInfo) (best (Option RecInfo))) (Option RecInfo)
     (match best
       ((None) (Some o))
       ((Some b) (if (< (get b version) (get o version)) (Some o) best))))
@@ -202,7 +202,7 @@
           (finding "channel-payload" (concat payload (concat " has no wire schema, so the two ends of channel " (concat chan " cannot agree on it"))))
           "")))))
 
-  (fn record_findings ((all Recs) (r Rec)) Str
+  (fn record_findings ((all Recs) (r RecInfo)) Str
     (uses Alloc)
     (if (str.eq (get r wire) "")
       ""
@@ -213,36 +213,36 @@
   ; Counted over every record, so each of two declarations of one version reports once
   ; and a version declared once reports nothing: it is the *later* one that is the
   ; second, and the earlier is found by position.
-  (fn same_version ((rs Recs) (r Rec)) Int
+  (fn same_version ((rs Recs) (r RecInfo)) Int
     (uses Alloc)
     (match rs
       ((NoRecs) 0)
       ((Recs o more) (+ (if (and (str.eq (get o wire) (get r wire)) (= (get o version) (get r version))) 1 0) (same_version more r)))))
 
-  (fn duplicate_version ((all Recs) (r Rec)) Str
+  (fn duplicate_version ((all Recs) (r RecInfo)) Str
     (uses Alloc)
     (if (< 1 (same_version all r))
       (finding "schema-version" (concat "schema " (concat (get r wire) (concat " already has a version " (concat (number_text (get r version)) (concat ": " (get r name)))))))
       ""))
 
-  (fn history ((all Recs) (r Rec)) Str
+  (fn history ((all Recs) (r RecInfo)) Str
     (uses Alloc)
     (match (earlier all r (None))
       ((None) "")
       ((Some old) (concat (changed_or_dropped (get old fields) (get r fields) r) (added (get old fields) (get r fields) r)))))
 
-  (fn step_text ((r Rec)) Str
+  (fn step_text ((r RecInfo)) Str
     (uses Alloc)
     (concat "version " (concat (number_text (get r version)) (concat " of schema " (get r wire)))))
 
   ; Fields the older version had: still there with the same type, or gone and optional.
-  (fn changed_or_dropped ((old Trees) (new Trees) (r Rec)) Str
+  (fn changed_or_dropped ((old Trees) (new Trees) (r RecInfo)) Str
     (uses Alloc)
     (match old
       ((NoTrees) "")
       ((Trees f more) (concat (carried f new r) (changed_or_dropped more new r)))))
 
-  (fn carried ((f Tree) (new Trees) (r Rec)) Str
+  (fn carried ((f Tree) (new Trees) (r RecInfo)) Str
     (uses Alloc)
     (match (field_in new (field_name f))
       ((None) (if (is_optional f) "" (finding "schema-incompatible" (concat (step_text r) (concat " drops " (concat (field_name f) ", which the version before requires"))))))
@@ -251,7 +251,7 @@
         (finding "schema-incompatible" (concat (step_text r) (concat " changes the type of " (concat (field_name f) (concat " from " (concat (field_type f) (concat " to " (field_type g))))))))))))
 
   ; Fields only the newer version has must be optional, so older data can still be read.
-  (fn added ((old Trees) (new Trees) (r Rec)) Str
+  (fn added ((old Trees) (new Trees) (r RecInfo)) Str
     (uses Alloc)
     (match new
       ((NoTrees) "")

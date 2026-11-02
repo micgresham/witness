@@ -32,6 +32,7 @@ kernel/decls.wtn
 compiler/native_riscv.wtn
 compiler/prove.wtn
 compiler/verify.wtn
+compiler/check.wtn
 compiler/xtensa.wtn
 compiler/native_xtensa.wtn
 compiler/native_xtensa_s3.wtn

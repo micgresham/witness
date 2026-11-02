@@ -814,7 +814,32 @@ that has to emit bytes — every item below was blocked behind three missing pri
       reading is split into small functions. **Not yet:** generic functions, arrays, tasks
       (`scope`/`par`), `update`, effects like `send` and `infer`, termination and resource
       bounds
-- [ ] The rest of the front end in Witness: the contract forms listed above as not read
+- [x] The rest of the front end in Witness, and **one checker made of it**:
+      [compiler/check.wtn](../compiler/check.wtn) runs every pass over a module, in Python's
+      order (the contracts only once the rest passes), and gives one verdict, `accept`,
+      `warn`, `reject` or `unread`, with a line per finding, `error NAME RULE`. Every
+      conformance case comes out as the manifest says, verdict and the exact rules among its
+      errors and its warnings, and every example as the Python checker says
+      ([tests/test_check_wtn.py](../tests/test_check_wtn.py)) -- bar the one case that
+      imports by hash, which needs the codebase and says `unread`, never `accept` (that is
+      the store's item, below). Getting there took a rule on every fault: the environment,
+      the type reader and the expression typer said only "type" or "env", and now each of
+      their 260-odd faults names the rule Python raises at that point (a malformed form is
+      `syntax`, as Python's parser has it); a body off its result only by a label is
+      `label-flow`, only by a tensor's axes `shape`, an order-dependent `par`
+      `nondeterministic-par`, a function's name used as a value `not-a-value`, a repeated
+      parameter `duplicate-binding`, and an arm that names no variant reports the match's
+      `non-exhaustive` with it when the other arms leave one out. The rules no pass had --
+      `naming`, `main-params`, `labelled-newtype`, `redaction`, `test-shape` (and a test's body
+      typed at all), the three `declassify` rules, `contract-impure`, `result-outside-ensures`,
+      `unpinned-import` -- are read from the tree in check.wtn. What is weaker than Python, and
+      said: a function's first fault is its only one (Python goes on, so a function wrong in
+      two unrelated ways shows one); `needless-declassify` for a value is only given when its
+      type can be told from the parameters; and the warning for a redaction no log field
+      reaches is not given. Splicing the passes into one program found a bug in the
+      resolver: a record renamed for a clash kept its old name in its `make`s
+      ([tests/test_imports.py](../tests/test_imports.py)). Before all this, the contract forms
+      listed above as not read
       yet; the verifier now reads tasks (`scope`, `par`), `infer`, `send`, `recv`,
       `log.fields`, `update`, arrays, foreign calls, the prelude's newtypes and generic
       functions, conversions to a float format or to bytes (which keep the value, as Python
@@ -939,6 +964,11 @@ that has to emit bytes — every item below was blocked behind three missing pri
       interpreter's exact answer or a trap, never a wrong number, and nothing needs a
       bignum. A wrapping operation on an `Int` is still refused, as it has no width to
       wrap at. This is one function to change if the other choice is made later.
+      **The checker is the first thing that needs the other choice.** Compiled into the
+      seed, compiler/check.wtn reasons about the full range of a `U64` and the products of
+      wide bounds, which a 64-bit `Int` cannot hold: on three conformance cases (`bitwise`,
+      `supervised-task`, `time`) it traps, which the host reports as `unread` and never as a
+      verdict. An unbounded `Int` in the runtime, as SPEC 6 has it, is what closes that.
 
       **The evidence is that it runs, and runs the same**
       ([tests/test_lower.py](../tests/test_lower.py), [tests/test_runtime_wasm.py](../tests/test_runtime_wasm.py),
@@ -1150,7 +1180,14 @@ that has to emit bytes — every item below was blocked behind three missing pri
       history, and `./build.sh` reaches the fixpoint with node alone. What it still takes from
       witness-bootstrap, each to be done in Witness:
   - [ ] **Checking a program**: the front end in Witness as the whole checker (above), one
-        `check` that gives the Python checker's verdict on every conformance case
+        `check` that gives the Python checker's verdict on every conformance case. **The
+        checker is written** (compiler/check.wtn, exact on the suite but for the import);
+        and it runs without the reference: compiled into the seed beside the compiler as
+        `drive_check` (and `_embedded`, `_mcu`, `_esp32`), run by `tools/wasmc.js`, which
+        exits with the verdict, and held to the interpreted checker on every conformance
+        case ([tests/test_selfhost.py](../tests/test_selfhost.py)). Left: three cases where
+        the compiled checker traps on a 64-bit `Int` (see the runtime's `Int`, above) and
+        says `unread`, and a program that imports, which waits on the store
   - [ ] **The store and the bootstrap**: resolving the content-hashed `use`s and flattening the
         driver into the seed's one text (`witness store`, `witness bootstrap`), so a change to
         `compiler/` is built there rather than brought over with a new seed

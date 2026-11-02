@@ -24,7 +24,7 @@
 
   (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
 
-  (use "wtn:8b21cf36641449b0189337a07c77f45c96aee5f01ac1b4bea685eccc7b7b07f5" as named)
+  (use "wtn:92f81a40f63652dea9fbf74791ba55b839d7db7e5dbbb2f5e8a7c2512a911780" as named)
 
   (use "wtn:d371dabcadae5e0f7dbfea300a8b823e4d3140e5e0336a00393fe722ceb7069b" as plain)
 
@@ -36,7 +36,7 @@
     as
     signature_of)
 
-  (use "wtn:cb1c272b8561a914b20850daea0e4846febca0ac1a963e0144cd7ba06b6d6d3c"
+  (use "wtn:73475838d70d180b65533219f2e05082fc567733e46dbd77b0dd6ee3a4a325da"
     as
     env_of_source)
 
@@ -80,11 +80,11 @@
 
   (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
 
-  (use "wtn:899e21eb94eb82caaa0d2a3ac52dccd80eb8c4e238c6aa55cd5b7c73f92faad1" as type_of)
+  (use "wtn:3fdd718f00ba3dd37317de926fb93b14c7438de6daffd8a4f75e03ae9353df32" as type_of)
 
   (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
 
-  (use "wtn:c56f68cb6f11d167c5858b05b0968d1342cb17fa51c3859637f194cfb58bba9c" as collected)
+  (use "wtn:989f32a48713655e7f23a328a06d723337463cf98766e4dcd27980b76a609597" as collected)
 
   (use "wtn:8cad77ce8028c78b6f80b49536f0448d8c6f075789964549c88ebef18b6275ab" as dims_eq)
 
@@ -118,7 +118,7 @@
 
   (use "wtn:fa0c3f1564b61f14efea122459d97a80aee0a0200a55894c0585e196050765c8" as model_of)
 
-  (use "wtn:cb0e87935811915a297c2317f1bef541beee6bfa64a0b5c0fffd4bd056368cfa" as uses_in)
+  (use "wtn:c22a070d8cde78f6b2529a7cee9c92f95fe21e2ab57a3467911fb3d5a4bb3dce" as uses_in)
 
   (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
 
@@ -141,11 +141,11 @@
   (fn binder_ok ((ls Locals) (name Str)) (Result Unit Fault)
     (uses Alloc)
     (if (not (lower_first (byte_at (str.encode name) 0)))
-      (Err (fault "type" (concat "bindings start lower-case: `" (concat name "`"))))
+      (Err (fault "naming" (concat "bindings start lower-case: `" (concat name "`"))))
       (if (is_group name)
-        (Err (fault "type" (concat "`" (concat name "` names a group of builtins, so a binding may not take it"))))
+        (Err (fault "naming" (concat "`" (concat name "` names a group of builtins, so a binding may not take it"))))
         (match (lookup ls name)
-          ((Some ty) (Err (fault "type" (concat "`" (concat name "` is already bound in this scope")))))
+          ((Some ty) (Err (fault "shadowing" (concat "`" (concat name "` is already bound in this scope")))))
           ((None) (Ok unit))))))
 
   (fn lower_first ((b Int)) Bool (and (<= 97 b) (<= b 122)))
@@ -237,10 +237,10 @@
         (Ok acc)
         (if (str.eq (get pat base) (get actual base))
           (bind_all (get pat args) (get actual args) params acc)
-          (Err (fault "type" "an argument has a different type than its parameter"))))
+          (Err (fault "type-mismatch" "an argument has a different type than its parameter"))))
       (match (ty_at acc (names_index params (get pat base)))
         ((None) (Ok acc))
-        ((Some seen) (if (is_unknown seen) (Ok (set_at acc (names_index params (get pat base)) actual)) (if (loose_fits actual seen) (Ok (set_at acc (names_index params (get pat base)) (join seen actual))) (Err (fault "type" "a type parameter is given two different types"))))))))
+        ((Some seen) (if (is_unknown seen) (Ok (set_at acc (names_index params (get pat base)) actual)) (if (loose_fits actual seen) (Ok (set_at acc (names_index params (get pat base)) (join seen actual))) (Err (fault "type-mismatch" "a type parameter is given two different types"))))))))
 
   (fn bind_all ((pats Tys) (actuals Tys) (params Names) (acc Tys)) (Result Tys Fault)
     (uses Alloc)
@@ -252,7 +252,7 @@
   ; A quoted token is a `Str`. A word is a literal if it is `true` or `false`, or a
   ; number if it starts with a digit -- the reader's own rule for a number -- and a name
   ; otherwise, which must be in scope.
-  (fn leaf_type ((ls Locals) (text Bytes) (quoted Bool)) (Result Ty Fault)
+  (fn leaf_type ((decls Env) (ls Locals) (text Bytes) (quoted Bool)) (Result Ty Fault)
     (uses Alloc)
     (if quoted
       (Ok (plain "Str"))
@@ -262,7 +262,7 @@
           (Ok (plain "Int")))
         (match (named text)
           ((Err e) (Err e))
-          ((Ok word) (if (or (str.eq word "true") (str.eq word "false")) (Ok (plain "Bool")) (if (str.eq word "unit") (Ok (plain "Unit")) (match (lookup ls word) ((Some ty) (Ok ty)) ((None) (Err (fault "type" (concat "no name `" (concat word "` is in scope")))))))))))))
+          ((Ok word) (if (or (str.eq word "true") (str.eq word "false")) (Ok (plain "Bool")) (if (str.eq word "unit") (Ok (plain "Unit")) (match (lookup ls word) ((Some ty) (Ok ty)) ((None) (match (signature_of decls word) ((Some sig) (Err (fault "not-a-value" (concat "`" (concat word "` is a function, not a value"))))) ((None) (Err (fault "unknown-name" (concat "no name `" (concat word "` is in scope")))))))))))))))
 
   ; A number starts with a digit, or with a minus sign and then a digit.
   (fn is_number ((text Bytes)) Bool
@@ -279,8 +279,8 @@
   (fn expr_type ((decls Env) (ls Locals) (t Tree)) (Result Ty Fault)
     (uses Alloc)
     (match t
-      ((Leaf text quoted) (leaf_type ls text quoted))
-      ((Node items) (match items ((NoTrees) (Err (fault "type" "an empty list is not an expression"))) ((Trees head rest) (match head ((Node inner) (Err (fault "type" "a call's head is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (form_type decls ls name rest))))))))))
+      ((Leaf text quoted) (leaf_type decls ls text quoted))
+      ((Node items) (match items ((NoTrees) (Err (fault "syntax" "an empty list is not an expression"))) ((Trees head rest) (match head ((Node inner) (Err (fault "syntax" "a call's head is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (form_type decls ls name rest))))))))))
 
   (fn form_type ((decls Env) (ls Locals) (name Str) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
@@ -311,8 +311,8 @@
   ; `(bytes "6162")`: a literal `Bytes`, written as pairs of hexadecimal digits.
   (fn bytes_type ((rest Trees)) (Result Ty Fault)
     (match rest
-      ((NoTrees) (Err (fault "type" "a Bytes literal is (bytes \"hex\")")))
-      ((Trees a more) (match more ((Trees extra others) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))) ((NoTrees) (match a ((Node inner) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))) ((Leaf text quoted) (if quoted (Ok (plain "Bytes")) (Err (fault "type" "a Bytes literal is (bytes \"hex\")"))))))))))
+      ((NoTrees) (Err (fault "syntax" "a Bytes literal is (bytes \"hex\")")))
+      ((Trees a more) (match more ((Trees extra others) (Err (fault "syntax" "a Bytes literal is (bytes \"hex\")"))) ((NoTrees) (match a ((Node inner) (Err (fault "syntax" "a Bytes literal is (bytes \"hex\")"))) ((Leaf text quoted) (if quoted (Ok (plain "Bytes")) (Err (fault "syntax" "a Bytes literal is (bytes \"hex\")"))))))))))
 
   ; Everything that is neither a special form nor a declared function: a newtype's
   ; constructor, a variant's, or a primitive.
@@ -320,15 +320,15 @@
     (uses Alloc)
     (match (newtype_of decls name)
       ((Some d) (wrap_type decls ls d rest))
-      ((None) (match (owner_of (get decls enums) name) ((Some e) (variant_call decls ls e name rest)) ((None) (match (primitive name) ((Some b) (if (or (str.eq name "tensor.add") (str.eq name "tensor.matmul")) (tensor_type_of decls ls name rest) (builtin_type decls ls b rest))) ((None) (if (or (or (str.eq name "array.empty") (str.eq name "array.len")) (or (str.eq name "array.at") (str.eq name "array.push"))) (array_type decls ls name rest) (if (str.eq name "update") (update_type decls ls rest) (if (str.eq name "send") (send_type decls ls rest) (if (str.eq name "recv") (recv_type decls rest) (if (str.eq name "infer") (infer_type decls ls rest) (if (str.eq name "scope") (scope_type decls ls rest) (if (str.eq name "par") (par_type decls ls rest) (if (str.eq name "log.fields") (match rest ((NoTrees) (Err (fault "type" "a log.fields needs at least one field"))) ((Trees first others) (log_type decls ls rest (NoNames)))) (Err (fault "type" (concat "`" (concat name "` is not read yet")))))))))))))))))))
+      ((None) (match (owner_of (get decls enums) name) ((Some e) (variant_call decls ls e name rest)) ((None) (match (primitive name) ((Some b) (if (or (str.eq name "tensor.add") (str.eq name "tensor.matmul")) (tensor_type_of decls ls name rest) (builtin_type decls ls b rest))) ((None) (if (or (or (str.eq name "array.empty") (str.eq name "array.len")) (or (str.eq name "array.at") (str.eq name "array.push"))) (array_type decls ls name rest) (if (str.eq name "update") (update_type decls ls rest) (if (str.eq name "send") (send_type decls ls rest) (if (str.eq name "recv") (recv_type decls rest) (if (str.eq name "infer") (infer_type decls ls rest) (if (str.eq name "scope") (scope_type decls ls rest) (if (str.eq name "par") (par_type decls ls rest) (if (str.eq name "log.fields") (match rest ((NoTrees) (Err (fault "syntax" "a log.fields needs at least one field"))) ((Trees first others) (log_type decls ls rest (NoNames)))) (Err (fault "unread" (concat "`" (concat name "` is not read yet")))))))))))))))))))
 
   ; `(declassify Label expr)`: the value without that label, wherever in its type it was.
   ; Whether the function is allowed to release it is the effect pass's question.
   (fn declassify_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a declassify takes a label and an expression")))
-      ((Trees which more) (match which ((Node inner) (Err (fault "type" "a label is a name"))) ((Leaf ltext lquoted) (match more ((NoTrees) (Err (fault "type" "a declassify takes a label and an expression"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a declassify takes a label and an expression"))) ((NoTrees) (match (named ltext) ((Err f) (Err f)) ((Ok name) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (Ok (ty_strip t name)))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a declassify takes a label and an expression")))
+      ((Trees which more) (match which ((Node inner) (Err (fault "syntax" "a label is a name"))) ((Leaf ltext lquoted) (match more ((NoTrees) (Err (fault "syntax" "a declassify takes a label and an expression"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "syntax" "a declassify takes a label and an expression"))) ((NoTrees) (match (named ltext) ((Err f) (Err f)) ((Ok name) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (Ok (ty_strip t name)))))))))))))))
 
   ; --- patches, updates and logs -----------------------------------------------
   ; A record, or a patch read as the record it partially updates: the same fields, each
@@ -348,8 +348,8 @@
   (fn update_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "an update takes a record and a patch")))
-      ((Trees value more) (match more ((NoTrees) (Err (fault "type" "an update takes a record and a patch"))) ((Trees amendment none) (match none ((Trees extra others) (Err (fault "type" "an update takes a record and a patch"))) ((NoTrees) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (expr_type decls ls amendment) ((Err f) (Err f)) ((Ok given) (match (patch_of decls (get given base)) ((None) (Err (fault "type" "an update needs a patch"))) ((Some pt) (if (str.eq (get pt target) (get held base)) (Ok (ty_plus held (get given labels))) (Err (fault "type" "a patch updates a different record"))))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "an update takes a record and a patch")))
+      ((Trees value more) (match more ((NoTrees) (Err (fault "syntax" "an update takes a record and a patch"))) ((Trees amendment none) (match none ((Trees extra others) (Err (fault "syntax" "an update takes a record and a patch"))) ((NoTrees) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (expr_type decls ls amendment) ((Err f) (Err f)) ((Ok given) (match (patch_of decls (get given base)) ((None) (Err (fault "not-a-patch" "an update needs a patch"))) ((Some pt) (if (str.eq (get pt target) (get held base)) (Ok (ty_plus held (get given labels))) (Err (fault "type-mismatch" "a patch updates a different record"))))))))))))))))
 
   ; `(log.fields (name value)...)`: lower-case names, none twice, and nothing labelled
   ; unless the label has a redaction policy.
@@ -357,7 +357,7 @@
     (uses Alloc)
     (match rest
       ((NoTrees) (Ok (plain "Unit")))
-      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "type" "a log field is (name value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a log field is (name value)"))) ((Trees fname after) (match after ((NoTrees) (Err (fault "type" "a log field is (name value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a log field is (name value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "type" "a log field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (if (not (lower_first (byte_at (str.encode field) 0))) (Err (fault "type" "log field names start lower-case")) (if (names_has seen field) (Err (fault "type" "a log field is given twice")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (if (all_redacted (get decls redactions) (labels_deep t)) (log_type decls ls more (Names field seen)) (Err (fault "type" "a field carries a label that has no redaction policy, so it cannot be logged"))))))))))))))))))))))
+      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "syntax" "a log field is (name value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "a log field is (name value)"))) ((Trees fname after) (match after ((NoTrees) (Err (fault "syntax" "a log field is (name value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "syntax" "a log field is (name value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "syntax" "a log field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (if (not (lower_first (byte_at (str.encode field) 0))) (Err (fault "naming" "log field names start lower-case")) (if (names_has seen field) (Err (fault "duplicate-binding" "a log field is given twice")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok t) (if (all_redacted (get decls redactions) (labels_deep t)) (log_type decls ls more (Names field seen)) (Err (fault "undeclared-redaction" "a field carries a label that has no redaction policy, so it cannot be logged"))))))))))))))))))))))
 
   (fn all_redacted ((policy Names) (ls Names)) Bool
     (match ls
@@ -371,14 +371,14 @@
   (fn send_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a send takes a channel and a value")))
-      ((Trees chan more) (match chan ((Node inner) (Err (fault "type" "a channel's name is a name"))) ((Leaf ctext cquoted) (match more ((NoTrees) (Err (fault "type" "a send takes a channel and a value"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "a send takes a channel and a value"))) ((NoTrees) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "type" (concat "no channel named `" (concat cname "`"))))) ((Some c) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok sent) (if (not (or (is_unknown sent) (str.eq (get sent base) (get c payload)))) (Err (fault "type" "the value sent is not the channel's payload")) (if (all_redacted (get c admits) (labels_deep sent)) (Ok (plain "Unit")) (Err (fault "type" "a channel does not admit the labels the value carries")))))))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a send takes a channel and a value")))
+      ((Trees chan more) (match chan ((Node inner) (Err (fault "syntax" "a channel's name is a name"))) ((Leaf ctext cquoted) (match more ((NoTrees) (Err (fault "syntax" "a send takes a channel and a value"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "syntax" "a send takes a channel and a value"))) ((NoTrees) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "unknown-name" (concat "no channel named `" (concat cname "`"))))) ((Some c) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok sent) (if (not (or (is_unknown sent) (str.eq (get sent base) (get c payload)))) (Err (fault "type-mismatch" "the value sent is not the channel's payload")) (if (all_redacted (get c admits) (labels_deep sent)) (Ok (plain "Unit")) (Err (fault "label-flow" "a channel does not admit the labels the value carries")))))))))))))))))))
 
   (fn recv_type ((decls Env) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a recv takes a channel")))
-      ((Trees chan more) (match more ((Trees extra others) (Err (fault "type" "a recv takes a channel"))) ((NoTrees) (match chan ((Node inner) (Err (fault "type" "a channel's name is a name"))) ((Leaf ctext cquoted) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "type" (concat "no channel named `" (concat cname "`"))))) ((Some c) (Ok (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base (get c payload)) (labels (get c admits)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims)))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a recv takes a channel")))
+      ((Trees chan more) (match more ((Trees extra others) (Err (fault "syntax" "a recv takes a channel"))) ((NoTrees) (match chan ((Node inner) (Err (fault "syntax" "a channel's name is a name"))) ((Leaf ctext cquoted) (match (named ctext) ((Err f) (Err f)) ((Ok cname) (match (channel_of decls cname) ((None) (Err (fault "unknown-name" (concat "no channel named `" (concat cname "`"))))) ((Some c) (Ok (make Ty (base "Option") (labels (NoNames)) (args (Tys (make Ty (base (get c payload)) (labels (get c admits)) (args (NoTys)) (dims (NoDims))) (NoTys))) (dims (NoDims)))))))))))))))
 
   ; `(infer Model input)`: the input must be the model's, and the answer carries the
   ; labels of the input, of the training data, and `ModelOutput`, so that what a model
@@ -386,8 +386,8 @@
   (fn infer_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "an infer takes a model and an input")))
-      ((Trees m more) (match m ((Node inner) (Err (fault "type" "a model's name is a name"))) ((Leaf mtext mquoted) (match more ((NoTrees) (Err (fault "type" "an infer takes a model and an input"))) ((Trees input none) (match none ((Trees extra others) (Err (fault "type" "an infer takes a model and an input"))) ((NoTrees) (match (named mtext) ((Err f) (Err f)) ((Ok mname) (match (model_of decls mname) ((None) (Err (fault "type" (concat "no model named `" (concat mname "`"))))) ((Some known) (match (expr_type decls ls input) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (ty_plus (get known input) (get given labels))) (Ok (ty_plus (get known output) (names_union (get given labels) (names_union (get known trained) (Names "ModelOutput" (NoNames)))))) (Err (fault "type" "the input is not the model's input"))))))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "an infer takes a model and an input")))
+      ((Trees m more) (match m ((Node inner) (Err (fault "syntax" "a model's name is a name"))) ((Leaf mtext mquoted) (match more ((NoTrees) (Err (fault "syntax" "an infer takes a model and an input"))) ((Trees input none) (match none ((Trees extra others) (Err (fault "syntax" "an infer takes a model and an input"))) ((NoTrees) (match (named mtext) ((Err f) (Err f)) ((Ok mname) (match (model_of decls mname) ((None) (Err (fault "unknown-name" (concat "no model named `" (concat mname "`"))))) ((Some known) (match (expr_type decls ls input) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (ty_plus (get known input) (get given labels))) (Ok (ty_plus (get known output) (names_union (get given labels) (names_union (get known trained) (Names "ModelOutput" (NoNames)))))) (Err (fault "type-mismatch" "the input is not the model's input"))))))))))))))))))
 
   ; A task fails with a `Fault`, so its work is a `(Result T Fault)` and the scope hands
   ; the body a `T`. The scope itself answers the body's type, which must be able to carry
@@ -397,10 +397,10 @@
     (if (is_unknown t)
       (Ok t)
       (if (not (str.eq (get t base) "Result"))
-        (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)"))
+        (Err (fault "task-shape" "a task's work must be able to fail: it is a (Result T Fault)"))
         (match (get t args)
-          ((NoTys) (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)")))
-          ((Tys value more) (match more ((NoTys) (Err (fault "type" "a task's work must be able to fail: it is a (Result T Fault)"))) ((Tys failure none) (if (loose_fits failure (plain "Fault")) (Ok (ty_plus value (get t labels))) (Err (fault "type" "a task fails with a Fault"))))))))))
+          ((NoTys) (Err (fault "task-shape" "a task's work must be able to fail: it is a (Result T Fault)")))
+          ((Tys value more) (match more ((NoTys) (Err (fault "task-shape" "a task's work must be able to fail: it is a (Result T Fault)"))) ((Tys failure none) (if (loose_fits failure (plain "Fault")) (Ok (ty_plus value (get t labels))) (Err (fault "type-mismatch" "a task fails with a Fault"))))))))))
 
   ; A scope's own answer is a `(Result T Fault)`: what is not settled is pinned to Fault.
   (fn failing () Ty
@@ -414,8 +414,8 @@
   (fn scope_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a scope takes tasks and a body")))
-      ((Trees tasks more) (match more ((NoTrees) (Err (fault "type" "a scope takes tasks and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "a scope takes tasks and a body"))) ((NoTrees) (match tasks ((Leaf ttext tquoted) (Err (fault "type" "a scope's tasks are a list"))) ((Node list) (match (task_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok answer) (match (carried answer) ((Err f) (Err f)) ((Ok kept) (Ok (join answer (failing))))))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a scope takes tasks and a body")))
+      ((Trees tasks more) (match more ((NoTrees) (Err (fault "syntax" "a scope takes tasks and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "syntax" "a scope takes tasks and a body"))) ((NoTrees) (match tasks ((Leaf ttext tquoted) (Err (fault "syntax" "a scope's tasks are a list"))) ((Node list) (match (task_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok answer) (match (carried answer) ((Err f) (Err f)) ((Ok kept) (Ok (join answer (failing))))))))))))))))))
 
   ; The tasks one after another: each is read in the scope outside them all, and binds
   ; its name for the body. `inner` is that growing scope.
@@ -423,28 +423,28 @@
     (uses Alloc)
     (match tasks
       ((NoTrees) (Ok inner))
-      ((Trees task more) (match task ((Leaf ttext tquoted) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Trees name after) (match after ((NoTrees) (Err (fault "type" "a task is (name work (deadline d) (on-fail p))"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "type" "a task's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok tname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok done) (match (carried done) ((Err f) (Err f)) ((Ok value) (match (task_deadline decls outer clauses) ((Err f) (Err f)) ((Ok fine) (match (placed decls (concat "task `" (concat tname "`")) clauses done) ((Err f) (Err f)) ((Ok wired) (match (binder_ok inner tname) ((Err f) (Err f)) ((Ok free) (task_scope decls outer (Local tname value inner) more))))))))))))))))))))))))
+      ((Trees task more) (match task ((Leaf ttext tquoted) (Err (fault "syntax" "a task is (name work (deadline d) (on-fail p))"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "a task is (name work (deadline d) (on-fail p))"))) ((Trees name after) (match after ((NoTrees) (Err (fault "syntax" "a task is (name work (deadline d) (on-fail p))"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "syntax" "a task's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok tname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok done) (match (carried done) ((Err f) (Err f)) ((Ok value) (match (task_deadline decls outer clauses) ((Err f) (Err f)) ((Ok fine) (match (placed decls (concat "task `" (concat tname "`")) clauses done) ((Err f) (Err f)) ((Ok wired) (match (binder_ok inner tname) ((Err f) (Err f)) ((Ok free) (task_scope decls outer (Local tname value inner) more))))))))))))))))))))))))
 
   ; The first clause of a task is `(deadline d)`, and `d` is a Duration.
   (fn task_deadline ((decls Env) (outer Locals) (clauses Trees)) (Result Unit Fault)
     (uses Alloc)
     (match clauses
-      ((NoTrees) (Err (fault "type" "a task needs a deadline")))
-      ((Trees clause more) (match clause ((Leaf ctext cquoted) (Err (fault "type" "a task needs a deadline"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a task needs a deadline"))) ((Trees head args) (if (is_word head "deadline") (match args ((NoTrees) (Err (fault "type" "a deadline is a duration"))) ((Trees d none) (match (expr_type decls outer d) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (plain "Duration")) (Ok unit) (Err (fault "type" "a deadline is a Duration"))))))) (Err (fault "type" "a task needs a deadline"))))))))))
+      ((NoTrees) (Err (fault "syntax" "a task needs a deadline")))
+      ((Trees clause more) (match clause ((Leaf ctext cquoted) (Err (fault "syntax" "a task needs a deadline"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "a task needs a deadline"))) ((Trees head args) (if (is_word head "deadline") (match args ((NoTrees) (Err (fault "type-mismatch" "a deadline is a duration"))) ((Trees d none) (match (expr_type decls outer d) ((Err f) (Err f)) ((Ok given) (if (loose_fits given (plain "Duration")) (Ok unit) (Err (fault "type-mismatch" "a deadline is a Duration"))))))) (Err (fault "syntax" "a task needs a deadline"))))))))))
 
   ; `(par ((name work [(on where)])...) body)`: every branch is read in the scope before
   ; the block, so a branch cannot observe another, and the body sees all their names.
   (fn par_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a par takes branches and a body")))
-      ((Trees branches more) (match more ((NoTrees) (Err (fault "type" "a par takes branches and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "a par takes branches and a body"))) ((NoTrees) (match branches ((Leaf btext bquoted) (Err (fault "type" "a par's branches are a list"))) ((Node list) (match (branch_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (expr_type decls inside body))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a par takes branches and a body")))
+      ((Trees branches more) (match more ((NoTrees) (Err (fault "syntax" "a par takes branches and a body"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "syntax" "a par takes branches and a body"))) ((NoTrees) (match branches ((Leaf btext bquoted) (Err (fault "syntax" "a par's branches are a list"))) ((Node list) (match (branch_scope decls ls ls list) ((Err f) (Err f)) ((Ok inside) (expr_type decls inside body))))))))))))
 
   (fn branch_scope ((decls Env) (outer Locals) (inner Locals) (branches Trees)) (Result Locals Fault)
     (uses Alloc)
     (match branches
       ((NoTrees) (Ok inner))
-      ((Trees branch more) (match branch ((Leaf btext bquoted) (Err (fault "type" "a branch is (name work)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a branch is (name work)"))) ((Trees name after) (match after ((NoTrees) (Err (fault "type" "a branch is (name work)"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "type" "a branch's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok bname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok value) (match (placed decls (concat "branch `" (concat bname "`")) clauses value) ((Err f) (Err f)) ((Ok fine) (match (binder_ok inner bname) ((Err f) (Err f)) ((Ok free) (branch_scope decls outer (Local bname value inner) more))))))))))))))))))))
+      ((Trees branch more) (match branch ((Leaf btext bquoted) (Err (fault "syntax" "a branch is (name work)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "a branch is (name work)"))) ((Trees name after) (match after ((NoTrees) (Err (fault "syntax" "a branch is (name work)"))) ((Trees work clauses) (match name ((Node inside) (Err (fault "syntax" "a branch's name is a name"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok bname) (match (expr_type decls outer work) ((Err f) (Err f)) ((Ok value) (match (placed decls (concat "branch `" (concat bname "`")) clauses value) ((Err f) (Err f)) ((Ok fine) (match (binder_ok inner bname) ((Err f) (Err f)) ((Ok free) (branch_scope decls outer (Local bname value inner) more))))))))))))))))))))
 
   ; --- what crosses to memory of its own ---------------------------------------------
   ; Work placed on another `process` or `node` is copied over a wire, not shared, so every
@@ -457,7 +457,7 @@
         (let why (wire_why decls carried (NoNames) 4096)
           (if (str.eq why "")
             (Ok unit)
-            (Err (fault "type" (concat "placement: " (concat what (concat " runs with memory of its own, so what it carries must have a wire form: " why)))))))
+            (Err (fault "placement" (concat "placement: " (concat what (concat " runs with memory of its own, so what it carries must have a wire form: " why)))))))
         (Ok unit))))
 
   ; The place in an `(on where)` clause, or "" when there is none.
@@ -530,21 +530,21 @@
   (fn seq_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a seq needs at least one expression")))
-      ((Trees h more) (match more ((NoTrees) (expr_type decls ls h)) ((Trees next after) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (if (or (str.eq (get t base) "Unit") (str.eq (get t base) "?")) (seq_type decls ls more) (Err (fault "type" (concat "a " (concat (get t base) " value is computed and discarded"))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a seq needs at least one expression")))
+      ((Trees h more) (match more ((NoTrees) (expr_type decls ls h)) ((Trees next after) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (if (or (str.eq (get t base) "Unit") (str.eq (get t base) "?")) (seq_type decls ls more) (Err (fault "discarded-value" (concat "a " (concat (get t base) " value is computed and discarded"))))))))))))
 
   (fn unwrap_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "an unwrap takes one expression")))
-      ((Trees h more) (match more ((Trees extra others) (Err (fault "type" "an unwrap takes one expression"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (match (newtype_of decls (get t base)) ((None) (Err (fault "type" (concat "cannot unwrap a " (concat (get t base) "; only newtypes wrap a value"))))) ((Some d) (Ok (ty_plus (get d inner) (get t labels))))))))))))
+      ((NoTrees) (Err (fault "syntax" "an unwrap takes one expression")))
+      ((Trees h more) (match more ((Trees extra others) (Err (fault "syntax" "an unwrap takes one expression"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok t) (match (newtype_of decls (get t base)) ((None) (Err (fault "unwrap-non-newtype" (concat "cannot unwrap a " (concat (get t base) "; only newtypes wrap a value"))))) ((Some d) (Ok (ty_plus (get d inner) (get t labels))))))))))))
 
   ; `(Newtype value)`: the value must fit what the newtype wraps.
   (fn wrap_type ((decls Env) (ls Locals) (d NewtypeSignature) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a newtype wraps one value")))
-      ((Trees h more) (match more ((Trees extra others) (Err (fault "type" "a newtype wraps one value"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get d inner)) (Ok (plain (get d name))) (Err (fault "type" "a value does not fit the type a newtype wraps"))))))))))
+      ((NoTrees) (Err (fault "arity" "a newtype wraps one value")))
+      ((Trees h more) (match more ((Trees extra others) (Err (fault "arity" "a newtype wraps one value"))) ((NoTrees) (match (expr_type decls ls h) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get d inner)) (Ok (plain (get d name))) (Err (fault "type-mismatch" "a value does not fit the type a newtype wraps"))))))))))
 
   ; The enum a variant belongs to, wherever it is declared.
   (fn owner_of ((es EnumSignatures) (name Str)) (Option EnumSignature)
@@ -558,8 +558,8 @@
   (fn variant_call ((decls Env) (ls Locals) (e EnumSignature) (name Str) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match (variant_of e name)
-      ((None) (Err (fault "type" "a variant is not in its own enum")))
-      ((Some v) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get v fields)))) (Err (fault "type" "a variant is given a different number of arguments than it has fields")) (match (bind_all (get v fields) actuals (get e params) (unknowns (get e params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get v fields) (get e params) found) actuals) (Ok (make Ty (base (get e name)) (labels (NoNames)) (args found) (dims (NoDims)))) (Err (fault "type" "an argument does not fit its field")))))))))))
+      ((None) (Err (fault "unknown-variant" "a variant is not in its own enum")))
+      ((Some v) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get v fields)))) (Err (fault "arity" "a variant is given a different number of arguments than it has fields")) (match (bind_all (get v fields) actuals (get e params) (unknowns (get e params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get v fields) (get e params) found) actuals) (Ok (make Ty (base (get e name)) (labels (NoNames)) (args found) (dims (NoDims)))) (Err (fault "type-mismatch" "an argument does not fit its field")))))))))))
 
   ; Each given type against the one wanted in its place, and neither list longer.
   (fn loose_all ((wanted Tys) (given Tys)) Bool
@@ -575,17 +575,17 @@
     (uses Alloc)
     (match (arg_types decls ls rest)
       ((Err f) (Err f))
-      ((Ok args) (if (str.eq name "array.empty") (if (= (tys_count args) 0) (Ok (make Ty (base "Array") (labels (NoNames)) (args (Tys (unknown) (NoTys))) (dims (NoDims)))) (Err (fault "type" "array.empty takes no arguments"))) (match args ((NoTys) (Err (fault "type" "an array operation takes an array"))) ((Tys holder more) (if (not (str.eq (get holder base) "Array")) (Err (fault "type" "an array operation wants an array")) (match (get holder args) ((NoTys) (Err (fault "type" "an array operation wants an array"))) ((Tys element none) (array_op name holder element more))))))))))
+      ((Ok args) (if (str.eq name "array.empty") (if (= (tys_count args) 0) (Ok (make Ty (base "Array") (labels (NoNames)) (args (Tys (unknown) (NoTys))) (dims (NoDims)))) (Err (fault "arity" "array.empty takes no arguments"))) (match args ((NoTys) (Err (fault "type-mismatch" "an array operation takes an array"))) ((Tys holder more) (if (not (str.eq (get holder base) "Array")) (Err (fault "type-mismatch" "an array operation wants an array")) (match (get holder args) ((NoTys) (Err (fault "type-mismatch" "an array operation wants an array"))) ((Tys element none) (array_op name holder element more))))))))))
 
   (fn array_op ((name Str) (holder Ty) (element Ty) (more Tys)) (Result Ty Fault)
     (uses Alloc)
     (if (str.eq name "array.len")
       (match more
         ((NoTys) (Ok (make Ty (base "Count") (labels (get holder labels)) (args (NoTys)) (dims (NoDims)))))
-        ((Tys extra others) (Err (fault "type" "array.len takes one argument"))))
+        ((Tys extra others) (Err (fault "arity" "array.len takes one argument"))))
       (match more
-        ((NoTys) (Err (fault "type" "an array operation is given too few arguments")))
-        ((Tys second tail) (match tail ((Tys extra others) (Err (fault "type" "an array operation is given too many arguments"))) ((NoTys) (if (str.eq name "array.at") (if (or (is_unknown second) (str.eq (get second base) "Count")) (Ok (make Ty (base "Option") (labels (get holder labels)) (args (Tys (ty_plus element (get holder labels)) (NoTys))) (dims (NoDims)))) (Err (fault "type" "an index into an array is a Count"))) (if (loose_fits second element) (Ok (make Ty (base "Array") (labels (names_union (get holder labels) (get second labels))) (args (Tys (join element second) (NoTys))) (dims (NoDims)))) (Err (fault "type" "the value pushed onto an array is not what it holds"))))))))))
+        ((NoTys) (Err (fault "arity" "an array operation is given too few arguments")))
+        ((Tys second tail) (match tail ((Tys extra others) (Err (fault "arity" "an array operation is given too many arguments"))) ((NoTys) (if (str.eq name "array.at") (if (or (is_unknown second) (str.eq (get second base) "Count")) (Ok (make Ty (base "Option") (labels (get holder labels)) (args (Tys (ty_plus element (get holder labels)) (NoTys))) (dims (NoDims)))) (Err (fault "type-mismatch" "an index into an array is a Count"))) (if (loose_fits second element) (Ok (make Ty (base "Array") (labels (names_union (get holder labels) (get second labels))) (args (Tys (join element second) (NoTys))) (dims (NoDims)))) (Err (fault "type-mismatch" "the value pushed onto an array is not what it holds"))))))))))
 
   ; `tensor.add` is elementwise, so the shapes must match; `tensor.matmul` contracts the
   ; last axis of the left against the first of the right, and the two must agree by name
@@ -594,23 +594,23 @@
     (uses Alloc)
     (match (arg_types decls ls rest)
       ((Err f) (Err f))
-      ((Ok args) (match args ((NoTys) (Err (fault "type" "a tensor operation takes two tensors"))) ((Tys left more) (match more ((NoTys) (Err (fault "type" "a tensor operation takes two tensors"))) ((Tys right none) (match none ((NoTys) (tensor_result name left right)) ((Tys extra others) (Err (fault "type" "a tensor operation takes two tensors")))))))))))
+      ((Ok args) (match args ((NoTys) (Err (fault "type-mismatch" "a tensor operation takes two tensors"))) ((Tys left more) (match more ((NoTys) (Err (fault "type-mismatch" "a tensor operation takes two tensors"))) ((Tys right none) (match none ((NoTys) (tensor_result name left right)) ((Tys extra others) (Err (fault "type-mismatch" "a tensor operation takes two tensors")))))))))))
 
   (fn tensor_result ((name Str) (left Ty) (right Ty)) (Result Ty Fault)
     (uses Alloc)
     (if (not (and (is_tensor left) (is_tensor right)))
-      (Err (fault "type" "a tensor operation wants tensors with axes"))
+      (Err (fault "shape" "a tensor operation wants tensors with axes"))
       (if (not (and (tys_loose_fit (get left args) (get right args)) (tys_loose_fit (get right args) (get left args))))
-        (Err (fault "type" "a tensor operation needs one element format on both sides"))
+        (Err (fault "type-mismatch" "a tensor operation needs one element format on both sides"))
         (if (str.eq name "tensor.add")
           (if (dims_eq (get left dims) (get right dims))
             (Ok (make Ty (base "Tensor") (labels (names_union (get left labels) (get right labels))) (args (get left args)) (dims (get left dims))))
-            (Err (fault "type" "tensor.add works elementwise, so the shapes must match")))
+            (Err (fault "shape" "tensor.add works elementwise, so the shapes must match")))
           (if (or (< (dims_count (get left dims)) 2) (< (dims_count (get right dims)) 2))
-            (Err (fault "type" "tensor.matmul needs two axes on each side"))
+            (Err (fault "shape" "tensor.matmul needs two axes on each side"))
             (if (dims_eq (dims_last (get left dims)) (dims_first (get right dims)))
               (Ok (make Ty (base "Tensor") (labels (names_union (get left labels) (get right labels))) (args (get left args)) (dims (dims_join (dims_init (get left dims)) (dims_rest (get right dims))))))
-              (Err (fault "type" "tensor.matmul contracts the last axis of the left with the first of the right, and they are not the same axis"))))))))
+              (Err (fault "shape" "tensor.matmul contracts the last axis of the left with the first of the right, and they are not the same axis"))))))))
 
   (fn is_tensor ((t Ty)) Bool
     (and (str.eq (get t base) "Tensor") (< 0 (dims_count (get t dims)))))
@@ -642,7 +642,7 @@
     (uses Alloc)
     (match (arg_types decls ls rest)
       ((Err f) (Err f))
-      ((Ok args) (if (not (= (tys_count args) (wants_count (get b params)))) (Err (fault "type" "a primitive is given a different number of arguments than it takes")) (if (and (get b sink) (any_labelled args)) (Err (fault "type" "a sink is given data that carries a label")) (match (format_of (get b params) args "") ((Err f) (Err f)) ((Ok kind) (if (not (allowed_format b kind)) (Err (fault "type" "a primitive is used at a format it does not take")) (if (and (get b fixed) (not (is_fixed_width kind))) (Err (fault "type" "a primitive needs a fixed width; Int is unbounded")) (if (args_fit (get b params) args kind) (match (answered b kind) ((Err f) (Err f)) ((Ok answer) (Ok (ty_plus answer (names_union (if (get b sink) (NoNames) (labels_of args)) (get b ret_labels)))))) (Err (fault "type" "an argument of a primitive is not what it wants"))))))))))))
+      ((Ok args) (if (not (= (tys_count args) (wants_count (get b params)))) (Err (fault "arity" "a primitive is given a different number of arguments than it takes")) (if (and (get b sink) (any_labelled args)) (Err (fault "label-flow" "a sink is given data that carries a label")) (match (format_of (get b params) args "") ((Err f) (Err f)) ((Ok kind) (if (not (allowed_format b kind)) (Err (fault "type-mismatch" "a primitive is used at a format it does not take")) (if (and (get b fixed) (not (is_fixed_width kind))) (Err (fault "type-mismatch" "a primitive needs a fixed width; Int is unbounded")) (if (args_fit (get b params) args kind) (match (answered b kind) ((Err f) (Err f)) ((Ok answer) (Ok (ty_plus answer (names_union (if (get b sink) (NoNames) (labels_of args)) (get b ret_labels)))))) (Err (fault "type-mismatch" "an argument of a primitive is not what it wants"))))))))))))
 
   (fn arg_types ((decls Env) (ls Locals) (rest Trees)) (Result Tys Fault)
     (uses Alloc)
@@ -667,7 +667,7 @@
     (uses Alloc)
     (match ws
       ((NoWants) (Ok (if (str.eq seen "") "Int" seen)))
-      ((Wants w wmore) (match ts ((NoTys) (Ok (if (str.eq seen "") "Int" seen))) ((Tys t tmore) (if (and (stands_for_a_number w) (not (str.eq (get t base) "Real"))) (if (or (str.eq seen "") (str.eq seen (get t base))) (format_of wmore tmore (get t base)) (Err (fault "type" "a primitive mixes number formats"))) (format_of wmore tmore seen)))))))
+      ((Wants w wmore) (match ts ((NoTys) (Ok (if (str.eq seen "") "Int" seen))) ((Tys t tmore) (if (and (stands_for_a_number w) (not (str.eq (get t base) "Real"))) (if (or (str.eq seen "") (str.eq seen (get t base))) (format_of wmore tmore (get t base)) (Err (fault "type-mismatch" "a primitive mixes number formats"))) (format_of wmore tmore seen)))))))
 
   (fn args_fit ((ws Wants) (ts Tys) (kind Str)) Bool
     (match ws
@@ -678,8 +678,8 @@
   (fn let_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((Trees n more) (match n ((Node inner) (Err (fault "type" "a let binds a name"))) ((Leaf text quoted) (match more ((Trees v tail) (match tail ((Trees body none) (match none ((NoTrees) (match (named text) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err f)) ((Ok fine) (match (expr_type decls ls v) ((Err f) (Err f)) ((Ok bound) (expr_type decls (Local name bound ls) body)))))))) ((Trees extra others) (Err (fault "type" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body")))))))
-      ((NoTrees) (Err (fault "type" "a let takes a name, a value and a body")))))
+      ((Trees n more) (match n ((Node inner) (Err (fault "syntax" "a let binds a name"))) ((Leaf text quoted) (match more ((Trees v tail) (match tail ((Trees body none) (match none ((NoTrees) (match (named text) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err f)) ((Ok fine) (match (expr_type decls ls v) ((Err f) (Err f)) ((Ok bound) (expr_type decls (Local name bound ls) body)))))))) ((Trees extra others) (Err (fault "syntax" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "syntax" "a let takes a name, a value and a body"))))) ((NoTrees) (Err (fault "syntax" "a let takes a name, a value and a body")))))))
+      ((NoTrees) (Err (fault "syntax" "a let takes a name, a value and a body")))))
 
   ; `(match value ((Variant binder...) body)...)` on a value of a declared enum. Read as
   ; Python's checker reads it: no wildcard, every variant exactly once, a binder for each
@@ -689,8 +689,8 @@
   (fn match_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a match takes a value and its arms")))
-      ((Trees value arms) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok seen) (match (enum_of decls (get seen base)) ((None) (Err (fault "type" (concat "a match is on an enum; " (concat (get seen base) " is not one"))))) ((Some d) (if (= (tys_count (get seen args)) (names_count (get d params))) (match (arms_type decls ls d (get seen args) (get seen labels) arms (NoNames) (None)) ((Err f) (Err f)) ((Ok ty) (labelled_arms decls (get seen labels) arms ty))) (Err (fault "type" "a generic enum is matched at all of its type arguments"))))))))))
+      ((NoTrees) (Err (fault "syntax" "a match takes a value and its arms")))
+      ((Trees value arms) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok seen) (match (enum_of decls (get seen base)) ((None) (Err (fault "match-non-enum" (concat "a match is on an enum; " (concat (get seen base) " is not one"))))) ((Some d) (if (= (tys_count (get seen args)) (names_count (get d params))) (match (arms_type decls ls d (get seen args) (get seen labels) arms (NoNames) (None)) ((Err f) (Err f)) ((Ok ty) (labelled_arms decls (get seen labels) arms ty))) (Err (fault "type-mismatch" "a generic enum is matched at all of its type arguments"))))))))))
 
   ; A match on labelled data: what it answers carries the labels, and no arm may perform an
   ; effect, since whether it happens would reveal which arm was taken.
@@ -700,7 +700,7 @@
       ((NoNames) (Ok ty))
       ((Names l more) (match (effects_in_all decls arms)
         ((NoNames) (Ok (ty_plus ty labels)))
-        ((Names e others) (Err (fault "type" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")))))))
+        ((Names e others) (Err (fault "effect-under-label" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")))))))
 
   (fn tys_plus ((ts Tys) (labels Names)) Tys
     (uses Alloc)
@@ -713,8 +713,35 @@
   (fn arms_type ((decls Env) (ls Locals) (d EnumSignature) (given Tys) (labels Names) (arms Trees) (seen Names) (prior (Option Ty))) (Result Ty Fault)
     (uses Alloc)
     (match arms
-      ((NoTrees) (match prior ((None) (Err (fault "type" "a match has no arms"))) ((Some ty) (if (all_handled (get d variants) seen) (Ok ty) (Err (fault "type" (concat "a match on " (concat (get d name) " does not handle every variant"))))))))
-      ((Trees a more) (match (arm_type decls ls d given labels a) ((Err f) (Err f)) ((Ok done) (if (names_has seen (get done variant)) (Err (fault "type" (concat "`" (concat (get done variant) "` is handled twice")))) (match prior ((None) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (get done ty)))) ((Some before) (if (loose_eq before (get done ty)) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (join before (get done ty)))) (Err (fault "type" "the arms of a match have different types")))))))))))
+      ((NoTrees) (match prior ((None) (Err (fault "syntax" "a match has no arms"))) ((Some ty) (if (all_handled (get d variants) seen) (Ok ty) (Err (fault "non-exhaustive" (concat "a match on " (concat (get d name) " does not handle every variant"))))))))
+      ((Trees a more) (match (arm_type decls ls d given labels a) ((Err f) (Err (also_uncovered d arms seen f))) ((Ok done) (if (names_has seen (get done variant)) (Err (fault "duplicate-arm" (concat "`" (concat (get done variant) "` is handled twice")))) (match prior ((None) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (get done ty)))) ((Some before) (if (loose_eq before (get done ty)) (arms_type decls ls d given labels more (Names (get done variant) seen) (Some (join before (get done ty)))) (Err (fault "type-mismatch" "the arms of a match have different types")))))))))))
+
+  ; An arm that names no variant of the enum -- a wildcard, or a variant it does not have --
+  ; handles none, so the match may leave one out as well; when the arms that do name one
+  ; do not cover the enum, the fault is both.
+  (fn also_uncovered ((d EnumSignature) (arms Trees) (seen Names) (f Fault)) Fault
+    (uses Alloc)
+    (if (and (or (str.eq (get f op) "no-wildcard") (str.eq (get f op) "unknown-variant"))
+             (not (all_handled (get d variants) (arm_names arms seen))))
+      (make Fault (op (concat (get f op) " non-exhaustive")) (why (get f why)) (cause (get f cause)))
+      f))
+
+  ; The variants the arms name, added to those already seen.
+  (fn arm_names ((arms Trees) (seen Names)) Names
+    (uses Alloc)
+    (match arms
+      ((NoTrees) seen)
+      ((Trees a more) (arm_names more (match a
+        ((Leaf t q) seen)
+        ((Node items) (match items
+          ((NoTrees) seen)
+          ((Trees p r) (match p
+            ((Leaf t q) seen)
+            ((Node ps) (match ps
+              ((NoTrees) seen)
+              ((Trees v bs) (match v
+                ((Node i) seen)
+                ((Leaf vt vq) (match (bytes.decode vt) ((Ok w) (Names w seen)) ((Err e) seen))))))))))))))))
 
   (fn all_handled ((vs VariantSignatures) (seen Names)) Bool
     (match vs
@@ -725,15 +752,15 @@
   (fn arm_type ((decls Env) (ls Locals) (d EnumSignature) (given Tys) (labels Names) (arm Tree)) (Result Arm Fault)
     (uses Alloc)
     (match arm
-      ((Leaf text quoted) (Err (fault "type" "an arm is ((Variant binder...) body)")))
-      ((Node items) (match items ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees pattern more) (match more ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((NoTrees) (match pattern ((Leaf ptext pquoted) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Node pitems) (match pitems ((NoTrees) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Trees head binders) (match head ((Node inner) (Err (fault "type" "an arm is ((Variant binder...) body)"))) ((Leaf vtext vquoted) (match (named vtext) ((Err f) (Err f)) ((Ok variant) (if (str.eq variant "_") (Err (fault "type" "wildcard arms are not allowed: a new variant must never be handled silently")) (match (variant_of d variant) ((None) (Err (fault "type" (concat "`" (concat variant (concat "` is not a variant of " (get d name))))))) ((Some v) (match (bound ls binders (tys_plus (subst_all (get v fields) (get d params) given) labels)) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok ty) (Ok (make Arm (variant variant) (ty ty)))))))))))))))))))))))))))
+      ((Leaf text quoted) (Err (fault "syntax" "an arm is ((Variant binder...) body)")))
+      ((Node items) (match items ((NoTrees) (Err (fault "syntax" "an arm is ((Variant binder...) body)"))) ((Trees pattern more) (match more ((NoTrees) (Err (fault "syntax" "an arm is ((Variant binder...) body)"))) ((Trees body none) (match none ((Trees extra others) (Err (fault "syntax" "an arm is ((Variant binder...) body)"))) ((NoTrees) (match pattern ((Leaf ptext pquoted) (if (bytes.eq ptext (str.encode "_")) (Err (fault "no-wildcard" "wildcard arms are not allowed: a new variant must never be handled silently")) (Err (fault "syntax" "an arm is ((Variant binder...) body)")))) ((Node pitems) (match pitems ((NoTrees) (Err (fault "syntax" "an arm is ((Variant binder...) body)"))) ((Trees head binders) (match head ((Node inner) (Err (fault "syntax" "an arm is ((Variant binder...) body)"))) ((Leaf vtext vquoted) (match (named vtext) ((Err f) (Err f)) ((Ok variant) (if (str.eq variant "_") (Err (fault "no-wildcard" "wildcard arms are not allowed: a new variant must never be handled silently")) (match (variant_of d variant) ((None) (Err (fault "unknown-variant" (concat "`" (concat variant (concat "` is not a variant of " (get d name))))))) ((Some v) (match (bound ls binders (tys_plus (subst_all (get v fields) (get d params) given) labels)) ((Err f) (Err f)) ((Ok inside) (match (expr_type decls inside body) ((Err f) (Err f)) ((Ok ty) (Ok (make Arm (variant variant) (ty ty)))))))))))))))))))))))))))
 
   ; The binders of a pattern against the fields of the variant, one each.
   (fn bound ((ls Locals) (binders Trees) (fields Tys)) (Result Locals Fault)
     (uses Alloc)
     (match binders
-      ((NoTrees) (match fields ((NoTys) (Ok ls)) ((Tys f more) (Err (fault "type" "a pattern binds fewer names than the variant has fields")))))
-      ((Trees b others) (match fields ((NoTys) (Err (fault "type" "a pattern binds more names than the variant has fields"))) ((Tys f more) (match b ((Node inner) (Err (fault "type" "a binder is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (match (binder_ok ls name) ((Err e) (Err e)) ((Ok fine) (bound (Local name f ls) others more))))))))))))
+      ((NoTrees) (match fields ((NoTys) (Ok ls)) ((Tys f more) (Err (fault "pattern-arity" "a pattern binds fewer names than the variant has fields")))))
+      ((Trees b others) (match fields ((NoTys) (Err (fault "pattern-arity" "a pattern binds more names than the variant has fields"))) ((Tys f more) (match b ((Node inner) (Err (fault "syntax" "a binder is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok name) (match (binder_ok ls name) ((Err e) (Err e)) ((Ok fine) (bound (Local name f ls) others more))))))))))))
 
   ; --- records -----------------------------------------------------------------
   ; `(make Record (field value)...)` names every field, in declaration order; `(get r f)`
@@ -742,26 +769,26 @@
   (fn make_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a make takes a record name and its fields")))
-      ((Trees n inits) (match n ((Node inner) (Err (fault "type" "a record's name is a name"))) ((Leaf text quoted) (match (named text) ((Err f) (Err f)) ((Ok name) (match (any_record decls name) ((None) (Err (fault "type" (concat "no record is named `" (concat name "`"))))) ((Some d) (match (init_checks decls ls (get d fields) inits true) ((Err f) (Err f)) ((Ok done) (Ok (plain name)))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a make takes a record name and its fields")))
+      ((Trees n inits) (match n ((Node inner) (Err (fault "syntax" "a record's name is a name"))) ((Leaf text quoted) (match (named text) ((Err f) (Err f)) ((Ok name) (match (any_record decls name) ((None) (Err (fault "unknown-type" (concat "no record is named `" (concat name "`"))))) ((Some d) (match (init_checks decls ls (get d fields) inits true) ((Err f) (Err f)) ((Ok done) (Ok (plain name)))))))))))))
 
   (fn get_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((Trees value more) (match more ((Trees field none) (match none ((NoTrees) (match field ((Node inner) (Err (fault "type" "a field's name is a name"))) ((Leaf text quoted) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (field_of decls held text)))))) ((Trees extra others) (Err (fault "type" "a get takes a record and a field"))))) ((NoTrees) (Err (fault "type" "a get takes a record and a field")))))
-      ((NoTrees) (Err (fault "type" "a get takes a record and a field")))))
+      ((Trees value more) (match more ((Trees field none) (match none ((NoTrees) (match field ((Node inner) (Err (fault "syntax" "a field's name is a name"))) ((Leaf text quoted) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (field_of decls held text)))))) ((Trees extra others) (Err (fault "syntax" "a get takes a record and a field"))))) ((NoTrees) (Err (fault "syntax" "a get takes a record and a field")))))
+      ((NoTrees) (Err (fault "syntax" "a get takes a record and a field")))))
 
   (fn field_of ((decls Env) (held Ty) (text Bytes)) (Result Ty Fault)
     (uses Alloc)
     (match (named text)
       ((Err f) (Err f))
-      ((Ok field) (match (any_record decls (get held base)) ((None) (Err (fault "type" "a get is on a record"))) ((Some d) (match (field_at (get d fields) field) ((None) (Err (fault "type" (concat (get d name) (concat " has no field `" (concat field "`")))))) ((Some ty) (Ok (ty_plus ty (get held labels))))))))))
+      ((Ok field) (match (any_record decls (get held base)) ((None) (Err (fault "not-a-record" "a get is on a record"))) ((Some d) (match (field_at (get d fields) field) ((None) (Err (fault "unknown-field" (concat (get d name) (concat " has no field `" (concat field "`")))))) ((Some ty) (Ok (ty_plus ty (get held labels))))))))))
 
   (fn with_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a with takes a record and the fields to change")))
-      ((Trees value inits) (match inits ((NoTrees) (Err (fault "type" "a with changes at least one field"))) ((Trees first others) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (any_record decls (get held base)) ((None) (Err (fault "type" "a with is on a record"))) ((Some d) (match (init_checks decls ls (get d fields) inits false) ((Err f) (Err f)) ((Ok done) (Ok held))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a with takes a record and the fields to change")))
+      ((Trees value inits) (match inits ((NoTrees) (Err (fault "syntax" "a with changes at least one field"))) ((Trees first others) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok held) (match (any_record decls (get held base)) ((None) (Err (fault "not-a-record" "a with is on a record"))) ((Some d) (match (init_checks decls ls (get d fields) inits false) ((Err f) (Err f)) ((Ok done) (Ok held))))))))))))
 
   ; The initialisers in order against the record's fields. Exact (a `make`) means the
   ; next initialiser must be for the next field; otherwise (a `with`) fields may be
@@ -770,8 +797,8 @@
   (fn init_checks ((decls Env) (ls Locals) (fields RecordFields) (inits Trees) (exact Bool)) (Result Unit Fault)
     (uses Alloc)
     (match inits
-      ((NoTrees) (match fields ((NoRecordFields) (Ok unit)) ((RecordFields n ty rest) (if exact (Err (fault "type" "a make needs every field")) (Ok unit)))))
-      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "type" "an initialiser is (field value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "an initialiser is (field value)"))) ((Trees fname rest) (match rest ((NoTrees) (Err (fault "type" "an initialiser is (field value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "type" "an initialiser is (field value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "type" "a field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (match (find_field fields field) ((None) (Err (fault "type" (concat "no field `" (concat field "` is left to give, in this order"))))) ((Some found) (if (and exact (not (field_first fields field))) (Err (fault "type" "a make gives its fields in declaration order, with none left out")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get found ty)) (init_checks decls ls (get found after) more exact) (Err (fault "type" (concat "a value does not fit field `" (concat field "`")))))))))))))))))))))))))
+      ((NoTrees) (match fields ((NoRecordFields) (Ok unit)) ((RecordFields n ty rest) (if exact (Err (fault "missing-field" "a make needs every field")) (Ok unit)))))
+      ((Trees init more) (match init ((Leaf itext iquoted) (Err (fault "syntax" "an initialiser is (field value)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "an initialiser is (field value)"))) ((Trees fname rest) (match rest ((NoTrees) (Err (fault "syntax" "an initialiser is (field value)"))) ((Trees value none) (match none ((Trees extra others) (Err (fault "syntax" "an initialiser is (field value)"))) ((NoTrees) (match fname ((Node inner) (Err (fault "syntax" "a field's name is a name"))) ((Leaf ftext fquoted) (match (named ftext) ((Err f) (Err f)) ((Ok field) (match (find_field fields field) ((None) (Err (fault "unknown-field" (concat "no field `" (concat field "` is left to give, in this order"))))) ((Some found) (if (and exact (not (field_first fields field))) (Err (fault "field-order" "a make gives its fields in declaration order, with none left out")) (match (expr_type decls ls value) ((Err f) (Err f)) ((Ok got) (if (loose_fits got (get found ty)) (init_checks decls ls (get found after) more exact) (Err (fault "type-mismatch" (concat "a value does not fit field `" (concat field "`")))))))))))))))))))))))))
 
   (record Found (ty Ty) (after RecordFields))
 
@@ -843,21 +870,21 @@
       (match (arg_types decls ls rest)
         ((Err f) (Err f))
         ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get sig params))))
-          (Err (fault "type" "a call is given a different number of arguments than the function takes"))
+          (Err (fault "arity" "a call is given a different number of arguments than the function takes"))
           (call_plain decls ls (with sig (params (labels_replaced (get sig params) (get sig label_param) (labels_solved (get sig params) actuals (get sig label_param)))) (ret (label_replaced (get sig ret) (get sig label_param) (labels_solved (get sig params) actuals (get sig label_param)))) (label_param "")) rest))))))
 
   (fn call_plain ((decls Env) (ls Locals) (sig FnSignature) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match (get sig type_params)
       ((NoNames) (match (call_args decls ls rest (get sig params)) ((Err f) (Err f)) ((Ok done) (Ok (if (names_has (get decls foreigns) (get sig name)) (ty_plus (get sig ret) (Names "Unverified" (NoNames))) (get sig ret))))))
-      ((Names first others) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get sig params)))) (Err (fault "type" "a call is given a different number of arguments than the function takes")) (match (bind_all (get sig params) actuals (get sig type_params) (unknowns (get sig type_params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get sig params) (get sig type_params) found) actuals) (Ok (subst (get sig ret) (get sig type_params) found)) (Err (fault "type" "an argument does not fit its parameter")))))))))))
+      ((Names first others) (match (arg_types decls ls rest) ((Err f) (Err f)) ((Ok actuals) (if (not (= (tys_count actuals) (tys_count (get sig params)))) (Err (fault "arity" "a call is given a different number of arguments than the function takes")) (match (bind_all (get sig params) actuals (get sig type_params) (unknowns (get sig type_params))) ((Err f) (Err f)) ((Ok found) (if (loose_all (subst_all (get sig params) (get sig type_params) found) actuals) (Ok (subst (get sig ret) (get sig type_params) found)) (Err (fault "type-mismatch" "an argument does not fit its parameter")))))))))))
 
   ; Each argument against the parameter in its place, and neither list longer than the other.
   (fn call_args ((decls Env) (ls Locals) (rest Trees) (want Tys)) (Result Unit Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (match want ((NoTys) (Ok unit)) ((Tys w more) (Err (fault "type" "a call has fewer arguments than the function takes")))))
-      ((Trees a others) (match want ((NoTys) (Err (fault "type" "a call has more arguments than the function takes"))) ((Tys w more) (match (expr_type decls ls a) ((Err f) (Err f)) ((Ok got) (if (loose_fits got w) (call_args decls ls others more) (Err (fault "type" "an argument does not fit its parameter"))))))))))
+      ((NoTrees) (match want ((NoTys) (Ok unit)) ((Tys w more) (Err (fault "arity" "a call has fewer arguments than the function takes")))))
+      ((Trees a others) (match want ((NoTys) (Err (fault "arity" "a call has more arguments than the function takes"))) ((Tys w more) (match (expr_type decls ls a) ((Err f) (Err f)) ((Ok got) (if (loose_fits got w) (call_args decls ls others more) (Err (fault "type-mismatch" "an argument does not fit its parameter"))))))))))
 
   ; `(if c a b)`: a `Bool` condition and two branches of one type, which is the type.
   ; An effect inside a branch decided by labelled data would reveal that data by happening or not.
@@ -870,8 +897,8 @@
   (fn if_type ((decls Env) (ls Locals) (rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((Trees c more) (match more ((Trees a others) (match others ((Trees b none) (match none ((NoTrees) (match (expr_type decls ls c) ((Err e) (Err e)) ((Ok cond) (if (loose_eq cond (plain "Bool")) (match (expr_type decls ls a) ((Err e) (Err e)) ((Ok then) (match (expr_type decls ls b) ((Err e) (Err e)) ((Ok other) (if (loose_eq then other) (if (hidden_effect decls (get cond labels) a b) (Err (fault "type" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")) (Ok (ty_plus (join then other) (get cond labels)))) (Err (fault "type" "the branches of an if have different types"))))))) (Err (fault "type" "the condition of an if is a Bool")))))) ((Trees extra tail) (Err (fault "type" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "type" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "type" "an if takes a condition and two branches")))))
-      ((NoTrees) (Err (fault "type" "an if takes a condition and two branches")))))
+      ((Trees c more) (match more ((Trees a others) (match others ((Trees b none) (match none ((NoTrees) (match (expr_type decls ls c) ((Err e) (Err e)) ((Ok cond) (if (loose_eq cond (plain "Bool")) (match (expr_type decls ls a) ((Err e) (Err e)) ((Ok then) (match (expr_type decls ls b) ((Err e) (Err e)) ((Ok other) (if (loose_eq then other) (if (hidden_effect decls (get cond labels) a b) (Err (fault "effect-under-label" "effect-under-label: an effect is performed in a branch decided by labelled data, which would reveal it")) (Ok (ty_plus (join then other) (get cond labels)))) (Err (fault "type-mismatch" "the branches of an if have different types"))))))) (Err (fault "type-mismatch" "the condition of an if is a Bool")))))) ((Trees extra tail) (Err (fault "syntax" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "syntax" "an if takes a condition and two branches"))))) ((NoTrees) (Err (fault "syntax" "an if takes a condition and two branches")))))
+      ((NoTrees) (Err (fault "syntax" "an if takes a condition and two branches")))))
 
   ; --- effects ------------------------------------------------------------------
   ; What a body performs, read off the tree. It follows the same forms the typer does,
@@ -1014,14 +1041,14 @@
   (fn check_fn ((decls Env) (t Tree)) (Result Unit Fault)
     (uses Alloc)
     (match t
-      ((Leaf text quoted) (Err (fault "type" "a fn is a list")))
-      ((Node items) (match items ((NoTrees) (Err (fault "type" "a fn is a list"))) ((Trees keyword rest) (match rest ((NoTrees) (Err (fault "type" "a fn needs a name"))) ((Trees name after) (match name ((Node generic) (match generic ((NoTrees) (Err (fault "type" "a fn needs a name"))) ((Trees first tparams) (match (type_params_of tparams) ((Err f) (Err f)) ((Ok names) (check_after decls names after)))))) ((Leaf ntext nquoted) (check_after decls (NoNames) after))))))))))
+      ((Leaf text quoted) (Err (fault "syntax" "a fn is a list")))
+      ((Node items) (match items ((NoTrees) (Err (fault "syntax" "a fn is a list"))) ((Trees keyword rest) (match rest ((NoTrees) (Err (fault "syntax" "a fn needs a name"))) ((Trees name after) (match name ((Node generic) (match generic ((NoTrees) (Err (fault "syntax" "a fn needs a name"))) ((Trees first tparams) (match (type_params_of tparams) ((Err f) (Err f)) ((Ok names) (check_after decls names after)))))) ((Leaf ntext nquoted) (check_after decls (NoNames) after))))))))))
 
   (fn check_after ((decls Env) (tparams Names) (after Trees)) (Result Unit Fault)
     (uses Alloc)
     (match after
-      ((NoTrees) (Err (fault "type" "a fn needs a parameter list")))
-      ((Trees params more) (match more ((NoTrees) (Err (fault "type" "a fn needs a return type"))) ((Trees ret body) (check_body decls tparams params ret body))))))
+      ((NoTrees) (Err (fault "syntax" "a fn needs a parameter list")))
+      ((Trees params more) (match more ((NoTrees) (Err (fault "syntax" "a fn needs a return type"))) ((Trees ret body) (check_body decls tparams params ret body))))))
 
   ; The type parameters in a generic fn's name. A label parameter, written last as
   ; `(label L)`, adds no type parameter: in the body `L` is a label like any other, which
@@ -1040,14 +1067,14 @@
     (if (names_has tparams (get t base))
       (if (= (tys_count (get t args)) 0)
         (Ok unit)
-        (Err (fault "type" "a type parameter takes no arguments")))
+        (Err (fault "type-arity" "a type parameter takes no arguments")))
       (if (is_primitive (get t base))
         (if (= (tys_count (get t args)) (primitive_arity (get t base)))
           (resolved_all decls tparams (get t args))
-          (Err (fault "type" (concat (get t base) " is given the wrong number of type arguments"))))
+          (Err (fault "type-arity" (concat (get t base) " is given the wrong number of type arguments"))))
         (match (enum_of decls (get t base))
-          ((Some d) (if (= (tys_count (get t args)) (names_count (get d params))) (resolved_all decls tparams (get t args)) (Err (fault "type" (concat (get t base) " is given the wrong number of type arguments")))))
-          ((None) (if (or (present_newtype decls (get t base)) (present_any_record decls (get t base))) (if (= (tys_count (get t args)) 0) (Ok unit) (Err (fault "type" (concat (get t base) " takes no type arguments")))) (Err (fault "type" (concat "no type is named `" (concat (get t base) "`"))))))))))
+          ((Some d) (if (= (tys_count (get t args)) (names_count (get d params))) (resolved_all decls tparams (get t args)) (Err (fault "type-arity" (concat (get t base) " is given the wrong number of type arguments")))))
+          ((None) (if (or (present_newtype decls (get t base)) (present_any_record decls (get t base))) (if (= (tys_count (get t args)) 0) (Ok unit) (Err (fault "type-arity" (concat (get t base) " takes no type arguments")))) (Err (fault "unknown-type" (concat "no type is named `" (concat (get t base) "`"))))))))))
 
   (fn resolved_all ((decls Env) (tparams Names) (ts Tys)) (Result Unit Fault)
     (uses Alloc)
@@ -1070,7 +1097,22 @@
     (uses Alloc)
     (match (param_locals decls tparams (NoLocals) (param_trees params))
       ((Err f) (Err f))
-      ((Ok ls) (match (type_of ret) ((Err f) (Err f)) ((Ok declared) (match (resolved decls tparams declared) ((Err f) (Err f)) ((Ok known) (match (last_of body) ((None) (Err (fault "type" "a fn needs a body"))) ((Some b) (match (expr_type decls ls b) ((Err f) (Err f)) ((Ok got) (if (loose_fits got declared) (match (first_unknown (uses_in body)) ((Some odd) (Err (fault "effect" (concat "no effect is named `" (concat odd "`"))))) ((None) (match (first_missing (effects_in decls b) (uses_in body)) ((None) (Ok unit)) ((Some missing) (Err (fault "effect" (concat "a fn performs " (concat missing " but does not declare it")))))))) (Err (fault "type" "the body of a fn does not fit its declared result"))))))))))))))
+      ((Ok ls) (match (type_of ret) ((Err f) (Err f)) ((Ok declared) (match (resolved decls tparams declared) ((Err f) (Err f)) ((Ok known) (match (last_of body) ((None) (Err (fault "syntax" "a fn needs a body"))) ((Some b) (match (expr_type decls ls b) ((Err f) (Err f)) ((Ok got) (if (loose_fits got declared) (match (first_unknown (uses_in body)) ((Some odd) (Err (fault "unknown-effect" (concat "no effect is named `" (concat odd "`"))))) ((None) (match (first_missing (effects_in decls b) (uses_in body)) ((None) (Ok unit)) ((Some missing) (Err (fault (if (str.eq missing "Nondet") "nondeterministic-par" "undeclared-effect") (concat "a fn performs " (concat missing " but does not declare it")))))))) (Err (mismatch got declared))))))))))))))
+
+  ; Why a body does not fit its result: the labels alone (label-flow), a tensor's axes alone
+  ; (shape), or the type.
+  (fn mismatch ((got Ty) (declared Ty)) Fault
+    (if (loose_fits (unlabelled got) (unlabelled declared))
+      (fault "label-flow" "the body carries a label its declared result does not")
+      (if (loose_fits (unaxed got) (unaxed declared))
+        (fault "shape" "the body's axes are not the declared result's")
+        (fault "type-mismatch" "the body of a fn does not fit its declared result"))))
+
+  (fn unlabelled ((t Ty)) Ty
+    (make Ty (base (get t base)) (labels (NoNames)) (args (get t args)) (dims (get t dims))))
+
+  (fn unaxed ((t Ty)) Ty
+    (make Ty (base (get t base)) (labels (get t labels)) (args (get t args)) (dims (NoDims))))
 
   (fn param_trees ((t Tree)) Trees
     (match t ((Leaf text quoted) (NoTrees)) ((Node items) items)))
@@ -1079,7 +1121,7 @@
     (uses Alloc)
     (match ps
       ((NoTrees) (Ok ls))
-      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "type" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "type" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "type" "a parameter is (name Type)"))) ((Trees written none) (match n ((Node inner) (Err (fault "type" "a parameter is (name Type)"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err f)) ((Ok fine) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (match (resolved decls tparams ty) ((Err f) (Err f)) ((Ok known) (param_locals decls tparams (Local name ty ls) more))))))))))))))))))))
+      ((Trees p more) (match p ((Leaf text quoted) (Err (fault "syntax" "a parameter is (name Type)"))) ((Node parts) (match parts ((NoTrees) (Err (fault "syntax" "a parameter is (name Type)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "syntax" "a parameter is (name Type)"))) ((Trees written none) (match n ((Node inner) (Err (fault "syntax" "a parameter is (name Type)"))) ((Leaf ntext nquoted) (match (named ntext) ((Err f) (Err f)) ((Ok name) (match (binder_ok ls name) ((Err f) (Err (if (str.eq (get f op) "shadowing") (fault "duplicate-binding" (get f why)) f))) ((Ok fine) (match (type_of written) ((Err f) (Err f)) ((Ok ty) (match (resolved decls tparams ty) ((Err f) (Err f)) ((Ok known) (param_locals decls tparams (Local name ty ls) more))))))))))))))))))))
 
   ; --- a whole module, one line per fn -------------------------------------------
   (fn report_source ((src Str)) Str

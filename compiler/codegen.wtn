@@ -30,9 +30,9 @@
 
   (use "wtn:42b4ccfa1dfd980872f5b7d61cea430d7a963973d64fb38f0bbb8c4cf1b8581b" as repeated)
 
-  (use "wtn:899e21eb94eb82caaa0d2a3ac52dccd80eb8c4e238c6aa55cd5b7c73f92faad1" as type_of)
+  (use "wtn:3fdd718f00ba3dd37317de926fb93b14c7438de6daffd8a4f75e03ae9353df32" as type_of)
 
-  (use "wtn:8b21cf36641449b0189337a07c77f45c96aee5f01ac1b4bea685eccc7b7b07f5" as named)
+  (use "wtn:92f81a40f63652dea9fbf74791ba55b839d7db7e5dbbb2f5e8a7c2512a911780" as named)
 
   (use "wtn:005b734fa344ec5d8501fe8b91eaaeca68ae600bebf49c44660fbf7d11429b05" as digits)
 

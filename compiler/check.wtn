@@ -1,0 +1,595 @@
+; The checker in Witness: every pass of the front end over one module, and one verdict.
+;
+; Each rule of the Python checker (witness/checker.py, witness/verify.py) has a pass here that
+; enforces it: the environment refuses a malformed or doubly declared definition
+; (compiler/env.wtn); the expression typer, a body against its declared type, labels and
+; effects (compiler/expr.wtn); the declaration rules, a declaration against the others
+; (compiler/decl_rules.wtn); the effect rules, a definition against the profile
+; (compiler/effects.wtn); and the verifier, contracts, termination and resource bounds
+; (compiler/verify.wtn). This module runs them in the order Python does -- the contracts only
+; once the rest passes, since a proof about a program that does not type-check is a proof
+; about nothing -- and says what each found in one form:
+;
+;   error NAME RULE       the definition NAME breaks RULE, so the module is rejected
+;   warning NAME RULE     NAME is accepted but RULE has something to say about it
+;   unread NAME WHY       a pass does not read NAME yet, so no verdict is given for it
+;
+; and then the verdict, `accept`, `warn` (accepted, with warnings), `reject`, or `unread`: a
+; module with nothing wrong in what was read but something not read cannot be said to be
+; accepted, and is not.
+;
+; What is not here yet: resolving an import (a `use` by hash needs the codebase, which is
+; the reference toolchain's), so a module that imports is `unread`.
+;
+;   witness run compiler/check.wtn --grant Alloc,Console
+(module check
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
+
+  (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
+
+  (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
+
+  (use "wtn:8b5d2dcccaba5bcde33013e1501ba1e57885d922ef3afe9af052cb94d9555b89" as after_head)
+
+  (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
+
+  (use "wtn:341db8e3e6f1bc39d35ed90f4c8e78b275e1270bc6bb95034c49e3233d7b280c" as word_of)
+
+  (use "wtn:8d123602cebf5e9de6a5e992a7483873e86b9595b4833c48ab2f123b03f9da9c" as names_has)
+
+  (use "wtn:2bf9db991f79bd86386f9d48b3d14c3938df6dbacab323d8c9f06fdbab332347" as newtype_of)
+
+  (use "wtn:3749d8b1a4565992277ef7bf100b7437ff7a11d23dcffa4778c6fefa9f6979ed" as env_with_prelude)
+
+  (use "wtn:e23991bdf3b1415d3e5a9000e2284743f680a60722372e5e58c0a7822dc6f6af" as check_fn)
+
+  (use "wtn:582264e40da2a590b46be413458ffdf29c9a475bc163f15200ae177003c24907" as expr_type)
+
+  (use "wtn:a53bdcef9dacef67d1fd894c2d13fd9e95b7c742b662957f520bab0f9b5d9e42" as param_locals)
+
+  (use "wtn:1d19b19c3c97e9a5947a2f089b5e062d4105217a91ccd058f389e31071424503" as param_trees)
+
+  (use "wtn:067c64fa27ab7a72d98c4581c29f839893b78cbfc1cc2e6c03f771c1cdfae128" as type_params_of)
+
+  (use "wtn:6c940a2bb7f16667a54dd36bcda4c622c6961231381c73434b0edc436a0d255e" as effects_in)
+
+  (use "wtn:4860d2be35e65ee99e288d5d2c7909496204de57011aac655ed0a8e51865e468" as declared_name)
+
+  (use "wtn:43c4c21da4bc0d19c22eed1873ba08ccd8cd90767ae2d919ade0b22eca736331" as items_findings)
+
+  (use "wtn:0141881f6c8988560314249b14a07d343336e76dfcc4889d1c1055005eb45261" as fn_items)
+
+  (use "wtn:319ff83be9d11f7aa2986351a66af1135cf6b6c681ad389f853e12613292114f" as fn_names)
+
+  (use "wtn:7fe3545823933a788afb141403bb646465a6a6ded9981f56998b193044b7e75f" as records_of)
+
+  (use "wtn:625ae72e651c1f2a8f51d9f48bc664f5ce39c2811b4f066e5aafb9cb51bbd817" as decl_findings)
+
+  (use "wtn:dffe9b9bcf665cfb307b712c8e4da0bf700db56f6402e73e93e9641034744b75" as proved)
+
+  ; --- the other passes' lines, read back ------------------------------------------------------
+  ; decl_rules and verify say what they found as text; it is cut into its pieces here rather
+  ; than each of them learning this module's form.
+  (enum Pieces (NoPieces) (Pieces (head Bytes) (rest Pieces)))
+
+  (fn byte_at ((src Bytes) (at Int)) Int
+    (match (bytes.at src (Octets at)) ((None) 0) ((Some b) (int.of b))))
+
+  ; The runs of `src` between the bytes `cut`, from `from` on; `at` is where to look and
+  ; `left` how many steps may still be taken, which is what makes the walk finite.
+  (fn pieces ((src Bytes) (cut Int) (from Int) (at Int) (left Int)) Pieces
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (or (<= left 0) (<= (unwrap (bytes.len src)) at))
+      (if (< from at) (Pieces (bytes.slice src (Octets from) (Octets at)) (NoPieces)) (NoPieces))
+      (if (= (byte_at src at) cut)
+        (if (< from at)
+          (Pieces (bytes.slice src (Octets from) (Octets at)) (pieces src cut (+ at 1) (+ at 1) (- left 1)))
+          (pieces src cut (+ at 1) (+ at 1) (- left 1)))
+        (pieces src cut from (+ at 1) (- left 1)))))
+
+  (fn cut_at ((b Bytes) (cut Int)) Pieces
+    (uses Alloc)
+    (pieces b cut 0 0 (+ 1 (unwrap (bytes.len b)))))
+
+  (fn text ((b Bytes)) Str
+    (uses Alloc)
+    (match (bytes.decode b) ((Ok s) s) ((Err f) "?")))
+
+  ; What comes before the first colon: a decl_rules line's rule, a verify line's name.
+  (fn before_colon ((b Bytes)) Str
+    (uses Alloc)
+    (match (cut_at b 58) ((NoPieces) "") ((Pieces h rest) (text h))))
+
+  (fn finding ((kind Str) (name Str) (rule Str)) Str
+    (uses Alloc)
+    (concat kind (concat " " (concat name (concat " " (concat rule "\n"))))))
+
+  ; --- each definition -------------------------------------------------------------------------
+  (fn name_of ((h Tree)) Str
+    (uses Alloc)
+    (match (after_head h) ((NoTrees) "?") ((Trees n more) (declared_name n))))
+
+  ; "rule: why" for each thing wrong with a declaration against the others.
+  (fn decl_lines ((name Str) (ls Pieces)) Str
+    (uses Alloc)
+    (match ls
+      ((NoPieces) "")
+      ((Pieces h rest) (concat (finding "error" name (before_colon h)) (decl_lines name rest)))))
+
+  ; The body against its declared type: the first thing wrong is the fault's rule.
+  (fn body_line ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (match (check_fn decls h)
+      ((Ok done) "")
+      ((Err f) (if (str.eq (get f op) "unread")
+        (concat "unread " (concat (name_of h) (concat " " (concat (get f why) "\n"))))
+        (op_lines (name_of h) (cut_at (str.encode (get f op)) 32))))))
+
+  ; A fault may be two rules at once, "no-wildcard non-exhaustive".
+  (fn op_lines ((name Str) (ops Pieces)) Str
+    (uses Alloc)
+    (match ops ((NoPieces) "") ((Pieces o more) (concat (finding "error" name (text o)) (op_lines name more)))))
+
+  (fn items_lines ((decls Env) (recs Recs) (items Trees)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees h rest) (concat
+        (concat (concat (decl_lines (name_of h) (cut_at (str.encode (decl_findings recs h)) 10))
+          (if (head_is h "fn") (body_line decls h) ""))
+          (tree_lines decls h))
+        (items_lines decls recs rest)))))
+
+  ; --- what is read from the tree --------------------------------------------------------------
+  ; The rules no other pass enforces, because they need nothing but the declarations as
+  ; written: what a name looks like, `main`, a newtype's inner type, redaction policies,
+  ; which labels a function says it releases, and what a test may take and do.
+  (fn upper ((s Str)) Bool
+    (uses Alloc)
+    (let b (byte_at (str.encode s) 0) (and (<= 65 b) (<= b 90))))
+
+  (fn lower ((s Str)) Bool
+    (uses Alloc)
+    (let b (byte_at (str.encode s) 0) (and (<= 97 b) (<= b 122))))
+
+  ; Cut with something on either side, a name with a dot in it is two pieces or more.
+  (fn dotted ((s Str)) Bool
+    (uses Alloc)
+    (match (cut_at (str.encode (concat "x" (concat s "x"))) 46)
+      ((NoPieces) false)
+      ((Pieces h rest) (match rest ((NoPieces) false) ((Pieces h2 more) true)))))
+
+  ; A leaf's text, quoted or not: a test's name is written as text.
+  (fn leaf_str ((t Tree)) Str
+    (uses Alloc)
+    (match t ((Leaf b quoted) (text b)) ((Node items) "")))
+
+  (fn naming_if ((ok Bool) (name Str)) Str
+    (uses Alloc)
+    (if ok "" (finding "error" name "naming")))
+
+  ; A generic name's type parameters start upper-case; its `(label L)` is not one.
+  (fn tparams_naming ((name Str) (ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees h more) (concat (match h ((Leaf b quoted) (naming_if (upper (text b)) name)) ((Node inner) "")) (tparams_naming name more)))))
+
+  ; Fields, `(name Type)`, start lower-case.
+  (fn fields_naming ((name Str) (fs Trees)) Str
+    (uses Alloc)
+    (match fs
+      ((NoTrees) "")
+      ((Trees f more) (concat
+        (match (node_items f) ((None) "") ((Some parts) (match parts ((NoTrees) "") ((Trees n rest) (naming_if (lower (word_of n)) name)))))
+        (fields_naming name more)))))
+
+  (fn schema_naming ((name Str) (cs Trees)) Str
+    (uses Alloc)
+    (match cs
+      ((NoTrees) "")
+      ((Trees c more) (concat
+        (if (head_is c "schema") (match (after_head c) ((NoTrees) "") ((Trees s v) (naming_if (upper (word_of s)) name))) "")
+        (schema_naming name more)))))
+
+  (fn variants_naming ((name Str) (vs Trees)) Str
+    (uses Alloc)
+    (match vs
+      ((NoTrees) "")
+      ((Trees v more) (concat
+        (match (node_items v) ((None) "") ((Some parts) (match parts ((NoTrees) "") ((Trees n fs) (concat (naming_if (upper (word_of n)) name) (fields_naming name fs))))))
+        (variants_naming name more)))))
+
+  (fn clause ((ts Trees) (head Str)) (Option Trees)
+    (uses Alloc)
+    (match ts ((NoTrees) (None)) ((Trees t more) (if (head_is t head) (Some (after_head t)) (clause more head)))))
+
+  (fn hashed ((ts Trees)) Bool
+    (uses Alloc)
+    (match ts
+      ((NoTrees) false)
+      ((Trees w more) (bytes.eq (bytes.slice (str.encode (leaf_str w)) (Octets 0) (Octets 4)) (str.encode "wtn:")))))
+
+  ; Types, variants, models, channels and schemas start upper-case; functions, foreign
+  ; functions and fields lower-case, and a function's name has no dot, which is kept for the
+  ; builtins' namespaces. A model's weights are named by hash.
+  (fn naming ((h Tree)) Str
+    (uses Alloc)
+    (match (after_head h)
+      ((NoTrees) "")
+      ((Trees n rest) (let name (declared_name n)
+        (if (head_is h "fn")
+          (concat (naming_if (and (lower name) (not (dotted name))) name) (tparams_naming name (after_head n)))
+          (if (head_is h "foreign")
+            (naming_if (lower name) name)
+            (if (head_is h "enum")
+              (concat (concat (naming_if (upper name) name) (tparams_naming name (after_head n))) (variants_naming name rest))
+              (if (head_is h "record")
+                (concat (concat (naming_if (upper name) name) (fields_naming name rest)) (schema_naming name rest))
+                (if (or (head_is h "newtype") (or (head_is h "patch") (head_is h "channel")))
+                  (naming_if (upper name) name)
+                  (if (head_is h "model")
+                    (concat (naming_if (upper name) name)
+                      (match (clause rest "weights") ((None) "") ((Some ws) (naming_if (hashed ws) name))))
+                    ""))))))))))
+
+  (fn main_params ((h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "fn")
+      (match (after_head h)
+        ((NoTrees) "")
+        ((Trees n rest) (if (str.eq (declared_name n) "main")
+          (match rest
+            ((NoTrees) "")
+            ((Trees ps more) (match (node_items ps)
+              ((None) "")
+              ((Some items) (match items ((NoTrees) "") ((Trees p others) (finding "error" "main" "main-params")))))))
+          "")))
+      ""))
+
+  ; A label goes on a newtype where it is used, not inside it.
+  (fn labelled_newtype ((h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "newtype")
+      (match (after_head h)
+        ((NoTrees) "")
+        ((Trees n rest) (match rest ((NoTrees) "") ((Trees inner more) (if (head_is inner "label") (finding "error" (declared_name n) "labelled-newtype") "")))))
+      ""))
+
+  (fn policy ((p Str)) Bool
+    (or (or (str.eq p "hidden") (str.eq p "digest")) (or (str.eq p "length") (str.eq p "keep"))))
+
+  ; `(redact Label policy)`: a policy that exists, and one per label.
+  (fn redactions ((items Trees) (seen Names)) Str
+    (uses Alloc)
+    (match items
+      ((NoTrees) "")
+      ((Trees h more) (if (head_is h "redact")
+        (match (after_head h)
+          ((NoTrees) (redactions more seen))
+          ((Trees l rest) (match rest
+            ((NoTrees) (redactions more seen))
+            ((Trees p none) (let which (word_of l)
+              (if (not (policy (word_of p)))
+                (concat (finding "error" which "redaction") (redactions more seen))
+                (if (names_has seen which)
+                  (concat (finding "error" which "redaction") (redactions more seen))
+                  (redactions more (Names which seen)))))))))
+        (redactions more seen)))))
+
+  ; --- releasing a label -------------------------------------------------------------------------
+  ; Every `(declassify L value)` in a definition.
+  (enum Releases (NoReleases) (Releases (which Str) (value Tree) (rest Releases)))
+
+  (fn releases_in ((ts Trees) (out Releases)) Releases
+    (uses Alloc)
+    (match ts
+      ((NoTrees) out)
+      ((Trees t more) (match t
+        ((Leaf b quoted) (releases_in more out))
+        ((Node items) (releases_in more (releases_in items (if (head_is t "declassify") (release items out) out))))))))
+
+  (fn release ((items Trees) (out Releases)) Releases
+    (uses Alloc)
+    (match items
+      ((NoTrees) out)
+      ((Trees k rest) (match rest
+        ((NoTrees) out)
+        ((Trees l vs) (match vs ((NoTrees) out) ((Trees v none) (Releases (word_of l) v out))))))))
+
+  (fn released ((rs Releases) (l Str)) Bool
+    (match rs ((NoReleases) false) ((Releases k v more) (or (str.eq k l) (released more l)))))
+
+  (fn words_in ((ts Trees)) Names
+    (uses Alloc)
+    (match ts ((NoTrees) (NoNames)) ((Trees t more) (Names (word_of t) (words_in more)))))
+
+  (fn label_param ((ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees t more) (if (head_is t "label") (match (after_head t) ((NoTrees) "") ((Trees l none) (word_of l))) (label_param more)))))
+
+  ; Whether a value carries a label, when its type can be told from the parameters alone.
+  ; When it cannot -- it names a `let` -- it is taken to, so a warning is only given where
+  ; it is certain. Labels inside a type's arguments are not looked for: a value with
+  ; arguments is taken to carry it too.
+  (fn carries ((decls Env) (ls (Result Locals Fault)) (v Tree) (l Str)) Bool
+    (uses Alloc)
+    (match ls
+      ((Err f) true)
+      ((Ok locals) (match (expr_type decls locals v)
+        ((Err f) true)
+        ((Ok t) (or (names_has (get t labels) l) (match (get t args) ((NoTys) false) ((Tys a more) true))))))))
+
+  ; Releasing a label the function does not declare is refused; releasing its label
+  ; parameter, which only a caller can, or a label the value does not carry, is needless.
+  (fn release_lines ((decls Env) (name Str) (declared Names) (lp Str) (ls (Result Locals Fault)) (rs Releases)) Str
+    (uses Alloc)
+    (match rs
+      ((NoReleases) "")
+      ((Releases l v more) (concat
+        (concat (if (names_has declared l) "" (finding "error" name "undeclared-declassify"))
+          (if (str.eq l lp)
+            (finding "warning" name "needless-declassify")
+            (if (carries decls ls v l) "" (finding "warning" name "needless-declassify"))))
+        (release_lines decls name declared lp ls more)))))
+
+  (fn unused_lines ((name Str) (declared Names) (rs Releases)) Str
+    (uses Alloc)
+    (match declared
+      ((NoNames) "")
+      ((Names l more) (concat (if (released rs l) "" (finding "warning" name "unused-declassify")) (unused_lines name more rs)))))
+
+  (fn declassify_lines ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "fn")
+      (match (after_head h)
+        ((NoTrees) "")
+        ((Trees n rest) (match rest
+          ((NoTrees) "")
+          ((Trees params more)
+            (let declared (match (clause more "declassifies") ((None) (NoNames)) ((Some ws) (words_in ws)))
+              (let rs (releases_in more (NoReleases))
+                (let ls (match (type_params_of (after_head n)) ((Err f) (Err f)) ((Ok tps) (param_locals decls tps (NoLocals) (param_trees params))))
+                  (concat (release_lines decls (declared_name n) declared (label_param (after_head n)) ls rs)
+                          (unused_lines (declared_name n) declared rs)))))))))
+      ""))
+
+  ; A foreign function's result is Unverified already.
+  (fn foreign_lines ((h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "foreign")
+      (match (after_head h)
+        ((NoTrees) "")
+        ((Trees n rest) (match rest
+          ((NoTrees) "")
+          ((Trees ps more) (match more
+            ((NoTrees) "")
+            ((Trees ret cs) (if (and (head_is ret "label") (names_has (words_in (after_head ret)) "Unverified"))
+              (finding "warning" (declared_name n) "needless-declassify")
+              "")))))))
+      ""))
+
+  ; --- tests -------------------------------------------------------------------------------------
+  ; A test is a proposition: its body is a Bool (a snapshot's, the text it records), it
+  ; performs nothing but building values, and a property's inputs are of types values can be
+  ; made up for.
+  (fn width ((b Str)) Bool
+    (or (or (or (str.eq b "I8") (str.eq b "I16")) (or (str.eq b "I32") (str.eq b "I64")))
+        (or (or (str.eq b "U8") (str.eq b "U16")) (or (str.eq b "U32") (str.eq b "U64")))))
+
+  (fn generated ((b Str)) Bool
+    (or (or (str.eq b "Bool") (str.eq b "Int")) (or (str.eq b "Str") (width b))))
+
+  ; The base a newtype ends at; `left` bounds a chain the environment has already refused
+  ; to let be a cycle.
+  (fn base_of ((decls Env) (name Str) (left Int)) Str
+    (requires (<= 0 left))
+    (if (<= left 0)
+      name
+      (match (newtype_of decls name) ((None) name) ((Some d) (base_of decls (get (get d inner) base) (- left 1))))))
+
+  (fn inputs_shape ((decls Env) (name Str) (ps Trees)) Str
+    (uses Alloc)
+    (match ps
+      ((NoTrees) "")
+      ((Trees p more) (concat
+        (match (after_head p)
+          ((NoTrees) "")
+          ((Trees t none) (if (generated (base_of decls (declared_name t) 8)) "" (finding "error" name "test-shape"))))
+        (inputs_shape decls name more)))))
+
+  (fn observable ((ns Names)) Bool
+    (match ns ((NoNames) false) ((Names e more) (or (not (str.eq e "Alloc")) (observable more)))))
+
+  (fn test_body ((decls Env) (name Str) (ps Trees) (b Tree) (want Str)) Str
+    (uses Alloc)
+    (concat
+      (match (param_locals decls (NoNames) (NoLocals) ps)
+        ((Err f) (finding "error" name (get f op)))
+        ((Ok ls) (match (expr_type decls ls b)
+          ((Err f) (if (str.eq (get f op) "unread")
+            (concat "unread " (concat name (concat " " (concat (get f why) "\n"))))
+            (finding "error" name (get f op))))
+          ((Ok t) (if (str.eq (get t base) want) "" (finding "error" name "type-mismatch"))))))
+      (if (observable (effects_in decls b)) (finding "error" name "test-shape") "")))
+
+  (fn test_kind ((h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "test") "test" (if (head_is h "property") "property" (if (head_is h "snapshot") "snapshot" ""))))
+
+  (fn test_lines ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (let kind (test_kind h)
+      (if (str.eq kind "")
+        ""
+        (match (after_head h)
+          ((NoTrees) "")
+          ((Trees n rest) (let name (underscored (leaf_str n))
+            (if (str.eq kind "property")
+              (match rest
+                ((NoTrees) "")
+                ((Trees ps more) (concat (inputs_shape decls name (param_trees ps))
+                  (match (last_of more) ((None) "") ((Some b) (test_body decls name (param_trees ps) b "Bool"))))))
+              (match rest
+                ((NoTrees) "")
+                ((Trees b more) (test_body decls name (NoTrees) b (if (str.eq kind "snapshot") "Str" "Bool")))))))))))
+
+  ; A test's name is text, and a finding's line is cut at its spaces.
+  (fn underscored ((s Str)) Str
+    (uses Alloc)
+    (joined (cut_at (str.encode s) 32)))
+
+  (fn joined ((ps Pieces)) Str
+    (uses Alloc)
+    (match ps
+      ((NoPieces) "")
+      ((Pieces h rest) (match rest ((NoPieces) (text h)) ((Pieces h2 more) (concat (text h) (concat "_" (joined rest))))))))
+
+  ; --- contracts, as written -----------------------------------------------------------------------
+  ; A contract is erased, so it may perform nothing and release nothing; and `result` is
+  ; the value an `ensures` is about, so nothing else may name it.
+  (fn mentions ((ts Trees) (w Str)) Bool
+    (uses Alloc)
+    (match ts
+      ((NoTrees) false)
+      ((Trees t more) (or (match t ((Leaf b quoted) (and (not quoted) (bytes.eq b (str.encode w)))) ((Node items) (mentions items w)))
+                          (mentions more w)))))
+
+  (fn impure ((decls Env) (ts Trees)) Bool
+    (uses Alloc)
+    (match ts ((NoTrees) false) ((Trees t more) (or (observable (effects_in decls t)) (impure decls more)))))
+
+  (fn releases_any ((ts Trees)) Bool
+    (uses Alloc)
+    (match (releases_in ts (NoReleases)) ((NoReleases) false) ((Releases a b c) true)))
+
+  (fn clause_lines ((decls Env) (name Str) (ts Trees)) Str
+    (uses Alloc)
+    (match ts
+      ((NoTrees) "")
+      ((Trees t rest) (concat
+        (if (and (or (head_is t "requires") (head_is t "ensures")) (or (impure decls (after_head t)) (releases_any (after_head t))))
+          (finding "error" name "contract-impure")
+          "")
+        (clause_lines decls name rest)))))
+
+  (fn outside_ensures ((ts Trees)) Bool
+    (uses Alloc)
+    (match ts
+      ((NoTrees) false)
+      ((Trees t more) (or (if (head_is t "ensures") false (mentions (Trees t (NoTrees)) "result")) (outside_ensures more)))))
+
+  (fn contract_lines ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (if (head_is h "fn")
+      (match (after_head h)
+        ((NoTrees) "")
+        ((Trees n rest) (match rest
+          ((NoTrees) "")
+          ((Trees params more) (let name (declared_name n)
+            (concat (clause_lines decls name more)
+                    (if (outside_ensures more) (finding "error" name "result-outside-ensures") "")))))))
+      ""))
+
+  (fn tree_lines ((decls Env) (h Tree)) Str
+    (uses Alloc)
+    (concat (concat (concat (naming h) (main_params h)) (concat (labelled_newtype h) (foreign_lines h)))
+            (concat (concat (declassify_lines decls h) (test_lines decls h)) (contract_lines decls h))))
+
+  ; --- the contracts ---------------------------------------------------------------------------
+  ; verify says "name: rule rule " for each function, or "name: ok".
+  (fn proof_lines ((ls Pieces)) Str
+    (uses Alloc)
+    (match ls
+      ((NoPieces) "")
+      ((Pieces h rest) (concat (proof_line (cut_at h 32)) (proof_lines rest)))))
+
+  ; "name: not read yet: why" is the verifier saying it does not read the function yet.
+  (fn proof_line ((ws Pieces)) Str
+    (uses Alloc)
+    (match ws
+      ((NoPieces) "")
+      ((Pieces first rules) (match rules
+        ((NoPieces) "")
+        ((Pieces w more) (if (str.eq (text w) "not")
+          (concat "unread " (concat (before_colon first) " the verifier does not read it yet\n"))
+          (rule_lines (before_colon first) rules)))))))
+
+  (fn rule_lines ((name Str) (ws Pieces)) Str
+    (uses Alloc)
+    (match ws
+      ((NoPieces) "")
+      ((Pieces w rest) (concat
+        (if (str.eq (text w) "ok") "" (finding "error" name (text w)))
+        (rule_lines name rest)))))
+
+  ; --- the verdict -----------------------------------------------------------------------------
+  (fn count_kind ((ls Pieces) (kind Str)) Int
+    (uses Alloc)
+    (match ls
+      ((NoPieces) 0)
+      ((Pieces h rest) (+ (match (cut_at h 32) ((NoPieces) 0) ((Pieces k more) (if (str.eq (text k) kind) 1 0)))
+                          (count_kind rest kind)))))
+
+  (fn verdict ((found Str)) Str
+    (uses Alloc)
+    (let ls (cut_at (str.encode found) 10)
+      (if (< 0 (count_kind ls "error"))
+        "reject"
+        (if (< 0 (count_kind ls "unread")) "unread" (if (< 0 (count_kind ls "warning")) "warn" "accept")))))
+
+  (fn imports ((items Trees)) Bool
+    (uses Alloc)
+    (match items ((NoTrees) false) ((Trees h rest) (or (head_is h "use") (imports rest)))))
+
+  ; A `(use module.name ...)` names what it wants by a word, which the codebase could rebind
+  ; tomorrow; a dependency is a hash, written as text.
+  (fn unpinned ((items Trees)) Bool
+    (uses Alloc)
+    (match items
+      ((NoTrees) false)
+      ((Trees h rest) (or (and (head_is h "use") (match (after_head h) ((NoTrees) false) ((Trees r more) (not (str.eq (word_of r) "")))))
+                          (unpinned rest)))))
+
+  (fn findings ((profile Str) (src Str)) Str
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (finding "error" "module" "syntax"))
+      ((Ok tree) (let items (module_items tree)
+        (if (unpinned items)
+          (finding "error" "module" "unpinned-import")
+          (if (imports items)
+          "unread module an import is resolved against the codebase, which is not read here\n"
+          (match (env_with_prelude src)
+            ((Err f) (finding "error" "module" (get f op)))
+            ((Ok decls) (let found (concat (concat (items_lines decls (records_of items) items) (redactions items (NoNames)))
+                                           (items_findings profile decls (fn_items items (fn_names items)) items))
+              (if (< 0 (count_kind (cut_at (str.encode found) 10) "error"))
+                found
+                (concat found (proof_lines (cut_at (str.encode (proved src)) 10)))))))))))))
+
+  ; Every finding, then the verdict on a line of its own.
+  (fn check_source ((profile Str) (src Str)) Str
+    (uses Alloc)
+    (let found (findings profile src) (concat found (verdict found))))
+
+  (test "a module with nothing wrong is accepted" (str.eq "accept" (check_source "host" "(module m (fn f ((n Int)) Int n))")))
+
+  (test "a body that does not fit its type is refused, by name and rule"
+    (str.eq "error f type-mismatch\nreject" (check_source "host" "(module m (fn f ((n Int)) Str n))")))
+
+  (test "an unproven contract is refused once the rest passes"
+    (str.eq "error f unproven-postcondition\nreject" (check_source "host" "(module m (fn f ((n Int)) Int (ensures (<= 0 result)) (+ n 1)))")))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (check_source "host" "(module m (fn f ((n Int)) Str n))"))))

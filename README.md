@@ -46,13 +46,30 @@ a WebAssembly runtime and nothing of ours. [seed/SHA256](seed/SHA256) records th
 hashes, and witness-bootstrap's `witness bootstrap` makes the same files from the same
 commit of `compiler/`.
 
+## Check
+
+```bash
+./check.sh program.wtn          # or: ./check.sh program.wtn mcu
+```
+
+The checker is [compiler/check.wtn](compiler/check.wtn), compiled into the seed with the rest
+of the compiler: every pass of the front end over the module, in the reference's order (the
+contracts are proved only once the rest passes), a line per finding, `error NAME RULE`, and a
+verdict, `accept`, `warn`, `reject` or `unread`, which is also the exit status (0, 0, 1, 3).
+On every conformance case it says what the manifest says, verdict and the exact rules among
+the errors and the warnings, and on every example what the reference says (witness-bootstrap's
+`tests/test_check_wtn.py`, and `tests/test_selfhost.py` for the compiled one). Where it is
+weaker than the reference, the source says so: a function's first fault is the only one
+reported, `needless-declassify` for a value is only given when its type can be told from the
+parameters, and the warning for a redaction no log field reaches is not given.
+
 ## What still needs witness-bootstrap
 
 Stated plainly, so nothing here claims more than it does:
 
-- **Checking a program.** The Witness compiler reads and types what it compiles, and its
-  verifier proves contracts, termination and resource bounds for 186 of the corpus's 197
-  functions, but it is not yet the whole checker. Programs are checked by the reference.
+- **Checking a program that imports.** `./check.sh` reads everything else (above), but a
+  `(use "wtn:..." ...)` is resolved against the codebase, which is the reference's, so a
+  program that imports is `unread`, never accepted.
 - **Building from `compiler/`.** Its modules name each other by content hash, and the
   codebase that resolves those hashes, and puts the modules into the one text in
   `seed/compiler.wtn`, is still the reference's (`witness store`, `witness bootstrap`). A

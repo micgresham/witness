@@ -49,7 +49,7 @@
     (uses Alloc)
     (match (bytes.decode b)
       ((Ok s) (Ok s))
-      ((Err e) (Err (fault "type" "a name is not text")))))
+      ((Err e) (Err (fault "syntax" "a name is not text")))))
 
   ; --- reading a type -----------------------------------------------------
   ; `Int` is a leaf; `(Option Int)` is a node whose first item names the type and whose
@@ -60,7 +60,7 @@
     (uses Alloc)
     (match t
       ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok base) (Ok (plain base)))))
-      ((Node items) (match items ((NoTrees) (Err (fault "type" "a type is not an empty list"))) ((Trees head rest) (match head ((Node inner) (Err (fault "type" "a type's name is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok base) (type_form base rest))))))))))
+      ((Node items) (match items ((NoTrees) (Err (fault "syntax" "a type is not an empty list"))) ((Trees head rest) (match head ((Node inner) (Err (fault "syntax" "a type's name is a name, not a list"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok base) (type_form base rest))))))))))
 
   ; What follows the head of a list type. Two heads are not type names: `label` and
   ; `tensor` are the language's spellings of a label set and a shape, and they are read
@@ -82,13 +82,13 @@
   (fn label_walk ((rest Trees) (acc Names)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a label form needs a type at the end")))
-      ((Trees h more) (match more ((NoTrees) (match acc ((NoNames) (Err (fault "type" "a label form needs a label before its type"))) ((Names first others) (match (type_of h) ((Err e) (Err e)) ((Ok ty) (Ok (ty_plus ty acc))))))) ((Trees next after) (match (label_name h) ((Err e) (Err e)) ((Ok name) (label_walk more (names_union (Names name (NoNames)) acc)))))))))
+      ((NoTrees) (Err (fault "syntax" "a label form needs a type at the end")))
+      ((Trees h more) (match more ((NoTrees) (match acc ((NoNames) (Err (fault "syntax" "a label form needs a label before its type"))) ((Names first others) (match (type_of h) ((Err e) (Err e)) ((Ok ty) (Ok (ty_plus ty acc))))))) ((Trees next after) (match (label_name h) ((Err e) (Err e)) ((Ok name) (label_walk more (names_union (Names name (NoNames)) acc)))))))))
 
   (fn label_name ((t Tree)) (Result Str Fault)
     (uses Alloc)
     (match t
-      ((Node inner) (Err (fault "type" "a label is a name, not a list")))
+      ((Node inner) (Err (fault "syntax" "a label is a name, not a list")))
       ((Leaf text quoted) (named text))))
 
   ; `(tensor F (axis size) ...)`: an element format and at least one named axis, which
@@ -96,28 +96,28 @@
   (fn tensor_type ((rest Trees)) (Result Ty Fault)
     (uses Alloc)
     (match rest
-      ((NoTrees) (Err (fault "type" "a tensor needs an element format and axes")))
-      ((Trees f axes) (match f ((Node inner) (Err (fault "type" "a tensor's element format is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok format) (match (axes_of axes) ((Err e) (Err e)) ((Ok dims) (match dims ((NoDims) (Err (fault "type" "a tensor needs at least one axis"))) ((Dims axis size more) (Ok (make Ty (base "Tensor") (labels (NoNames)) (args (Tys (plain format) (NoTys))) (dims dims))))))))))))))
+      ((NoTrees) (Err (fault "syntax" "a tensor needs an element format and axes")))
+      ((Trees f axes) (match f ((Node inner) (Err (fault "syntax" "a tensor's element format is a name"))) ((Leaf text quoted) (match (named text) ((Err e) (Err e)) ((Ok format) (match (axes_of axes) ((Err e) (Err e)) ((Ok dims) (match dims ((NoDims) (Err (fault "syntax" "a tensor needs at least one axis"))) ((Dims axis size more) (Ok (make Ty (base "Tensor") (labels (NoNames)) (args (Tys (plain format) (NoTys))) (dims dims))))))))))))))
 
   (fn axes_of ((ts Trees)) (Result Dims Fault)
     (uses Alloc)
     (match ts
       ((NoTrees) (Ok (NoDims)))
-      ((Trees h more) (match (axis_of h) ((Err e) (Err e)) ((Ok one) (match (axes_of more) ((Err e) (Err e)) ((Ok others) (match one ((NoDims) (Err (fault "type" "an axis is (name size)"))) ((Dims name size none) (if (dims_has others name) (Err (fault "type" "an axis name appears twice; axes are named so they cannot be confused")) (Ok (Dims name size others))))))))))))
+      ((Trees h more) (match (axis_of h) ((Err e) (Err e)) ((Ok one) (match (axes_of more) ((Err e) (Err e)) ((Ok others) (match one ((NoDims) (Err (fault "syntax" "an axis is (name size)"))) ((Dims name size none) (if (dims_has others name) (Err (fault "syntax" "an axis name appears twice; axes are named so they cannot be confused")) (Ok (Dims name size others))))))))))))
 
   ; One axis, as a `Dims` of length one so that every outcome is a `Result` of the same
   ; type; the caller takes it apart again.
   (fn axis_of ((t Tree)) (Result Dims Fault)
     (uses Alloc)
     (match (node_items t)
-      ((None) (Err (fault "type" "an axis is (name size)")))
-      ((Some items) (match items ((NoTrees) (Err (fault "type" "an axis is (name size)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "type" "an axis is (name size)"))) ((Trees s tail) (if (trees_empty tail) (axis_named n s) (Err (fault "type" "an axis is (name size)"))))))))))
+      ((None) (Err (fault "syntax" "an axis is (name size)")))
+      ((Some items) (match items ((NoTrees) (Err (fault "syntax" "an axis is (name size)"))) ((Trees n rest) (match rest ((NoTrees) (Err (fault "syntax" "an axis is (name size)"))) ((Trees s tail) (if (trees_empty tail) (axis_named n s) (Err (fault "syntax" "an axis is (name size)"))))))))))
 
   (fn axis_named ((n Tree) (s Tree)) (Result Dims Fault)
     (uses Alloc)
     (match (leaf_text n)
-      ((None) (Err (fault "type" "an axis name is a name")))
-      ((Some name) (match (leaf_text s) ((None) (Err (fault "type" "an axis size is a number"))) ((Some digits_) (match (named name) ((Err e) (Err e)) ((Ok axis) (match (digits digits_ 0 (unwrap (bytes.len digits_)) 0) ((None) (Err (fault "type" "an axis size is a whole number"))) ((Some size) (if (<= 1 size) (Ok (Dims axis size (NoDims))) (Err (fault "type" "an axis has a size of at least 1"))))))))))))
+      ((None) (Err (fault "syntax" "an axis name is a name")))
+      ((Some name) (match (leaf_text s) ((None) (Err (fault "syntax" "an axis size is a number"))) ((Some digits_) (match (named name) ((Err e) (Err e)) ((Ok axis) (match (digits digits_ 0 (unwrap (bytes.len digits_)) 0) ((None) (Err (fault "syntax" "an axis size is a whole number"))) ((Some size) (if (<= 1 size) (Ok (Dims axis size (NoDims))) (Err (fault "syntax" "an axis has a size of at least 1"))))))))))))
 
   ; A whole number out of its decimal digits. `left` is how many bytes remain to be read,
   ; which is what makes it end.
@@ -160,7 +160,7 @@
     (uses Alloc)
     (match (type_of wanted)
       ((Err e) (Err e))
-      ((Ok place) (if (ty_fits given place) (Ok unit) (Err (fault "type" "a value does not fit where it is put"))))))
+      ((Ok place) (if (ty_fits given place) (Ok unit) (Err (fault "type-mismatch" "a value does not fit where it is put"))))))
 
   ; --- showing one --------------------------------------------------------
   ; A type as it is written, with its labels after it as `@L` and a tensor's axes as the
