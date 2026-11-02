@@ -10,7 +10,7 @@
 (module driver
   (use "wtn:f0a7631545c378e8397a4dc5cec1f8766ded854fa9f772b3eb384d762a5b7fff" as check_source)
 
-  (use "wtn:b4bc62c55ab4f3133d7e7d47126a2afed571276b7e455872ad1fd048d70408f1" as flattened)
+  (use "wtn:28f6248f6071624ab0cba044e105a0bbc6966ccc14085fb75bdb5e6eb7101672" as flattened)
 
   (use "wtn:04852b0bc4bbba2ffbb78275cfe77192e76f28ec12528c975b2558092906f0f9" as arm_elf_of)
 
@@ -44,11 +44,15 @@
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
-  (use "wtn:39da186bd6f9f2f88102709f450f2ede2d162e918f037244e795094aa258be8a" as module_ir)
+  (use "wtn:357eb9753ce30ac21abf0ab438f0eac9de3d0fb799a1af49f5e5873e05534878" as module_ir)
+
+  ; The bare-metal targets, whose memory is bounded before the program runs, keep an `Int` that
+  ; is a word and traps on overflow (compiler/ir.wtn's `with_prelude_words`).
+  (use "wtn:d3587d61f3f048827d80d51f57e51448733970253bb678f35c3b58a878a82fbf" as module_ir_words)
 
   (use "wtn:dc55715dcac24a1489129d0f2e28460470bbabf0de7086cfa46e5806d3435145" as elf_of)
 
-  (use "wtn:81d4b5c4fde86af3dde51c57f8b6d6eeb2dfa4eb3010aac4d1e4625b227c034b" as compile_ir)
+  (use "wtn:0a3acd4a2cfe0fda39c803c060c0c04c0a730d065290aadb5f82b3246a15f60e" as compile_ir)
 
   (fn drive ((src Str)) Bytes
     (uses Alloc)
@@ -109,34 +113,34 @@
   ; The same source as a Cortex-M (Thumb-2) image.
   (fn drive_thumb ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (thumb_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
   ; The same source as an ESP32 (Xtensa LX6) image.
   (fn drive_xtensa ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (xtensa_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
   ; The same source as an ESP32-S3 (Xtensa LX7) image.
   (fn drive_xtensa_s3 ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (xtensa_s3_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
   ; The same source as an ESP32-P4 (RISC-V, bare metal) image, and its bounded build.
   (fn drive_esp32p4 ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (esp32p4_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
   (fn drive_esp32p4_bounded ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (esp32p4_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
@@ -145,13 +149,13 @@
   ; The same as an ESP32-S31 image: the P4's backend, at the S31's addresses.
   (fn drive_esp32s31 ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (esp32s31_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
 
   (fn drive_esp32s31_bounded ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (esp32s31_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
@@ -162,7 +166,7 @@
   ; the room it has.
   (fn drive_thumb_bounded ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (thumb_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
@@ -181,7 +185,7 @@
   ; if its stacks and heap fit the room its layout has (compiler/stack.wtn).
   (fn drive_xtensa_bounded ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (esp32_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
@@ -189,7 +193,7 @@
 
   (fn drive_xtensa_s3_bounded ((src Str)) Bytes
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (str.encode (concat "error: " (get f why))))
       ((Ok m) (match (checked_bounds_in m "main" src (esp32s3_room))
         ((Err f) (str.encode (concat "error: " (get f why))))
@@ -209,7 +213,7 @@
   ; the machine stack's, the most the heap can grow by, and where it starts.
   (fn bounds_text ((src Str) (chip Str)) Str
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (concat "error: " (get f why)))
       ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (if (str.eq chip "esp32s31") (esp32s31_room) (thumb_room))))))
         ((Err f) (concat "error: " (get f why)))

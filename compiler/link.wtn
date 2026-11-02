@@ -479,16 +479,20 @@
     (uses Alloc)
     (match ts ((NoTrees) (lit "")) ((Trees h rest) (bytes.concat (lit "\n  ") (bytes.concat (text_of h 100000) (lines_of rest))))))
 
-  ; What the runtime library adds: its definitions, not its tests or `main`.
-  (fn library ((items Trees)) Trees
+  ; What the runtime library adds: its definitions, not its tests or `main`, and not one the
+  ; module already has by name -- a library function can be the same definition as one of the
+  ; module's, and then resolution has spliced it in under the library's name already.
+  (fn library ((items Trees) (have Decls)) Trees
     (uses Alloc)
     (match items
       ((NoTrees) items)
-      ((Trees h rest) (if (or (or (is_use h) (is_test h)) (is (decl_name h) "main")) (library rest) (Trees h (library rest))))))
+      ((Trees h rest) (if (or (or (is_use h) (is_test h)) (or (is (decl_name h) "main") (has_decl have (decl_name h)))) (library rest have) (Trees h (library rest have))))))
 
-  (fn library_of ((ms Mods)) Trees
+  (fn has_decl ((m Decls) (k Bytes)) Bool (uses Alloc) (< 0 (size (head_word (look_decl m k)))))
+
+  (fn library_of ((ms Mods) (have Decls)) Trees
     (uses Alloc)
-    (match ms ((NoMods) (NoTrees)) ((Mods d rest) (if (is (get d name) "rtlib") (library (get d items)) (library_of rest)))))
+    (match ms ((NoMods) (NoTrees)) ((Mods d rest) (if (is (get d name) "rtlib") (library (get d items) have) (library_of rest have)))))
 
   (fn flattened_bytes ((src Bytes)) Bytes
     (uses Alloc)
@@ -499,7 +503,7 @@
           (bytes.concat (lit "error unresolved ") (bytes.concat (get l missing) (lit "\n")))
           (match (get l mods)
             ((NoMods) (lit "error no modules\n"))
-            ((Mods last others) (bytes.concat (lit "(module ") (bytes.concat (get last name) (bytes.concat (lines_of (joined (get last items) (library_of others))) (lit "\n)\n")))))))))))
+            ((Mods last others) (bytes.concat (lit "(module ") (bytes.concat (get last name) (bytes.concat (lines_of (joined (get last items) (library_of others (get last decls)))) (lit "\n)\n")))))))))))
 
   ; The last of the modules, flattened, with the runtime library after it.
   (fn flattened ((src Str)) Str

@@ -59,6 +59,269 @@
     (requires (<= 0 left))
     (if (or (< d lo) (< hi d)) 2 (rt_utf8_cont b at end left (+ k 1) need 128 191)))
 
+  ; --- numbers too wide for a word ----------------------------------------------------------
+  ; A compiled `Int` is its own word when it lies in -2^62 .. 2^62 - 1, and otherwise the
+  ; address, plus 2^62, of one of these: a byte saying its sign (1 for negative), then its
+  ; magnitude in base 256, least significant byte first, with no zero bytes at the top. The
+  ; lowering (compiler/lower_ir.wtn) does the arithmetic of two small numbers itself, and
+  ; comes here when an operand is not small or the answer is not. So everything here works a
+  ; byte at a time, and every `Int` it computes is small: nothing here comes back here.
+  ;
+  ; A magnitude alone is the same bytes without the sign: `rt_mag_*`.
+  (fn rt_mag_octet ((n Int)) Bytes
+    (uses Alloc)
+    (if (and (<= 0 n) (<= n 255)) (bytes.of (u8.of n)) (bytes.of (u8.of 0))))
+
+  (fn rt_mag_len ((b Bytes)) Int (ensures (<= 0 result)) (unwrap (bytes.len b)))
+
+  (fn rt_mag_cut ((b Bytes) (from Int) (to Int)) Bytes (uses Alloc) (bytes.slice b (Octets from) (Octets to)))
+
+  (fn rt_mag_none () Bytes (uses Alloc) (str.encode ""))
+
+  ; Without the zero bytes at the top.
+  (fn rt_mag_trim ((m Bytes) (k Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= k 0)) (rt_mag_cut m 0 k) (if (= (rt_byte m (- k 1)) 0) (rt_mag_trim m (- k 1) (- left 1)) (rt_mag_cut m 0 k))))
+
+  (fn rt_mag_trimmed ((m Bytes)) Bytes (uses Alloc) (rt_mag_trim m (rt_mag_len m) (+ 1 (rt_mag_len m))))
+
+  ; a + b, from byte `at` with `carry` in.
+  (fn rt_mag_add ((a Bytes) (b Bytes) (at Int) (carry Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (rt_mag_none)
+      (if (and (<= (rt_mag_len a) at) (<= (rt_mag_len b) at))
+        (if (= carry 0) (rt_mag_none) (rt_mag_octet carry))
+        (let s (+ (+ (rt_byte a at) (rt_byte b at)) carry)
+          (bytes.concat (rt_mag_octet (if (< s 256) s (- s 256))) (rt_mag_add a b (+ at 1) (if (< s 256) 0 1) (- left 1)))))))
+
+  ; a - b, where b is no larger.
+  (fn rt_mag_sub ((a Bytes) (b Bytes) (at Int) (borrow Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= (rt_mag_len a) at))
+      (rt_mag_none)
+      (let d (- (- (rt_byte a at) (rt_byte b at)) borrow)
+        (bytes.concat (rt_mag_octet (if (< d 0) (+ d 256) d)) (rt_mag_sub a b (+ at 1) (if (< d 0) 1 0) (- left 1))))))
+
+  ; -1, 0 or 1 as a is below, at or above b; both trimmed.
+  (fn rt_mag_cmp ((a Bytes) (b Bytes)) Int
+    (if (< (rt_mag_len a) (rt_mag_len b)) (- 0 1) (if (< (rt_mag_len b) (rt_mag_len a)) 1 (rt_mag_cmp_from a b (- (rt_mag_len a) 1) (+ 1 (rt_mag_len a))))))
+
+  (fn rt_mag_cmp_from ((a Bytes) (b Bytes) (at Int) (left Int)) Int
+    (if (or (<= left 0) (< at 0))
+      0
+      (let x (rt_byte a at) (let y (rt_byte b at) (if (< x y) (- 0 1) (if (< y x) 1 (rt_mag_cmp_from a b (- at 1) (- left 1))))))))
+
+  ; m times one byte d, plus `carry`.
+  (fn rt_mag_mul_byte ((m Bytes) (d Int) (at Int) (carry Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (rt_mag_none)
+      (if (<= (rt_mag_len m) at)
+        (rt_mag_carried carry (+ 1 left))
+        (let p (+ (* (rt_byte m at) d) carry)
+          (bytes.concat (rt_mag_octet (rt_mag_low p)) (rt_mag_mul_byte m d (+ at 1) (rt_mag_high p) (- left 1)))))))
+
+  ; What is left of a carry, a byte at a time.
+  (fn rt_mag_carried ((carry Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= carry 0)) (rt_mag_none) (bytes.concat (rt_mag_octet (rt_mag_low carry)) (rt_mag_carried (rt_mag_high carry) (- left 1)))))
+
+  ; The low byte of a small non-negative number, and the rest.
+  (fn rt_mag_high ((n Int)) Int (match (num.div n 256) ((None) 0) ((Some q) q)))
+
+  (fn rt_mag_low ((n Int)) Int (- n (* 256 (rt_mag_high n))))
+
+  ; a * b: each byte of b times a, shifted into place.
+  (fn rt_mag_mul ((a Bytes) (b Bytes) (at Int) (zeros Bytes) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= (rt_mag_len b) at))
+      (rt_mag_none)
+      (rt_mag_trimmed (rt_mag_add (bytes.concat zeros (rt_mag_mul_byte a (rt_byte b at) 0 0 (+ 2 (rt_mag_len a))))
+                              (rt_mag_mul a b (+ at 1) (bytes.concat zeros (rt_mag_octet 0)) (- left 1)) 0 0 (+ 2 (+ (rt_mag_len zeros) (+ (rt_mag_len a) (rt_mag_len b))))))))
+
+  ; m divided by a small d: the quotient's bytes from the top down, and the remainder.
+  (record RtDivided (quotient Bytes) (rest Int))
+
+  (fn rt_mag_div_small ((m Bytes) (d Int) (at Int) (r Int) (q Bytes) (left Int)) RtDivided
+    (uses Alloc)
+    (if (or (<= left 0) (< at 0))
+      (make RtDivided (quotient (rt_mag_trimmed q)) (rest r))
+      (let x (+ (* r 256) (rt_byte m at))
+        (let digit (match (num.div x d) ((None) 0) ((Some k) k))
+          (rt_mag_div_small m d (- at 1) (- x (* digit d)) (bytes.concat (rt_mag_octet digit) q) (- left 1))))))
+
+  ; m divided by a magnitude: long division a byte at a time, each quotient byte found by
+  ; halving 0..255.
+  (fn rt_mag_div ((m Bytes) (d Bytes) (at Int) (r Bytes) (q Bytes) (left Int)) RtDivided
+    (uses Alloc)
+    (if (or (<= left 0) (< at 0))
+      (make RtDivided (quotient (rt_mag_trimmed q)) (rest 0))
+      (let x (rt_mag_trimmed (bytes.concat (rt_mag_octet (rt_byte m at)) r))
+        (let digit (rt_mag_digit x d 0 255 9)
+          (rt_mag_div m d (- at 1) (rt_mag_trimmed (rt_mag_sub x (rt_mag_mul_byte d digit 0 0 (+ 2 (rt_mag_len d))) 0 0 (+ 1 (rt_mag_len x))))
+                      (bytes.concat (rt_mag_octet digit) q) (- left 1))))))
+
+  ; The largest k in lo..hi with d * k no larger than x.
+  (fn rt_mag_digit ((x Bytes) (d Bytes) (lo Int) (hi Int) (left Int)) Int
+    (uses Alloc)
+    (if (or (<= left 0) (<= hi lo))
+      lo
+      (let mid (rt_mag_half (+ (+ lo hi) 1))
+        (if (< 0 (rt_mag_cmp (rt_mag_trimmed (rt_mag_mul_byte d mid 0 0 (+ 2 (rt_mag_len d)))) x))
+          (rt_mag_digit x d lo (- mid 1) (- left 1))
+          (rt_mag_digit x d mid hi (- left 1))))))
+
+  (fn rt_mag_half ((n Int)) Int (match (num.div n 2) ((None) 0) ((Some q) q)))
+
+  ; The remainder of a long division: m less d times the quotient.
+  (fn rt_mag_rem ((m Bytes) (d Bytes) (q Bytes)) Bytes
+    (uses Alloc)
+    (rt_mag_trimmed (rt_mag_sub m (rt_mag_trimmed (rt_mag_mul d q 0 (rt_mag_none) (+ 1 (rt_mag_len q)))) 0 0 (+ 1 (rt_mag_len m)))))
+
+  ; --- signed ------------------------------------------------------------------------------
+  (fn rt_big_sign ((b Bytes)) Int (rt_byte b 0))
+
+  (fn rt_big_mag ((b Bytes)) Bytes (uses Alloc) (rt_mag_cut b 1 (rt_mag_len b)))
+
+  ; A sign and a magnitude as a number; zero is never negative.
+  (fn rt_big_of ((negative Bool) (m Bytes)) Bytes
+    (uses Alloc)
+    (let t (rt_mag_trimmed m) (bytes.concat (rt_mag_octet (if (and negative (< 0 (rt_mag_len t))) 1 0)) t)))
+
+  (fn rt_big_add ((a Bytes) (b Bytes)) Bytes
+    (uses Alloc)
+    (let ma (rt_big_mag a)
+      (let mb (rt_big_mag b)
+        (if (= (rt_big_sign a) (rt_big_sign b))
+          (rt_big_of (= (rt_big_sign a) 1) (rt_mag_add ma mb 0 0 (+ 2 (+ (rt_mag_len ma) (rt_mag_len mb)))))
+          (if (< (rt_mag_cmp ma mb) 0)
+            (rt_big_of (= (rt_big_sign b) 1) (rt_mag_sub mb ma 0 0 (+ 1 (rt_mag_len mb))))
+            (rt_big_of (= (rt_big_sign a) 1) (rt_mag_sub ma mb 0 0 (+ 1 (rt_mag_len ma)))))))))
+
+  (fn rt_big_negated ((b Bytes)) Bytes (uses Alloc) (rt_big_of (= (rt_big_sign b) 0) (rt_big_mag b)))
+
+  (fn rt_big_sub ((a Bytes) (b Bytes)) Bytes (uses Alloc) (rt_big_add a (rt_big_negated b)))
+
+  (fn rt_big_mul ((a Bytes) (b Bytes)) Bytes
+    (uses Alloc)
+    (rt_big_of (not (= (rt_big_sign a) (rt_big_sign b))) (rt_mag_mul (rt_big_mag a) (rt_big_mag b) 0 (rt_mag_none) (+ 1 (rt_mag_len b)))))
+
+  (fn rt_big_cmp ((a Bytes) (b Bytes)) Int
+    (uses Alloc)
+    (if (< (rt_big_sign a) (rt_big_sign b))
+      1
+      (if (< (rt_big_sign b) (rt_big_sign a))
+        (- 0 1)
+        (let c (rt_mag_cmp (rt_big_mag a) (rt_big_mag b)) (if (= (rt_big_sign a) 1) (- 0 c) c)))))
+
+  ; Rounded down, as the interpreter's `//`: a quotient below zero with something left over
+  ; is one further down.
+  (fn rt_big_div ((a Bytes) (b Bytes)) (Option Bytes)
+    (uses Alloc)
+    (let mb (rt_big_mag b)
+      (if (= (rt_mag_len mb) 0)
+        (None)
+        (let ma (rt_big_mag a)
+          (let q (get (rt_mag_div ma mb (- (rt_mag_len ma) 1) (rt_mag_none) (rt_mag_none) (+ 1 (rt_mag_len ma))) quotient)
+            (let negative (not (= (rt_big_sign a) (rt_big_sign b)))
+              (let exact (= (rt_mag_len (rt_mag_rem ma mb q)) 0)
+                (Some (rt_big_of negative (if (or exact (not negative)) q (rt_mag_add q (rt_mag_octet 1) 0 0 (+ 2 (rt_mag_len q)))))))))))))
+
+  (fn rt_mag_digits ((m Bytes) (out Str) (left Int)) Str
+    (uses Alloc)
+    (if (or (<= left 0) (= (rt_mag_len m) 0))
+      out
+      (let d (rt_mag_div_small m 10 (- (rt_mag_len m) 1) 0 (rt_mag_none) (+ 1 (rt_mag_len m)))
+        (rt_mag_digits (get d quotient) (concat (num.to_str (get d rest)) out) (- left 1)))))
+
+  (fn rt_big_to_str ((b Bytes)) Str
+    (uses Alloc)
+    (let m (rt_big_mag b)
+      (if (= (rt_mag_len m) 0) "0" (concat (if (= (rt_big_sign b) 1) "-" "") (rt_mag_digits m "" (* 3 (+ 1 (rt_mag_len m))))))))
+
+  ; --- to and from a word -------------------------------------------------------------------
+  (fn rt_mag_word_bytes ((w U64) (k Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= 8 k)) (rt_mag_none) (bytes.concat (rt_mag_octet (int.of (bit.and (bit.shr w (* 8 k)) (u64.of 255)))) (rt_mag_word_bytes w (+ k 1) (- left 1)))))
+
+  (fn rt_big_of_u64 ((w U64)) Bytes (uses Alloc) (rt_big_of false (rt_mag_word_bytes w 0 9)))
+
+  ; A negative word's magnitude is one more than the complement's: -(w + 1) does not overflow.
+  (fn rt_big_of_i64 ((w I64)) Bytes
+    (uses Alloc)
+    (if (<= (i64.of 0) w)
+      (rt_big_of false (rt_mag_word_bytes (rt_mag_u64_bits w) 0 9))
+      (rt_big_of true (rt_mag_add (rt_mag_trimmed (rt_mag_word_bytes (rt_mag_u64_bits (wrap.sub (i64.of -1) w)) 0 9)) (rt_mag_octet 1) 0 0 10))))
+
+  ; A non-negative I64's bits as a U64, a byte at a time.
+  (fn rt_mag_u64_bits ((w I64)) U64 (rt_mag_u64_from (bit.and w (i64.of 9223372036854775807)) 0 (u64.of 0) 9))
+
+  (fn rt_mag_u64_from ((w I64) (k Int) (acc U64) (left Int)) U64
+    (if (or (<= left 0) (<= 8 k))
+      acc
+      (let byte (int.of (bit.and (bit.shr w (* 8 k)) (i64.of 255)))
+        (rt_mag_u64_from w (+ k 1) (bit.or acc (bit.shl (if (and (<= 0 byte) (<= byte 255)) (u64.of byte) (u64.of 0)) (* 8 k))) (- left 1)))))
+
+  (fn rt_mag_u64 ((m Bytes) (k Int) (acc U64) (left Int)) U64
+    (if (or (<= left 0) (<= 8 k))
+      acc
+      (let byte (rt_byte m k)
+        (rt_mag_u64 m (+ k 1) (bit.or acc (bit.shl (if (and (<= 0 byte) (<= byte 255)) (u64.of byte) (u64.of 0)) (* 8 k))) (- left 1)))))
+
+  (fn rt_mag_i64 ((m Bytes) (k Int) (acc I64) (left Int)) I64
+    (if (or (<= left 0) (<= 8 k))
+      acc
+      (let byte (rt_byte m k)
+        (rt_mag_i64 m (+ k 1) (bit.or acc (bit.shl (if (and (<= 0 byte) (<= byte 255)) (i64.of byte) (i64.of 0)) (* 8 k))) (- left 1)))))
+
+  ; The checker has proved the number fits the width, so only its low 64 bits are read.
+  (fn rt_big_to_u64 ((b Bytes)) U64 (uses Alloc) (rt_mag_u64 (rt_big_mag b) 0 (u64.of 0) 9))
+
+  (fn rt_big_to_i64 ((b Bytes)) I64
+    (uses Alloc)
+    (let w (rt_mag_i64 (rt_big_mag b) 0 (i64.of 0) 9) (if (= (rt_big_sign b) 1) (wrap.sub (i64.of 0) w) w)))
+
+  ; --- to and from a small number -----------------------------------------------------------
+  (fn rt_mag_small_bytes ((n Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (or (<= left 0) (<= n 0)) (rt_mag_none) (bytes.concat (rt_mag_octet (rt_mag_low n)) (rt_mag_small_bytes (rt_mag_high n) (- left 1)))))
+
+  ; A negative number's magnitude is one more than -(n + 1), which is small even for -2^62.
+  (fn rt_big_of_small ((n Int)) Bytes
+    (uses Alloc)
+    (if (< n 0)
+      (rt_big_of true (rt_mag_add (rt_mag_small_bytes (- (- 0 1) n) 9) (rt_mag_octet 1) 0 0 10))
+      (rt_big_of false (rt_mag_small_bytes n 9))))
+
+  ; Small is -2^62 .. 2^62 - 1: seven bytes, or eight with the top one below 64, or exactly
+  ; 2^62 when negative.
+  (fn rt_big_is_small ((b Bytes)) Bool
+    (uses Alloc)
+    (let m (rt_big_mag b)
+      (if (< (rt_mag_len m) 8)
+        true
+        (if (< 8 (rt_mag_len m))
+          false
+          (or (< (rt_byte m 7) 64) (and (= (rt_big_sign b) 1) (and (= (rt_byte m 7) 64) (rt_mag_lower_zero m 0 7))))))))
+
+  (fn rt_mag_lower_zero ((m Bytes) (k Int) (left Int)) Bool
+    (if (or (<= left 0) (<= 7 k)) true (and (= (rt_byte m k) 0) (rt_mag_lower_zero m (+ k 1) (- left 1)))))
+
+  ; Its value, which is small. -2^62 is built from below, as -(2^62 - 1) - 1.
+
+  (fn rt_big_small_value ((b Bytes)) Int
+    (uses Alloc)
+    (let m (rt_big_mag b)
+      (if (= (rt_big_sign b) 0)
+        (rt_mag_small_up m)
+        (- (- 0 (rt_mag_small_up (rt_mag_trimmed (rt_mag_sub m (rt_mag_octet 1) 0 0 (+ 1 (rt_mag_len m)))))) 1))))
+
+  (fn rt_mag_small_up ((m Bytes)) Int (rt_mag_from m (- (rt_mag_len m) 1) 0 9))
+
+  (fn rt_mag_from ((m Bytes) (k Int) (acc Int) (left Int)) Int
+    (if (or (<= left 0) (< k 0)) acc (rt_mag_from m (- k 1) (+ (* acc 256) (rt_byte m k)) (- left 1))))
+
   (fn rt_reason ((code Int)) Str
     (if (= code 1)
       "invalid start byte"

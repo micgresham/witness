@@ -135,7 +135,15 @@
 
   (fn index_release () U32 (u32.of 14))
 
-  (fn first_user () U32 (u32.of 15))
+  ; An `Int`'s arithmetic when both are small and so is the answer, and otherwise `int_slow`:
+  ; see `small_body`.
+  (fn index_iadd () U32 (u32.of 15))
+
+  (fn index_isub () U32 (u32.of 16))
+
+  (fn index_imul () U32 (u32.of 17))
+
+  (fn first_user () U32 (u32.of 18))
 
   ; --- small constructors ---------------------------------------------------------------
   (fn lget ((i U32)) Ins (local_get i))
@@ -252,15 +260,20 @@
           (cat (rt_local (u32.of 3)) (cat (one (i64_eqz)) (cat (rt_when (make_fresh)) (make_header))))))))))))
 
   ; locals: 0 block
+  ; A block is counted when it is on the heap: at or above its base, and below 2^32, which no
+  ; address in a 32-bit memory reaches -- so a wide `Int` (from 2^62 up) is never mistaken for one.
+  (fn counted () Inss
+    (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 4294967296)) (cat (one (i64_lt_u_op)) (one (i32_and))))))
+
   (fn retain_body ((base I64)) Inss
-    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u))
+    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u)) (cat (counted)
       (cat (rt_when (rt_store (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (one (i64_sub))))
                           (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (cat (one (i64_sub)) (cat (rt_load (u32.of 0)) (cat (rt_num (i64.of 1)) (rt_plus))))))))
-        (rt_local (u32.of 0)))))))
+        (rt_local (u32.of 0))))))))
 
   ; locals: 0 block, 1 count, 2 meta, 3 index, 4 mask, 5 table, 6 slot
   (fn release_body ((base I64)) Inss
-    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u)) (cat (rt_when (release_counted)) (rt_num (i64.of 0)))))))
+    (cat (rt_local (u32.of 0)) (cat (rt_num base) (cat (one (i64_ge_u)) (cat (counted) (cat (rt_when (release_counted)) (rt_num (i64.of 0))))))))
 
   (fn release_counted () Inss
     (cat (rt_local (u32.of 0)) (cat (rt_num (i64.of 16)) (cat (one (i64_sub)) (cat (rt_load (u32.of 0)) (cat (rt_num (i64.of 1)) (cat (one (i64_sub))
@@ -415,6 +428,38 @@
         (cat (one (WIf false (cat (trap_if (five (lget (u32.of 2)) (lget (u32.of 0)) (i64_div_s) (lget (u32.of 1)) (i64_ne))) (NoInss)) (NoInss)))
           (one (lget (u32.of 2)))))))
 
+  ; --- iadd, isub, imul: an `Int` that fits ---------------------------------------------------------------
+  ; A compiled `Int` is its own word from -2^62 to 2^62 - 1, and otherwise 2^62 plus the address
+  ; of the bytes that hold it (compiler/rtlib.wtn), so a word from 2^62 up is one of those. When
+  ; both operands are small and so is the answer, these give the answer; otherwise `int_slow`,
+  ; -2^63, which no `Int` is, and the lowering then calls the program's own functions for the
+  ; wide arithmetic. Two small numbers cannot overflow a word when added or subtracted; a
+  ; product is checked by dividing back. locals: 0 a, 1 b, 2 answer.
+  (fn int_big () I64 (i64.of 4611686018427387904))
+
+  (fn int_slow () I64 (wrap.sub (i64.of -9223372036854775807) (i64.of 1)))
+
+  (fn both_small () Inss
+    (cat (five (lget (u32.of 0)) (lit (int_big)) (i64_lt_s) (lget (u32.of 1)) (lit (int_big))) (two (i64_lt_s) (i32_and))))
+
+  ; The answer in local 2, if it is small.
+  (fn small_answer () Inss
+    (cat (five (lget (u32.of 2)) (lit (int_big)) (i64_add) (lit (int_slow)) (i64_lt_u_op))
+      (one (WIf true (one (lget (u32.of 2))) (one (lit (int_slow)))))))
+
+  (fn small_body ((op Ins)) Inss
+    (cat (both_small) (one (WIf true (cat (four (lget (u32.of 0)) (lget (u32.of 1)) op (lset (u32.of 2))) (small_answer)) (one (lit (int_slow)))))))
+
+  (fn imul_body () Inss
+    (cat (both_small)
+      (one (WIf true
+        (cat (two (lget (u32.of 0)) (i64_eqz))
+          (one (WIf true (one (lit (i64.of 0)))
+            (cat (four (lget (u32.of 0)) (lget (u32.of 1)) (i64_mul) (lset (u32.of 2)))
+              (cat (five (lget (u32.of 2)) (lget (u32.of 0)) (i64_div_s) (lget (u32.of 1)) (i64_ne))
+                (one (WIf true (one (lit (int_slow))) (small_answer))))))))
+        (one (lit (int_slow)))))))
+
   ; --- div(a, b, unsigned) -----------------------------------------------------------------------------------
   ; `num.div`: nothing on a zero divisor, otherwise `(Some quotient)` rounded down, as the
   ; interpreter's `//` does. locals: 0 a, 1 b, 2 unsigned, 3 quotient, 4 remainder, 5 block.
@@ -491,7 +536,10 @@
                             (Funcs (function "rt_make" (u32.of 2) (u32.of 4) (make_body) false)
                               (Funcs (function "rt_retain" (u32.of 1) (u32.of 0) (retain_body base) false)
                                 (Funcs (function "rt_release" (u32.of 1) (u32.of 6) (release_body base) false)
-                                  (NoFuncs)))))))))))))))))
+                                  (Funcs (function "rt_iadd" (u32.of 2) (u32.of 1) (small_body (i64_add)) false)
+                                    (Funcs (function "rt_isub" (u32.of 2) (u32.of 1) (small_body (i64_sub)) false)
+                                      (Funcs (function "rt_imul" (u32.of 2) (u32.of 1) (imul_body) false)
+                                        (NoFuncs))))))))))))))))))))
 
   ; --- a module of nothing but the runtime, for the tests -------------------------------------------
   ; Every function exported, so a test can call them; `print` is the one import.

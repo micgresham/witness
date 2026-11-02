@@ -101,8 +101,6 @@
     (uses Alloc)
     (match ms ((NoMods) out) ((Mods d rest) (index_of rest (indexed (get d own) (get d name) out)))))
 
-  (fn held ((ms Mods) (h Bytes)) Bool (uses Alloc) (match ms ((NoMods) false) ((Mods d rest) (or (holds (get d all) h) (held rest h)))))
-
   (fn module_named ((ms Mods) (name Bytes)) (Option Done)
     (match ms ((NoMods) (None)) ((Mods d rest) (if (bytes.eq (get d name) name) (Some d) (module_named rest name)))))
 
@@ -116,9 +114,15 @@
           (match (module_named ms (slice was 0 space)) ((None) (lit "")) ((Some d) (look (get d refs) (slice was (+ space 1) (size was)))))))))
 
   ; --- the text, re-pinned ------------------------------------------------------------------
-  ; Every `(use "wtn:...` from `i` on: kept if the hash is held, given its new hash if it was
-  ; something, and kept as it is if not, for resolution to report.
-  (fn repinned ((t Bytes) (i Int) (old Map) (ms Mods) (left Int)) Bytes
+  ; Every `(use "wtn:...` from `i` on: a pin that is as it was committed -- the same name for the
+  ; same hash in this module before -- is given the hash its name has now; one written or changed
+  ; since is the author's and is kept as it is, as is one the old modules do not know.
+  ;
+  ; It has to be the name and the module together. Two definitions can be the same and so one
+  ; hash: `(u32.of 15)` under two names, say, one of them changed since. A committed pin to the
+  ; changed one follows its name to the new hash, though the old one is still held by the other;
+  ; and a new pin to the other, written with the old hash, is not taken for the committed one.
+  (fn repinned ((t Bytes) (i Int) (old Map) (ms Mods) (before Map) (left Int)) Bytes
     (uses Alloc)
     (if (<= left 0)
       (slice t i (size t))
@@ -126,37 +130,65 @@
         (if (< at 0)
           (slice t i (size t))
           (let h (slice t (+ at 5) (+ at 75))
-            (let fresh (if (held ms h) h (now_called old ms h))
-              (glue (glue (slice t i (+ at 5)) (if (= (size fresh) 0) h fresh)) (repinned t (+ at 75) old ms (- left 1)))))))))
+            (let was (look before (alias_at t (+ at 75)))
+              (let fresh (if (bytes.eq was h) (now_called old ms h) (lit ""))
+                (glue (glue (slice t i (+ at 5)) (if (= (size fresh) 0) h fresh)) (repinned t (+ at 75) old ms before (- left 1))))))))))
+
+  ; The local name after a pin's hash: past the spaces, `as`, and the spaces after it.
+  (fn alias_at ((t Bytes) (i Int)) Bytes
+    (uses Alloc)
+    (let a (spaces_past t i (+ 1 (size t)))
+      (let b (spaces_past t (+ a 2) (+ 1 (size t)))
+        (slice t b (word_end t b (+ 1 (size t)))))))
+
+  (fn spaces_past ((t Bytes) (i Int) (left Int)) Int
+    (if (<= left 0) i (let c (octet t i) (if (or (or (= c 32) (= c 10)) (or (= c 9) (= c 13))) (spaces_past t (+ i 1) (- left 1)) i))))
+
+  (fn word_end ((t Bytes) (i Int) (left Int)) Int
+    (if (<= left 0) i (let c (octet t i) (if (or (or (< c 0) (= c 41)) (or (or (= c 32) (= c 10)) (or (= c 9) (= c 13)))) i (word_end t (+ i 1) (- left 1))))))
+
+  ; A module's pins as committed: each local name to its hash, quoted.
+  (fn pins_of ((t Bytes) (i Int) (out Map) (left Int)) Map
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (let at (find t (lit "(use \"wtn:") i (+ 1 (size t)))
+        (if (< at 0) out (pins_of t (+ at 75) (put out (alias_at t (+ at 75)) (slice t (+ at 5) (+ at 75))) (- left 1))))))
+
+  ; The text of `old PATH`, or nothing.
+  (fn old_text ((rs Records) (path Bytes)) Bytes
+    (uses Alloc)
+    (match rs ((NoRecords) (lit "")) ((Records r rest) (if (bytes.eq (header r) (glue (lit "old ") path)) (body r) (old_text rest path)))))
 
   (record Run (mods Mods) (out Bytes) (missing Bytes))
 
   (fn reversed ((ms Mods) (onto Mods)) Mods (match ms ((NoMods) onto) ((Mods h rest) (reversed rest (Mods h onto)))))
 
-  (fn pinned_all ((rs Records) (old Map) (run Run)) Run
+  (fn pinned_all ((rs Records) (all Records) (old Map) (run Run)) Run
     (uses Alloc)
     (match rs
       ((NoRecords) run)
       ((Records r rest) (if (or (is_old r) (< 0 (size (get run missing))))
-        (pinned_all rest old run)
+        (pinned_all rest all old run)
         (let path (slice (header r) 4 (size (header r)))
           (let text (body r)
-            (let fresh (repinned text 0 old (get run mods) (+ 1 (size text)))
+            (let before (old_text all path)
+            (let fresh (repinned text 0 old (get run mods) (pins_of before 0 (Tip) (+ 1 (size before))) (+ 1 (size text)))
               (let tree (tree_of fresh)
                 (let written (past (items_of tree) 2)
                   (let res (resolved written (reversed (get run mods) (NoMods)))
                     (if (< 0 (size (get res missing)))
                       (with run (missing (glue (get res missing) (glue (lit " in ") path))))
-                      (pinned_all rest old
+                      (pinned_all rest all old
                         (make Run (mods (Mods (done_of (word (nth (items_of tree) 1)) (get res items) written) (get run mods)))
                                   (out (if (bytes.eq fresh text) (get run out) (glue (get run out) (glue (glue path (bytes.of (u8.of 0))) (glue fresh (bytes.of (u8.of 0)))))))
-                                  (missing (lit "")))))))))))))))
+                                  (missing (lit ""))))))))))))))))
 
   (fn pinned ((src Str)) Bytes
     (uses Alloc)
     (let rs (split (str.encode src) 0 0 (+ 1 (size (str.encode src))))
       (let old (get (linked (old_trees rs) (make Linked (mods (NoMods)) (missing (lit "")))) mods)
-        (let run (pinned_all rs (index_of (reversed old (NoMods)) (Tip)) (make Run (mods (NoMods)) (out (lit "")) (missing (lit ""))))
+        (let run (pinned_all rs rs (index_of (reversed old (NoMods)) (Tip)) (make Run (mods (NoMods)) (out (lit "")) (missing (lit ""))))
           (if (< 0 (size (get run missing))) (glue (lit "error unresolved ") (glue (get run missing) (lit "\n"))) (get run out))))))
 
   (fn drive_files ((src Str)) Bytes (uses Alloc) (pinned src))
@@ -174,6 +206,20 @@
                  (Records (lit "new b.wtn\n(module b (use \"wtn:3bae204025843a143381e2657ca3740d425796cd35e8e29ebf2accde7fa09f64\" as one) (fn two () Int (one)))") (NoRecords)))
         (let out (pinned (decoded (records (Records (records old) (Records (records new) (NoRecords))))))
           (and (< 0 (size out)) (< (find out (lit "3bae2040") 0 (+ 1 (size out))) 0))))))
+
+  (test "a pin follows its name, though the old hash is still held by another definition"
+    (let old (Records (lit "old a.wtn\n(module a (fn first () Int 15))")
+               (Records (lit "old b.wtn\n(module b (use \"wtn:6dc01a69426c778e94fd4f40dc5b826ce4a6977eda9b40445b9fd43486286e00\" as first) (fn g () Int (first)))") (NoRecords)))
+      (let new (Records (lit "new a.wtn\n(module a (fn other () Int 15) (fn first () Int 18))")
+                 (Records (lit "new b.wtn\n(module b (use \"wtn:6dc01a69426c778e94fd4f40dc5b826ce4a6977eda9b40445b9fd43486286e00\" as first) (fn g () Int (first)))") (NoRecords)))
+        (let out (pinned (decoded (records (Records (records old) (Records (records new) (NoRecords))))))
+          (and (< 0 (size out)) (< (find out (lit "6dc01a69") 0 (+ 1 (size out))) 0))))))
+
+  (test "a pin written since the commit is the author's, and is kept as written"
+    (let old (Records (lit "old a.wtn\n(module a (fn first () Int 15))") (Records (lit "old b.wtn\n(module b (fn g () Int 1))") (NoRecords)))
+      (let new (Records (lit "new a.wtn\n(module a (fn other () Int 15) (fn first () Int 18))")
+                 (Records (lit "new b.wtn\n(module b (use \"wtn:6dc01a69426c778e94fd4f40dc5b826ce4a6977eda9b40445b9fd43486286e00\" as other) (fn g () Int (other)))") (NoRecords)))
+        (= 0 (size (pinned (decoded (records (Records (records old) (Records (records new) (NoRecords)))))))))))
 
   (test "nothing changes when nothing did"
     (let both (Records (lit "old a.wtn\n(module a (fn one () Int 1))") (Records (lit "new a.wtn\n(module a (fn one () Int 1))") (NoRecords)))

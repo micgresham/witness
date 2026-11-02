@@ -954,21 +954,36 @@ that has to emit bytes — every item below was blocked behind three missing pri
       comparison is unsigned for `U64` only, and the narrower types are kept sign- or
       zero-extended so that nothing else has to know.
 
-      **`Int` is a 64-bit word that traps on overflow.** This was decided against the
-      grain of the plan, and it is worth saying why. The plan was to refuse `Int`
-      arithmetic by name and write the compiler against fixed widths. That turned out to
-      be impossible without editing the reviewed kernel: the compiler imports six
-      list-counting functions from `kernel/core.wtn` whose result is an `Int`, and a
-      change there invalidates [kernel/REVIEW.md](../kernel/REVIEW.md), which only a person
-      can renew. So `+ - *` on `Int` are the runtime's checked operations: either the
-      interpreter's exact answer or a trap, never a wrong number, and nothing needs a
-      bignum. A wrapping operation on an `Int` is still refused, as it has no width to
-      wrap at. This is one function to change if the other choice is made later.
-      **The checker is the first thing that needs the other choice.** Compiled into the
-      seed, compiler/check.wtn reasons about the full range of a `U64` and the products of
-      wide bounds, which a 64-bit `Int` cannot hold: on three conformance cases (`bitwise`,
-      `supervised-task`, `time`) it traps, which the host reports as `unread` and never as a
-      verdict. An unbounded `Int` in the runtime, as SPEC 6 has it, is what closes that.
+      **`Int` is unbounded, as SPEC 6 says.** It was first a 64-bit word that trapped on
+      overflow -- the plan to write the compiler against fixed widths ran into the reviewed
+      kernel, whose list-counting functions the compiler imports answer an `Int` -- and that
+      held until the checker was compiled: compiler/check.wtn reasons about the full range
+      of a `U64` and the products of wide bounds, and trapped on three conformance cases.
+      Now an `Int` from -2^62 to 2^62 - 1 is its own word, and any other is 2^62 plus the
+      address of a block of bytes -- a sign, then the magnitude in base 256 -- whose
+      arithmetic is written in Witness in [compiler/rtlib.wtn](../compiler/rtlib.wtn) and held
+      to Python's integers ([tests/test_bignum_wtn.py](../tests/test_bignum_wtn.py)). The
+      runtime's `iadd`, `isub` and `imul` answer when both operands and the answer are small
+      and otherwise hand on; comparisons, `=`, `num.to_str`, `num.div` and the conversions
+      to and from `U64` and `I64` look first at whether the words will do. The way across is
+      glue the compiler adds when rtlib is in the module (compiler/ir.wtn's `with_glue`), with
+      three primitives only it can write, so the reviewed kernel and the checker know nothing
+      new. The library's own functions keep the word's arithmetic -- every `Int` they compute
+      is small, which the test holds them to -- so no call from them leads back to them, and
+      the bare-metal targets' bound on the stack still has a call graph without that cycle.
+      A library function can be the very definition of one of the compiler's (`rt_half` once
+      was verify.wtn's `half`), so both linkers leave out one the module already has by name. Lengths and indices are always small, so every builtin that takes an `Int` is
+      unchanged, and a retain or release ignores anything from 2^32 up, which no address is.
+      The bare-metal targets (Cortex-M, the ESP32s, the ESP32-P4 and -S31) keep the word that
+      traps: their memory is bounded before the program runs, and a number without a bound
+      has nowhere to go, so the driver builds them without the glue or the library's wide
+      arithmetic (lower_ir.wtn's `module_ir_words`) -- a trap there, never a wrong number.
+      What it costs: the compiler is 6% larger and compiles itself a fifth slower; a wide
+      number's bytes are never given back. A literal from 2^62 to 2^64 - 1 is the word
+      beside a width and an `Int` in an `Int`'s arithmetic, and one passed or bound as it is
+      stays the word (the corpus has none); wider ones are `Int`s everywhere. The compiled
+      checker now says what the interpreted one says on every conformance case, and a
+      program that reaches past 2^64 prints what the interpreter prints (test_selfhost).
 
       **The evidence is that it runs, and runs the same**
       ([tests/test_lower.py](../tests/test_lower.py), [tests/test_runtime_wasm.py](../tests/test_runtime_wasm.py),
@@ -1179,15 +1194,15 @@ that has to emit bytes — every item below was blocked behind three missing pri
       stands on its own**: it has the compiler, the kernel, the documents and a seed, fresh
       history, and `./build.sh` reaches the fixpoint with node alone. What it still takes from
       witness-bootstrap, each to be done in Witness:
-  - [ ] **Checking a program**: the front end in Witness as the whole checker (above), one
+  - [x] **Checking a program**: the front end in Witness as the whole checker (above), one
         `check` that gives the Python checker's verdict on every conformance case. **The
         checker is written** (compiler/check.wtn, exact on the suite but for the import);
         and it runs without the reference: compiled into the seed beside the compiler as
         `drive_check` (and `_embedded`, `_mcu`, `_esp32`), run by `tools/wasmc.js`, which
         exits with the verdict, and held to the interpreted checker on every conformance
-        case ([tests/test_selfhost.py](../tests/test_selfhost.py)). Left: three cases where
-        the compiled checker traps on a 64-bit `Int` (see the runtime's `Int`, above) and
-        says `unread`. A program that imports is checked too: the Witness-only repository's
+        case ([tests/test_selfhost.py](../tests/test_selfhost.py)), the three it used to
+        stop on included, now that a compiled `Int` is unbounded (above). A program that
+        imports is checked too: the Witness-only repository's
         `check.sh` resolves it against `compiler/` with the seed's `drive_flatten` (below)
         and checks what comes out, and a hash nothing holds is `unresolved-import`
   - [x] **The store and the bootstrap**: resolving the content-hashed `use`s and flattening the
@@ -1235,8 +1250,8 @@ that has to emit bytes — every item below was blocked behind three missing pri
         agreement with the interpreter, which today runs in Python emulators. The first half is
         **done**: tools/conform.wtn reads the manifest and holds compiler/check.wtn to it, a
         case a run, and the Witness-only repository's `conform.sh` runs it with node alone --
-        85 cases agree, none differs, and the four it cannot read (the three wide-`Int` traps
-        and the import) are listed as unread. Left: the emulator runs
+        88 cases agree, none differs, and the one it cannot read alone (a program that
+        imports, which `check.sh` resolves) is listed as unread. Left: the emulator runs
 
 **Exit criteria:** the compiler compiles itself to byte-identical output (fixpoint),
 and deterministic content-hashed builds make that verifiable by anyone.

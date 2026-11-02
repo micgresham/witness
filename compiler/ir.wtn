@@ -29,8 +29,6 @@
 ;
 ;   witness run compiler/ir.wtn --grant Alloc,Console
 (module ir
-  (use "wtn:2e64e968936f7da539d1dce2e098f924336d66f3e7379192a90ef252057106f4" as word_number)
-
   (use "wtn:a1aba08aa579f12756c8339d06dbb065d6abfba9115ad5a84cf90b51f49b4602" as text_of_literal)
 
   (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
@@ -139,10 +137,18 @@
 
   ; Read as a word, wrapping, as compiler/lower.wtn reads it: a U64 above 2^63 is the I64 with
   ; its bits, and the compiled compiler's checked Int never sees a number too big for a word.
+  ; A literal's value exactly, however wide: a compiled `Int` holds any of them (compiler/rtlib.wtn).
   (fn number_of ((t Tree)) Int
     (match (leaf_text t)
       ((None) 0)
-      ((Some b) (match (word_number b) ((None) 0) ((Some n) (int.of n))))))
+      ((Some b) (if (= (literal_byte b 0) 45) (- 0 (literal_digits b 1 0 (+ 1 (unwrap (bytes.len b))))) (literal_digits b 0 0 (+ 1 (unwrap (bytes.len b))))))))
+
+  (fn literal_byte ((b Bytes) (at Int)) Int (match (bytes.at b (Octets at)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn literal_digits ((b Bytes) (at Int) (acc Int) (left Int)) Int
+    (if (<= left 0)
+      acc
+      (let d (literal_byte b at) (if (and (<= 48 d) (<= d 57)) (literal_digits b (+ at 1) (+ (* acc 10) (- d 48)) (- left 1)) acc))))
 
   ; --- A-normal form ------------------------------------------------------------------------------------
   (fn type_word ((t Tree)) Str
@@ -742,7 +748,11 @@
 
   (fn is_array_op ((op Str)) Bool
     (or (or (or (str.eq op "array.empty") (str.eq op "array.push")) (or (str.eq op "array.len") (str.eq op "array.at")))
-      (str.eq op "bytes.as_text")))
+      (or (str.eq op "bytes.as_text") (is_int_glue op))))
+
+  ; What the wide `Int` glue below is written with, and nothing else is: whether an `Int` is its
+  ; own word, the bytes of one that is not, and the `Int` that bytes stand for.
+  (fn is_int_glue ((op Str)) Bool (or (str.eq op "%small") (or (str.eq op "%unbox") (str.eq op "%box"))))
 
   (fn conv_array ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
     (uses Alloc)
@@ -763,6 +773,12 @@
     (uses Alloc)
     (if (str.eq name "bytes.as_text")
       "Str"
+    (if (str.eq name "%small")
+      "Bool"
+    (if (str.eq name "%unbox")
+      "Bytes"
+    (if (str.eq name "%box")
+      "Int"
     (if (str.eq name "array.empty")
       "(Array ?)"
       (if (str.eq name "array.len")
@@ -777,7 +793,7 @@
             (match tys
               ((NoStrs) "?")
               ((Strs at more) (concat "(Option " (concat (elem_of at) ")"))))
-            "?"))))))
+            "?")))))))))
 
   (fn elem_of ((ty Str)) Str
     (uses Alloc)
@@ -1419,10 +1435,54 @@
       ((Ok tree) (let items (with_prelude (module_items tree))
         (lower_items (sigs_join (prelude_sigs) (sigs_of items)) items)))))
 
-  ; A module's items and the prelude's functions it does not define itself.
+  ; A module's items and the prelude's functions it does not define itself, and, when the
+  ; runtime library is there to do wide arithmetic, the functions that hand it an `Int`.
   (fn with_prelude ((items Trees)) Trees
     (uses Alloc)
-    (if (and (wants_fault items) (lacks_fault items)) (trees_join items (prelude_items)) items))
+    (with_glue (if (and (wants_fault items) (lacks_fault items)) (trees_join items (prelude_items)) items)))
+
+  ; For a machine whose memory is bounded before it runs (the bare-metal targets), where a
+  ; number without a bound has nowhere to go: the prelude, and no glue -- an `Int` there is a
+  ; word that traps on overflow, never a wrong number -- and none of the library's arithmetic
+  ; on numbers too wide for a word, which nothing then calls.
+  (fn with_prelude_words ((items Trees)) Trees
+    (uses Alloc)
+    (let plain (without_wide items) (if (and (wants_fault plain) (lacks_fault plain)) (trees_join plain (prelude_items)) plain)))
+
+  (fn without_wide ((items Trees)) Trees
+    (uses Alloc)
+    (match items
+      ((NoTrees) items)
+      ((Trees h rest) (if (wide_library h) (without_wide rest) (Trees h (without_wide rest))))))
+
+  (fn wide_library ((h Tree)) Bool
+    (uses Alloc)
+    (match (node_items h)
+      ((None) false)
+      ((Some parts) (match parts
+        ((NoTrees) false)
+        ((Trees kw more) (match more
+          ((NoTrees) false)
+          ((Trees n rest) (let name (str.encode (word_of n))
+            (or (bytes.eq (bytes.slice name (Octets 0) (Octets 7)) (str.encode "rt_big_"))
+                (bytes.eq (bytes.slice name (Octets 0) (Octets 7)) (str.encode "rt_mag_")))))))))))
+
+  ; The way from an `Int` to compiler/rtlib.wtn's bytes and back. An `Int` that is not small is
+  ; 2^62 plus the address of its bytes; `%unbox` and `%box` move between the two, each taking a
+  ; reference of its own, so a wide number's bytes are never given back while an `Int` holds
+  ; them. The lowering calls these when the arithmetic of words will not do.
+  (fn with_glue ((items Trees)) Trees
+    (uses Alloc)
+    (if (and (present_fn items "rt_big_add") (not (present_fn items "rt_int_add_slow")))
+      (match (parse (tokens_of (str.encode (glue_text)))) ((Err f) items) ((Ok tree) (trees_join items (module_items tree))))
+      items))
+
+  (fn present_fn ((items Trees) (name Str)) Bool
+    (uses Alloc)
+    (match (fn_tree items name) ((Some h) true) ((None) false)))
+
+  (fn glue_text () Str
+    "(module g (fn rt_int_bytes ((n Int)) Bytes (uses Alloc) (if (%small n) (rt_big_of_small n) (%unbox n))) (fn rt_int_boxed ((b Bytes)) Int (uses Alloc) (if (rt_big_is_small b) (rt_big_small_value b) (%box b))) (fn rt_int_add_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_add (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_sub_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_sub (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_mul_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_mul (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_cmp_slow ((a Int) (b Int)) Int (uses Alloc) (rt_big_cmp (rt_int_bytes a) (rt_int_bytes b))) (fn rt_int_str_slow ((a Int)) Str (uses Alloc) (rt_big_to_str (rt_int_bytes a))) (fn rt_int_of_u64_slow ((w U64)) Int (uses Alloc) (rt_int_boxed (rt_big_of_u64 w))) (fn rt_int_of_i64_slow ((w I64)) Int (uses Alloc) (rt_int_boxed (rt_big_of_i64 w))) (fn rt_u64_of_int_slow ((n Int)) U64 (uses Alloc) (rt_big_to_u64 (rt_int_bytes n))) (fn rt_i64_of_int_slow ((n Int)) I64 (uses Alloc) (rt_big_to_i64 (rt_int_bytes n))) (fn rt_int_div_slow ((a Int) (b Int)) (Option Int) (uses Alloc) (match (rt_big_div (rt_int_bytes a) (rt_int_bytes b)) ((None) (None)) ((Some q) (Some (rt_int_boxed q))))))")
 
   (fn lacks_fault ((items Trees)) Bool
     (uses Alloc)

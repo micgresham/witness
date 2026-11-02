@@ -54,7 +54,7 @@
 
   (use "wtn:e4c149ba3f059c4ca4c1315a32cc797ea261b37ca748c63d8fdeffa4d99f805c" as const)
 
-  (use "wtn:41e1319b281e04d01d2548df49c817500f975083dce07b0b88812d472fc9df8c" as conv)
+  (use "wtn:7ec4918ad48bc4207748fc21a25d62bbf50e894be39b65927dc83e02b87eb77e" as conv)
 
   (use "wtn:7f605767659cf91d13d37c9c4a00f74ccb3f54984f19f8a705c4f0eafcbf8235" as drop)
 
@@ -64,7 +64,7 @@
 
   (use "wtn:e815d7590abea808f60733d9bea1564c274ed88a3fdde998d7ef715cbabfa4f5" as find_sig)
 
-  (use "wtn:cd4cc382364f89e8d98dcea27516fe748de43225922a64e06ee9f496054de6de" as first_user)
+  (use "wtn:5433659669e2f06dc5f7eab4f3a34871a3ef7d742fb416dabc6d1c31a13ce70e" as first_user)
 
   (use "wtn:90ddd63620aa1afa39a7bb7852f11928b1799307449ac9d1dd422a49ae5c362c" as head_is)
 
@@ -91,6 +91,12 @@
   (use "wtn:7eabcc9f94d563ca363e2b4362c2fd951fc4b074530fc82f672c84f22186d262" as i64_ne)
 
   (use "wtn:89c9d51d608e0f05ec1b6a9446065fd5aab0f9717cdc63c015f0931932c66a32" as index_add)
+
+  (use "wtn:cd4cc382364f89e8d98dcea27516fe748de43225922a64e06ee9f496054de6de" as index_iadd)
+
+  (use "wtn:7ee0082376d98128238e58e4af1d74f4aa86e37bff6ea5fb2da52787794525fd" as index_isub)
+
+  (use "wtn:d171bf9c235846e52ec7aaa5a94257b1bffd7a1877cbc011465295e7a5d84e07" as index_imul)
 
   (use "wtn:559e10b924501bc19db0ba6307ae8ce8db93524e959d8b2f671052934eab1cba" as index_concat)
 
@@ -136,7 +142,7 @@
 
   (use "wtn:5c5cf02c5075075508ccf8cfcdca66ae43e75e14d444a5482f59ffbd3d811065" as rounded)
 
-  (use "wtn:af98b7e00058a49e9aa5b9e1f7a88749d828c28c1f37b983f259b60dcacf3617" as runtime)
+  (use "wtn:57872636229eeccf71a82f47eb6e305b86f127c8a87119da997a01414708a858" as runtime)
 
   (use "wtn:765e5180c1029c7f77132180cbd10361b8b9ca32409ce5dcc19603e2692f2396" as sig_of)
 
@@ -156,7 +162,7 @@
 
   (use "wtn:b3f168204183fdd2ce0f08b1d9cc6bd074b8fe5bf60a181c8193892e5061dfb4" as is_instance)
 
-  (use "wtn:ca95db97880db6d5833994e3342a8ce1c104f0859c6566773a9a8cd13ade1da2" as is_array_op)
+  (use "wtn:5f03274abbbcabe37f7ea16a3c32090d46913fd28ef1d6ff5d1a0a8da2a1b4f2" as is_array_op)
 
   (use "wtn:cf16270b55cc77e2d3c4efc7205e509babbae97e9133cc36f820eb398ab1e0b5" as elem_of)
 
@@ -164,7 +170,9 @@
 
   (use "wtn:928dc0f1e5f4fb19c0d19194713b58b2d6221bda3b276ff0f7256253930a1b0c" as bytes_prim)
 
-  (use "wtn:5a17fd5a17f2a4b9802af7e724100182857860fa8526ab7be742c86c229e226f" as with_prelude)
+  (use "wtn:edfff304bbbe364b1679a411561075697e60be8a33da09896de3c4aa5c05eb87" as with_prelude)
+
+  (use "wtn:8bcbe1a526bcc073c6c5a6054656e18cecfdda77410cdecb349fe0caabaa1db6" as with_prelude_words)
 
   (use "wtn:570d8a7b17013b5704cc8a0c9c21d20f9cebce9ee0aff189a1623c95ad169f5d" as index_of)
 
@@ -205,13 +213,13 @@
   ; code sits inside, and `tail` whether its answer is the function's: a call to `here` that is
   ; in tail position sets the parameters and jumps back to the start. `hosts` are the imports,
   ; the capabilities the program uses, in compiler/lower.wtn's order.
-  (record LCtx (sigs Sigs) (names LNames) (pool LPool) (hosts Hosts) (here Str) (arity U32) (depth U32) (tail Bool))
+  (record LCtx (sigs Sigs) (names LNames) (pool LPool) (hosts Hosts) (here Str) (arity U32) (depth U32) (tail Bool) (wide Bool))
 
   (fn deeper ((c LCtx)) LCtx
-    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (wrap.add (get c depth) (u32.of 1))) (tail (get c tail))))
+    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (wrap.add (get c depth) (u32.of 1))) (tail (get c tail)) (wide (get c wide))))
 
   (fn tailed ((c LCtx) (tail Bool)) LCtx
-    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (get c depth)) (tail tail)))
+    (make LCtx (sigs (get c sigs)) (names (get c names)) (pool (get c pool)) (hosts (get c hosts)) (here (get c here)) (arity (get c arity)) (depth (get c depth)) (tail tail) (wide (get c wide))))
 
   (fn answers ((rest Ir) (x Str)) Bool
     (match rest ((Done a) (match a ((AVar n) (str.eq n x)) ((AInt k) false) ((ABool b) false))) ((Let a b r m) false) ((Drop a m) false) ((Retain a m) false)))
@@ -368,13 +376,123 @@
 
   ; compiler/ir.wtn reads every number as a word, so a U64 above 2^63 is already the I64 with
   ; the same bits.
+  ; A literal as a word: itself, or for one from 2^63 to 2^64 - 1, a U64's bits.
   (fn int_const ((n Int)) Ins
-    (const (if (and (<= (- (- 0 9223372036854775807) 1) n) (<= n 9223372036854775807)) (i64.of n) (i64.of 0))))
+    (const (if (and (<= (- (- 0 9223372036854775807) 1) n) (<= n 9223372036854775807)) (i64.of n) (u64_bits n))))
 
+  ; 2^64 - 1 is worked out rather than written, here and below: no literal in the compiler is
+  ; wider than an I64, so a compiler whose `Int` is a word that traps can still read this source.
+  (fn u64_bits ((n Int)) I64
+    (let top (+ (* 2 9223372036854775807) 1)
+      (if (and (< 9223372036854775807 n) (<= n top)) (i64.of (- (- n top) 1)) (i64.of 0))))
+
+  ; --- an Int too wide for a word ------------------------------------------------------------------------
+  ; A compiled `Int` from -2^62 to 2^62 - 1 is its own word, and any other is 2^62 plus the
+  ; address of its bytes in compiler/rtlib.wtn. When the runtime library is in the module (the
+  ; glue functions of compiler/ir.wtn's `with_glue` are its sign), an `Int`'s arithmetic, its
+  ; comparisons, its text and its conversions to and from the 64-bit widths look first at
+  ; whether the words will do, and call the library when they will not. Without it an `Int`
+  ; is a word that traps on overflow, as before.
+  (fn int_big () I64 (i64.of 4611686018427387904))
+
+  (fn int_slow () I64 (wrap.sub (i64.of -9223372036854775807) (i64.of 1)))
+
+  (fn sig_present ((sigs Sigs) (name Str)) Bool
+    (match sigs ((NoSigs) false) ((Sigs h rest) (or (and (str.eq (get h kind) "fn") (str.eq (get h name) name)) (sig_present rest name)))))
+
+  ; Not inside the library itself: every `Int` it computes is small (tests/test_bignum_wtn.py
+  ; holds it to that), so its own arithmetic is the word's, and no call from it leads back to
+  ; it -- which a bound on the stack, as the bare-metal targets need, could not get past.
+  (fn big_on ((c LCtx)) Bool (get c wide))
+
+  ; A function of the runtime library: its name starts `rt_`, which a program may not use.
+  (fn library_fn ((name Str)) Bool
+    (uses Alloc)
+    (bytes.eq (bytes.slice (str.encode name) (Octets 0) (Octets 3)) (str.encode "rt_")))
+
+  (fn all_int ((tys TEnv) (args Atoms)) Bool
+    (match args ((NoAtoms) true) ((Atoms a rest) (and (str.eq (atom_ty tys a) "Int") (all_int tys rest)))))
+
+  (fn wide_int ((c LCtx) (tys TEnv) (args Atoms)) Bool (and (big_on c) (all_int tys args)))
+
+  (fn slow_call ((c LCtx) (name Str)) Inss (inss_one (WCall (fn_slot (get c sigs) name))))
+
+  ; An `Int` operand: a literal too wide for a word is made by the library.
+  (fn int_atom ((c LCtx) (a Atom)) Inss
+    (match a
+      ((AInt n) (wide_literal c n 12))
+      ((AVar v) (low_atom c a))
+      ((ABool b) (low_atom c a))))
+
+  ; Whether a word holds the literal: as an I64, or as a U64's bits.
+  (fn word_wide ((n Int)) Bool
+    (and (<= (- (- 0 9223372036854775807) 1) n) (if (<= n 9223372036854775807) true (< n (+ (* 2 9223372036854775807) 2)))))
+
+  ; A literal the width of a word is converted from the word; a wider one is built from pieces
+  ; of 31 bits, n = q * 2^31 + r, by the library. Nothing past 2^63 is worked out unless the
+  ; literal is past it, so that a compiler whose `Int` is a word can still compile this.
+  (fn wide_literal ((c LCtx) (n Int) (left Int)) Inss
+    (if (and (<= (- 0 4611686018427387904) n) (< n 4611686018427387904))
+      (inss_one (int_const n))
+      (if (and (< 0 n) (if (<= n 9223372036854775807) true (< n (+ (* 2 9223372036854775807) 2))))
+        (Inss (int_const n) (slow_call c "rt_int_of_u64_slow"))
+        (if (and (< n 0) (<= (- (- 0 9223372036854775807) 1) n))
+          (Inss (int_const n) (slow_call c "rt_int_of_i64_slow"))
+          (if (<= left 0)
+            (inss_one (int_const 0))
+            (let q (match (num.div n 2147483648) ((None) 0) ((Some k) k))
+              (inss_join (wide_literal c q (- left 1))
+                (Inss (const (i64.of 2147483648)) (inss_join (slow_call c "rt_int_mul_slow")
+                  (inss_join (wide_literal c (- n (* q 2147483648)) (- left 1)) (slow_call c "rt_int_add_slow")))))))))))
+
+  (fn int_atoms ((c LCtx) (as Atoms)) Inss
+    (match as ((NoAtoms) (NoInss)) ((Atoms h rest) (inss_join (int_atom c h) (int_atoms c rest)))))
+
+  ; Whether an operand is its own word: an i32.
+  (fn small_test ((c LCtx) (a Atom)) Inss (inss_join (int_atom c a) (Inss (const (int_big)) (inss_one (i64_lt_s)))))
+
+  (fn both_small_test ((c LCtx) (args Atoms)) Inss
+    (match args
+      ((NoAtoms) (inss_one (const (i64.of 1))))
+      ((Atoms a rest) (match rest
+        ((NoAtoms) (small_test c a))
+        ((Atoms b more) (inss_join (small_test c a) (inss_join (small_test c b) (inss_one (op_of (u8.of 113))))))))))
+
+  ; + - *: the runtime's answer for words, or the library's when it hands on.
+  (fn wide_arith ((c LCtx) (args Atoms) (fast U32) (slow Str)) Inss
+    (inss_join (int_atoms c args)
+      (Inss (WCall fast) (Inss (WLocalTee (lname_index (get c names) "%ia")) (Inss (const (int_slow)) (Inss (i64_eq)
+        (inss_one (WIf true (inss_join (int_atoms c args) (slow_call c slow)) (inss_one (lget c "%ia"))))))))))
+
+  ; A comparison: the words' when both are words, and otherwise the library's -1, 0 or 1 against 0.
+  (fn wide_compare ((c LCtx) (cmp Ins) (args Atoms)) Inss
+    (inss_join (both_small_test c args)
+      (inss_one (WIf true
+        (inss_join (int_atoms c args) (Inss cmp (inss_one (i64_extend_u))))
+        (inss_join (int_atoms c args) (inss_join (slow_call c "rt_int_cmp_slow") (Inss (const (i64.of 0)) (Inss cmp (inss_one (i64_extend_u))))))))))
+
+  (fn wide_to_str ((c LCtx) (a Atom)) Inss
+    (inss_join (small_test c a)
+      (inss_one (WIf true (inss_join (int_atom c a) (Inss (const (i64.of 0)) (call_of (index_to_str)))) (inss_join (int_atom c a) (slow_call c "rt_int_str_slow"))))))
+
+  ; From a 64-bit width to an `Int`: a U64 from 2^62 up, or an I64 outside -2^62 .. 2^62 - 1, is wide.
+  (fn wide_of_word ((c LCtx) (t Str) (a Atom)) Inss
+    (if (str.eq t "U64")
+      (inss_join (low_atom c a) (Inss (const (int_big)) (Inss (op_of (u8.of 84))
+        (inss_one (WIf true (low_atom c a) (inss_join (low_atom c a) (slow_call c "rt_int_of_u64_slow")))))))
+      (inss_join (low_atom c a) (Inss (const (int_big)) (Inss (op_of (u8.of 124)) (Inss (const (int_slow)) (Inss (op_of (u8.of 84))
+        (inss_one (WIf true (low_atom c a) (inss_join (low_atom c a) (slow_call c "rt_int_of_i64_slow")))))))))))
+
+  ; From an `Int` to a 64-bit width: the checker has proved it fits, and a wide one is read by the library.
+  (fn word_of_wide ((c LCtx) (slow Str) (a Atom)) Inss
+    (inss_join (small_test c a) (inss_one (WIf true (low_atom c a) (inss_join (low_atom c a) (slow_call c slow))))))
+
+  ; A literal no word can hold is an `Int` wherever it is, and is made by the library when it is
+  ; there; one a word can hold is that word, and an `Int` operation reads it with `int_atom`.
   (fn low_atom ((c LCtx) (a Atom)) Inss
     (match a
       ((AVar n) (inss_one (local_get (lname_index (get c names) n))))
-      ((AInt n) (inss_one (int_const n)))
+      ((AInt n) (if (and (big_on c) (not (word_wide n))) (wide_literal c n 12) (inss_one (int_const n))))
       ((ABool b) (inss_one (const (if b (i64.of 1) (i64.of 0)))))))
 
   (fn low_atoms ((c LCtx) (as Atoms)) Inss
@@ -401,6 +519,7 @@
 
   (fn low_prim ((c LCtx) (tys TEnv) (op Str) (args Atoms)) (Result Inss Fault)
     (uses Alloc)
+    (if (and (wide_int c tys args) (is_wide_op op)) (Ok (low_wide c op args))
     (if (str.eq op "+") (Ok (inss_join (low_atoms c args) (call_of (index_add))))
     (if (str.eq op "-") (Ok (inss_join (low_atoms c args) (call_of (index_sub))))
     (if (str.eq op "*") (Ok (inss_join (low_atoms c args) (call_of (index_mul))))
@@ -416,7 +535,22 @@
     (match (host_named (get c hosts) op)
       ((Some found) (low_host c found args))
       ((None) (if (is_time_op op) (Ok (low_time c op args))
-        (Err (fault "lower_ir" (concat "not lowered yet: " op)))))))))))))))))))
+        (Err (fault "lower_ir" (concat "not lowered yet: " op))))))))))))))))))))
+
+  (fn is_wide_op ((op Str)) Bool
+    (or (or (or (str.eq op "+") (str.eq op "-")) (or (str.eq op "*") (str.eq op "<")))
+      (or (or (str.eq op "<=") (str.eq op ">")) (or (str.eq op ">=") (or (str.eq op "=") (str.eq op "num.to_str"))))))
+
+  (fn low_wide ((c LCtx) (op Str) (args Atoms)) Inss
+    (if (str.eq op "+") (wide_arith c args (index_iadd) "rt_int_add_slow")
+    (if (str.eq op "-") (wide_arith c args (index_isub) "rt_int_sub_slow")
+    (if (str.eq op "*") (wide_arith c args (index_imul) "rt_int_mul_slow")
+    (if (str.eq op "<") (wide_compare c (i64_lt_s) args)
+    (if (str.eq op "<=") (wide_compare c (i64_le_s) args)
+    (if (str.eq op ">") (wide_compare c (i64_gt_s) args)
+    (if (str.eq op ">=") (wide_compare c (i64_ge_s) args)
+    (if (str.eq op "=") (wide_compare c (i64_eq) args)
+    (match args ((NoAtoms) (inss_one (const (i64.of 0)))) ((Atoms a rest) (wide_to_str c a))))))))))))
 
   ; A U64 is printed unsigned, and compared unsigned: every narrower width is kept zero- or
   ; sign-extended in its word, so a signed comparison of the words is right for it, but a
@@ -511,13 +645,21 @@
       ((NoAtoms) (array_empty c))
       ((Atoms a rest) (if (str.eq op "bytes.as_text")
         (inss_join (low_atom c a) (inss_one (WCall (index_retain))))
+      ; The glue of a wide `Int` (compiler/ir.wtn's `with_glue`): whether it is its own word, its
+      ; bytes with a reference taken, and the `Int` that bytes stand for, with a reference taken.
+      (if (str.eq op "%small")
+        (inss_join (low_atom c a) (Inss (const (int_big)) (Inss (i64_lt_s) (inss_one (i64_extend_u)))))
+      (if (str.eq op "%unbox")
+        (inss_join (low_atom c a) (Inss (const (int_big)) (Inss (op_of (u8.of 125)) (inss_one (WCall (index_retain))))))
+      (if (str.eq op "%box")
+        (inss_join (low_atom c a) (Inss (WCall (index_retain)) (Inss (const (int_big)) (inss_one (op_of (u8.of 124))))))
       (if (str.eq op "array.len")
         (inss_join (low_atom c a) (Inss (i32_wrap) (inss_one (load_word (u32.of 0)))))
         (match rest
           ((NoAtoms) (inss_one (const (i64.of 0))))
           ((Atoms b more) (if (str.eq op "array.at")
             (array_at c tys a b)
-            (array_push c tys a b)))))))))
+            (array_push c tys a b))))))))))))
 
   (fn array_empty ((c LCtx)) Inss
     (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
@@ -542,7 +684,7 @@
     (let heap (heap_ty tys (atom_ty tys x))
       (inss_join (inss_join (low_atom c a) (Inss (i32_wrap) (Inss (load_word (u32.of 0)) (inss_one (lset c "%an")))))
         (inss_join (made_block c (Inss (lget c "%an") (Inss (const (i64.of 2)) (Inss (WOp (u8.of 124)) (Inss (const (i64.of 8)) (inss_one (WOp (u8.of 126)))))))
-                     (if heap (i64.of -9223372036854775808) (i64.of 0)))
+                     (if heap (wrap.sub (i64.of -9223372036854775807) (i64.of 1)) (i64.of 0)))
           (inss_join (Inss (lget c "%mk") (Inss (lset c "%aa") (Inss (lget c "%aa") (Inss (i32_wrap) (Inss (lget c "%an") (Inss (const (i64.of 1)) (Inss (WOp (u8.of 124)) (inss_one (store_word (u32.of 0))))))))))
             (inss_join (Inss (const (i64.of 0)) (inss_one (lset c "%ai")))
               (inss_join (inss_one (WBlock false (inss_one (WLoop false (copy_step c heap a)))))
@@ -598,8 +740,22 @@
         (if (str.eq op "bit.not")
           (inss_join (low_atom c a) (Inss (const (i64.of -1)) (Inss (op_of (u8.of 133)) (narrowed t))))
           (match rest
-            ((NoAtoms) (low_atom c a))
+            ((NoAtoms) (low_convert c t op a))
             ((Atoms b more) (width_two c t op a b))))))))
+
+  ; A conversion is its operand's word, unless an `Int` is on one side and a 64-bit width on
+  ; the other: then a wide `Int` is read or made by the library. A literal is converted here.
+  (fn low_convert ((c LCtx) (t Str) (op Str) (a Atom)) Inss
+    (if (not (big_on c))
+      (low_atom c a)
+      (match a
+        ((AInt n) (low_atom c a))
+        ((ABool b) (low_atom c a))
+        ((AVar v) (if (and (str.eq op "int.of") (or (str.eq t "U64") (str.eq t "I64")))
+          (wide_of_word c t a)
+          (if (and (str.eq t "Int") (str.eq op "u64.of"))
+            (word_of_wide c "rt_u64_of_int_slow" a)
+            (if (and (str.eq t "Int") (str.eq op "i64.of")) (word_of_wide c "rt_i64_of_int_slow" a) (low_atom c a))))))))
 
   (fn width_two ((c LCtx) (t Str) (op Str) (a Atom) (b Atom)) Inss
     (let plain (fn_code op)
@@ -638,7 +794,7 @@
                   (inss_join (low_atom c a) (Inss (i32_wrap) (inss_one (load_word (u32.of 0)))))
                   (match rest
                     ((NoAtoms) (inss_one (const (i64.of 0))))
-                    ((Atoms b more) (if (str.eq op "bytes.at") (bytes_at c a b) (num_div c tys a b)))))))))))))
+                    ((Atoms b more) (if (str.eq op "bytes.at") (bytes_at c a b) (int_div c tys a b)))))))))))))
 
   ; Some octet, or None.
   (fn bytes_at ((c LCtx) (b Atom) (i Atom)) Inss
@@ -666,6 +822,15 @@
             (let no (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
               (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "None"))) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk")))))))
               (inss_join (low_atom c b) (Inss (WOp (u8.of 80)) (inss_one (WIf true no yes)))))))))))
+
+  ; An `Int` quotient is the words' when both are words and the dividend is not -2^62 (whose
+  ; quotient by -1 is not small), and otherwise the library's.
+  (fn int_div ((c LCtx) (tys TEnv) (a Atom) (b Atom)) Inss
+    (if (wide_int c tys (Atoms a (Atoms b (NoAtoms))))
+      (inss_join (both_small_test c (Atoms a (Atoms b (NoAtoms))))
+        (inss_join (int_atom c a) (Inss (const (i64.of -4611686018427387904)) (Inss (i64_ne) (Inss (op_of (u8.of 113))
+          (inss_one (WIf true (num_div c tys a b) (inss_join (int_atom c a) (inss_join (int_atom c b) (slow_call c "rt_int_div_slow"))))))))))
+      (num_div c tys a b)))
 
   (fn unsigned_ty ((t Str)) Bool (or (or (str.eq t "U8") (str.eq t "U16")) (or (str.eq t "U32") (str.eq t "U64"))))
 
@@ -755,14 +920,14 @@
   (fn func_of ((sigs Sigs) (pool LPool) (hosts Hosts) (sig Sig) (ir Ir)) (Result Func Fault)
     (uses Alloc)
     (let tys (heap_marks sigs (get sig params))
-      (let names (lnames_join (tenv_names (get sig params)) (LNames "%mk" (LNames "%ai" (LNames "%an" (LNames "%aa" (ir_binds ir))))))
-        (match (low_ir (make LCtx (sigs sigs) (names names) (pool pool) (hosts hosts) (here (get sig name)) (arity (tenv_count (get sig params))) (depth (u32.of 0)) (tail true)) tys ir)
+      (let names (lnames_join (tenv_names (get sig params)) (LNames "%mk" (LNames "%ai" (LNames "%an" (LNames "%aa" (LNames "%ia" (ir_binds ir)))))))
+        (match (low_ir (make LCtx (sigs sigs) (names names) (pool pool) (hosts hosts) (here (get sig name)) (arity (tenv_count (get sig params))) (depth (u32.of 0)) (tail true) (wide (and (sig_present sigs "rt_int_add_slow") (not (library_fn (get sig name)))))) tys ir)
           ((Err f) (Err f))
           ((Ok code) (Ok (make Func
             (name (get sig name))
             (params (tenv_count (get sig params)))
             (results (u32.of 1))
-            (locals (wrap.add (u32.of 4) (lnames_count (ir_binds ir))))
+            (locals (wrap.add (u32.of 5) (lnames_count (ir_binds ir))))
             (body (inss_one (WLoop true code)))
             (exported true))))))))
 
@@ -901,11 +1066,22 @@
     (uses Alloc)
     (match (parse (tokens_of (str.encode src)))
       ((Err f) (Err f))
-      ((Ok tree) (let items (with_prelude (module_items tree))
-        (let sigs (sigs_join (prelude_sigs) (sigs_of items))
-          (match (module_all sigs items)
-            ((Err f) (Err f))
-            ((Ok is) (module_of (sigs_join (plain_sigs sigs) (instance_sigs is)) (hosts_used (capability_table) items (u32.of 0)) is))))))))
+      ((Ok tree) (module_ir_of (with_prelude (module_items tree))))))
+
+  ; The same for a bare-metal target, whose memory is bounded before the program runs: an
+  ; `Int` is a word that traps on overflow, as compiler/ir.wtn's `with_prelude_words` says why.
+  (fn module_ir_words ((src Str)) (Result Module Fault)
+    (uses Alloc)
+    (match (parse (tokens_of (str.encode src)))
+      ((Err f) (Err f))
+      ((Ok tree) (module_ir_of (with_prelude_words (module_items tree))))))
+
+  (fn module_ir_of ((items Trees)) (Result Module Fault)
+    (uses Alloc)
+    (let sigs (sigs_join (prelude_sigs) (sigs_of items))
+      (match (module_all sigs items)
+        ((Err f) (Err f))
+        ((Ok is) (module_of (sigs_join (plain_sigs sigs) (instance_sigs is)) (hosts_used (capability_table) items (u32.of 0)) is)))))
 
   ; Witness source in, a WebAssembly module out, from the intermediate representation.
   (fn compile_ir ((src Str)) (Result Bytes Fault)
