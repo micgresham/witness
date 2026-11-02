@@ -1187,14 +1187,56 @@ that has to emit bytes — every item below was blocked behind three missing pri
         exits with the verdict, and held to the interpreted checker on every conformance
         case ([tests/test_selfhost.py](../tests/test_selfhost.py)). Left: three cases where
         the compiled checker traps on a 64-bit `Int` (see the runtime's `Int`, above) and
-        says `unread`, and a program that imports, which waits on the store
-  - [ ] **The store and the bootstrap**: resolving the content-hashed `use`s and flattening the
+        says `unread`. A program that imports is checked too: the Witness-only repository's
+        `check.sh` resolves it against `compiler/` with the seed's `drive_flatten` (below)
+        and checks what comes out, and a hash nothing holds is `unresolved-import`
+  - [x] **The store and the bootstrap**: resolving the content-hashed `use`s and flattening the
         driver into the seed's one text (`witness store`, `witness bootstrap`), so a change to
-        `compiler/` is built there rather than brought over with a new seed
-  - [ ] **The backend generators**: the Thumb, RV32, Xtensa, ESP32-P4 and ESP32-S31 modules
-        are made from the RISC-V one by Python in `tools/`
+        `compiler/` is built there rather than brought over with a new seed. In four steps:
+        (1) the canonical form and (2) the components, **done**: compiler/canon.wtn gives
+        every definition the hash witness/hashing.py does -- a variable by its position, the
+        arms sorted, a dependency by its own hash, mutual recursion as a group -- written as
+        `json.dumps` writes it and hashed by compiler/sha256.wtn. It is exact on every
+        example and accepted conformance case, every compiler module that imports nothing,
+        and, compiled, all 2,418 definitions of the flattened compiler in 20 s
+        ([tests/test_canon_wtn.py](../tests/test_canon_wtn.py), test_selfhost). It says
+        `unread` for an import and for a `log.fields` under a redaction (the policy needs a
+        value's labels). (3) resolution and (4) flattening, **done**: compiler/link.wtn
+        reads every module of `compiler/ORDER` as one `(modules ...)` form, resolves each
+        in turn against the ones before it -- an import found by canon.wtn's hashes, its
+        closure spliced in, a clash renamed `name_` and six digits of its hash, an enum with
+        its constructors -- and writes the last, the driver, as one module with the runtime
+        library after it. Compiled into the seed as `drive_flatten`, it resolves every
+        import of all the modules; the compiler built from its text compiles that text to
+        the same bytes again, and compiles Phase 0's flattened text to exactly Phase 0's
+        module (test_selfhost). The text is not witness/resolve.py's byte for byte -- that
+        one keeps a second copy of a dependency imported under another name, and two
+        clashes are settled the other way round -- and need not be: it is the same compiler.
+        The Witness-only repository's `build.sh` now flattens `compiler/` with the seed and
+        builds what it describes: its seed is now that text and the compiler built from it, and
+        `./build.sh` reaches the fixpoint from `compiler/` in under four minutes with node
+        alone. And it writes pins: tools/pin.wtn resolves the modules as they
+        were committed, to know what each old hash was, and gives every stale import the hash
+        its definition has now, module by module in ORDER so the change runs on; its
+        `pin.sh` re-pins nineteen modules after an edit to compiler/reader.wtn's `is_digit`,
+        each new hash the one witness/hashing.py gives, and `./build.sh` then builds the
+        changed compiler to its fixpoint
+  - [x] **The backend generators**: the Thumb, RV32, Xtensa, ESP32-P4 and ESP32-S31 modules
+        are made from the RISC-V one by Python in `tools/`. **Done**: tools/gen.wtn is all four
+        generators in Witness -- the form reader, the three little assemblers (RV32 in words,
+        Thumb with its two-instruction `bz`, Xtensa in three-byte steps), the replacement and
+        patch tables, and each chip's layout as a record -- and every one of the six backends
+        it makes is the file in compiler/ byte for byte, interpreted
+        ([tests/test_gen_wtn.py](../tests/test_gen_wtn.py)) and compiled by the seed and run
+        by node. The tables were carried over from the Python mechanically, so the two say the
+        same; the Python generators stay as the reference, and the test keeps them agreeing.
+        The Witness-only repository's `gen.sh` remakes the six with node alone
   - [ ] **The tests**: the conformance suite run by the Witness checker, and the backends'
-        agreement with the interpreter, which today runs in Python emulators
+        agreement with the interpreter, which today runs in Python emulators. The first half is
+        **done**: tools/conform.wtn reads the manifest and holds compiler/check.wtn to it, a
+        case a run, and the Witness-only repository's `conform.sh` runs it with node alone --
+        85 cases agree, none differs, and the four it cannot read (the three wide-`Int` traps
+        and the import) are listed as unread. Left: the emulator runs
 
 **Exit criteria:** the compiler compiles itself to byte-identical output (fixpoint),
 and deterministic content-hashed builds make that verifiable by anyone.

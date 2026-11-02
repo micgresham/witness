@@ -39,12 +39,44 @@ Node 18 or newer, nothing else:
 ./build.sh
 ```
 
-The seed compiles the compiler's own source, and the module that comes out must be the
-seed, byte for byte; compiled once more, it must be the same bytes again. That is the
-fixpoint: the compiler as written is the compiler that runs, and anyone can check it with
-a WebAssembly runtime and nothing of ours. [seed/SHA256](seed/SHA256) records the seed's
-hashes, and witness-bootstrap's `witness bootstrap` makes the same files from the same
-commit of `compiler/`.
+The seed reads every module of [compiler/](compiler/) in the order
+[compiler/ORDER](compiler/ORDER) gives, resolves each one's imports by content hash and splices
+them in ([compiler/link.wtn](compiler/link.wtn), with the hashes of
+[compiler/canon.wtn](compiler/canon.wtn)), and writes the compiler as one module. When
+`compiler/` is what the seed was built from, that is the seed's own source, and compiling it
+must give the seed back byte for byte. When `compiler/` has changed, the compiler it
+describes is built instead, and must compile itself to the same bytes again and flatten
+`compiler/` to the same text. That is the fixpoint: the compiler as written is the compiler
+that runs, and anyone can check it with a WebAssembly runtime and nothing of ours.
+
+An edit that changes a definition changes its hash, and every import of it, and of what
+imports it, has to name the new one:
+
+```bash
+./pin.sh            # re-pin compiler/ against the last commit's modules
+./build.sh          # build the compiler it describes, to its own fixpoint
+./build.sh seed     # and make that the seed
+```
+
+`pin.sh` runs [tools/pin.wtn](tools/pin.wtn), which reads the modules as they were committed, to
+know what each old hash was, and rewrites only the hashes.
+
+[seed/SHA256](seed/SHA256) records the seed's hashes.
+
+## Conformance, and the backends made from RISC-V
+
+```bash
+./conform.sh        # every conformance case, checked by compiler/check.wtn
+./gen.sh            # remake native_riscv32, _thumb, _xtensa, _xtensa_s3, _esp32p4, _esp32s31
+```
+
+`conform.sh` runs [tools/conform.wtn](tools/conform.wtn): each case of
+[conformance/manifest.json](conformance/manifest.json) is checked under its profile and must
+come out with the manifest's verdict and the very rules among its errors and its warnings; a
+case the checker does not read is listed as `unread`, never counted as agreeing. `gen.sh` runs
+[tools/gen.wtn](tools/gen.wtn), which makes six backends from the RISC-V one: edit
+`compiler/native_riscv.wtn`, `riscv.wtn`, `thumb.wtn`, `xtensa.wtn` or the generator, never
+the files it writes.
 
 ## Check
 
@@ -63,25 +95,21 @@ weaker than the reference, the source says so: a function's first fault is the o
 reported, `needless-declassify` for a value is only given when its type can be told from the
 parameters, and the warning for a redaction no log field reaches is not given.
 
+A program that imports is resolved first against the modules of `compiler/`, as the
+compiler's own imports are, and what it imports is checked with it; a hash none of them holds
+is `unresolved-import`.
+
 ## What still needs witness-bootstrap
 
 Stated plainly, so nothing here claims more than it does:
 
-- **Checking a program that imports.** `./check.sh` reads everything else (above), but a
-  `(use "wtn:..." ...)` is resolved against the codebase, which is the reference's, so a
-  program that imports is `unread`, never accepted.
-- **Building from `compiler/`.** Its modules name each other by content hash, and the
-  codebase that resolves those hashes, and puts the modules into the one text in
-  `seed/compiler.wtn`, is still the reference's (`witness store`, `witness bootstrap`). A
-  change to `compiler/` is built there and brought here with a new seed.
-- **The backends' instruction tables.** `native_riscv32.wtn`, `native_thumb.wtn`,
-  `native_xtensa.wtn`, `native_xtensa_s3.wtn`, `native_esp32p4.wtn` and `native_esp32s31.wtn` are
-  made from the RISC-V backend by generators in witness-bootstrap's `tools/`; edit those, not the files here.
-- **The tests.** The evidence for every claim the roadmap makes -- emulator runs of each
-  backend against the interpreter, the conformance suite, the kernel compared with the
-  prototype -- runs there.
+- **The tests the reference keeps.** The evidence that each backend's code does what the
+  interpreter does -- emulator runs on every target -- and the kernel compared with the
+  prototype, run there. What runs here: the fixpoint (`./build.sh`), the conformance suite
+  under the Witness checker (`./conform.sh`), and the backends made from the RISC-V one
+  (`./gen.sh`, which writes them; `git diff` says whether anything changed).
 
-Each of these is a step on the [roadmap](docs/ROADMAP.md) toward this repository standing on
+That is the last step on the [roadmap](docs/ROADMAP.md) toward this repository standing on
 its own. The documents are carried as they are, so where they name a test file or a Python
 module, it is witness-bootstrap's.
 

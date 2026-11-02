@@ -1,0 +1,519 @@
+; Imports resolved by hash, and a module flattened into the one text the compiler reads:
+; witness/resolve.py and witness/link.py, in Witness.
+;
+; The input is every module of `compiler/ORDER`, in that order, as one form:
+; `(modules (module reader ...) (module sha256 ...) ...)`. A module names what it depends on
+; by content hash, `(use "wtn:..." as name)`, and the hash is the only thing depended on, so
+; resolving one needs nothing but the modules before it: each module is resolved in turn --
+; its imports spliced in, as compiler/canon.wtn's hashes say which definition each is -- and
+; then hashed, so that a later module's imports can be found in it.
+;
+; Resolution is splicing, as resolve.py has it. The definition asked for takes the name the
+; `use` gives it, and what it is built out of comes with it under the names the module it
+; came from had for them -- unless something already here has that name and is another
+; definition, in which case it takes a name derived from its hash, `name_` and the first six
+; digits. A constructor clashes like a name: an enum that would clash on one is renamed whole,
+; and its constructors take the same suffix. A rename is made everywhere a name can refer to
+; a declaration -- a call's head, a type, `make`, a variant where it is declared and where a
+; match takes it apart -- and nowhere else, since a variable is never a declaration.
+;
+; What comes out is the last module with every import spliced in, then the runtime library's
+; definitions (compiler/rtlib.wtn, without its tests and `main`), one declaration a line.
+; If a hash is not found the answer is a line saying which, and nothing else.
+;
+;   witness test compiler/link.wtn
+(module link
+  (use "wtn:1b01cbd9255b9e9a1b0eb3647a1504e40bbf9d54eff9799257d988b528cd1b95" as hashes_of_items)
+
+  (use "wtn:a534fe0c0571a603e0112cb9dd1bbc3915a7a104c4d1b57cb3fde133f37e5890" as look)
+
+  (use "wtn:6f605c6a543f7f80ff1100abcc4728703f812f931eb9da431a33fec14afa6eea" as put)
+
+  (use "wtn:7b37f980376328ade8e5287443a4f264a3145a35e9b039b547ae8b545bc0b0ef" as holds)
+
+  (use "wtn:5490bd97162142d6e8a06a0d77266f9f27474e5183ca52811ed445babbf39c53" as look_edges)
+
+  (use "wtn:5cf2792d97f6b78895e836a551b68e3406269e49eb8f6da2175513059ad62fd0" as is)
+
+  (use "wtn:e86a6923fe5cc47acfbc70454493d42c86dab02efc96e074663e8d9f41a34096" as lit)
+
+  (use "wtn:b1aab25a2eec7f8516cc5d4f4434a827cafeb45a7ee8fb98bc01307313878824" as size)
+
+  (use "wtn:e0dbcc3e241e98f71ec95aae112b2f075d3f9da5466884a940c06cea24a581fd" as before)
+
+  (use "wtn:3a233fc1610ddea8229aeec72fe5a2accf26f5d31d23df9acc7446f8dca0444c" as word)
+
+  (use "wtn:1d19b19c3c97e9a5947a2f089b5e062d4105217a91ccd058f389e31071424503" as items_of)
+
+  (use "wtn:41b818418b74174abf5bc079a59e5f0853fd5e4dbff6667d1f90c6524a10e430" as nth)
+
+  (use "wtn:17f42e91ba108de20303fad741a62e2751f230ae977a6dab97d53a2294c3a8d7" as past)
+
+  (use "wtn:223fe7cf3a5a63402e2ed3df716a4d64638ec4dcaee3b1f30b66f9964acc51c1" as head_word)
+
+  (use "wtn:f68b7fd69e5d25a249c7b4acbd15b7d8347272aa5ebe14c99a0ddce46cdfa26d" as decl_name)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  ; --- declarations by name ----------------------------------------------------------------
+  (enum Decls (NoDecls) (Decl (key Bytes) (tree Tree) (lo Decls) (hi Decls)))
+
+  (fn put_decl ((m Decls) (k Bytes) (t Tree)) Decls
+    (match m
+      ((NoDecls) (Decl k t (NoDecls) (NoDecls)))
+      ((Decl key tree lo hi) (if (bytes.eq k key) (Decl k t lo hi) (if (before k key) (Decl key tree (put_decl lo k t) hi) (Decl key tree lo (put_decl hi k t)))))))
+
+  (fn look_decl ((m Decls) (k Bytes)) Tree
+    (uses Alloc)
+    (match m
+      ((NoDecls) (Leaf (lit "") false))
+      ((Decl key tree lo hi) (if (bytes.eq k key) tree (if (before k key) (look_decl lo k) (look_decl hi k))))))
+
+  (fn is_test ((t Tree)) Bool
+    (uses Alloc)
+    (let w (head_word t) (or (is w "test") (or (is w "property") (is w "snapshot")))))
+
+  (fn is_use ((t Tree)) Bool (uses Alloc) (is (head_word t) "use"))
+
+  ; The definitions a module writes, by name: not its imports, and not its tests, which
+  ; nothing can depend on.
+  (fn decls_of ((items Trees) (m Decls)) Decls
+    (uses Alloc)
+    (match items
+      ((NoTrees) m)
+      ((Trees h rest) (decls_of rest (if (or (is_use h) (or (is_test h) (is (head_word h) "redact"))) m (put_decl m (decl_name h) h))))))
+
+  ; Each hash's name, the first name kept when two bind one hash.
+  (fn inverted ((m Map) (out Map)) Map
+    (uses Alloc)
+    (match m ((Tip) out) ((Fork key value lo hi) (inverted hi (inverted lo (if (holds out value) out (put out value key)))))))
+
+  ; The hashes of the names a module wrote itself, so that an import is taken from where it
+  ; was written rather than from a copy spliced in somewhere since.
+  (fn own_hashes ((items Trees) (refs Map) (out Map)) Map
+    (uses Alloc)
+    (match items
+      ((NoTrees) out)
+      ((Trees h rest) (own_hashes rest refs (if (or (is_use h) (or (is_test h) (is (head_word h) "redact"))) out (let r (look refs (decl_name h)) (if (or (= (size r) 0) (holds out r)) out (put out r (decl_name h)))))))))
+
+  ; --- the modules resolved so far ---------------------------------------------------------
+  (record Done (name Bytes) (items Trees) (decls Decls) (graph Graph) (refs Map) (own Map) (all Map))
+
+  (enum Mods (NoMods) (Mods (head Done) (rest Mods)))
+
+  ; Where a hash was written: the first module that wrote it, or failing that the first that
+  ; holds it at all.
+  (fn written_in ((ms Mods) (h Bytes)) (Option Done)
+    (uses Alloc)
+    (match ms ((NoMods) (None)) ((Mods d rest) (if (holds (get d own) h) (Some d) (written_in rest h)))))
+
+  (fn held_in ((ms Mods) (h Bytes)) (Option Done)
+    (uses Alloc)
+    (match ms ((NoMods) (None)) ((Mods d rest) (if (holds (get d all) h) (Some d) (held_in rest h)))))
+
+  (fn home_of ((ms Mods) (h Bytes)) (Option Done)
+    (uses Alloc)
+    (match (written_in ms h) ((Some d) (Some d)) ((None) (held_in ms h))))
+
+  (fn name_in ((d Done) (h Bytes)) Bytes
+    (uses Alloc)
+    (let n (look (get d own) h) (if (< 0 (size n)) n (look (get d all) h))))
+
+  ; --- what an import brings ---------------------------------------------------------------
+  (fn is_prelude ((n Bytes)) Bool
+    (uses Alloc)
+    (or (or (or (is n "Option") (is n "Result")) (or (is n "Fault") (is n "Chars")))
+        (or (or (or (is n "Octets") (is n "Count")) (or (is n "Instant") (is n "WallTime")))
+            (or (or (is n "Ticks") (is n "Duration")) (or (is n "fault") (is n "context"))))))
+
+  ; The definition and everything under it, each once and deepest first. The prelude is in
+  ; every module already, and is not brought.
+  (record Reach (seen Map) (order Keys))
+
+  (fn reached ((n Bytes) (g Graph) (r Reach) (left Int)) Reach
+    (uses Alloc)
+    (if (<= left 0)
+      r
+      (if (or (holds (get r seen) n) (is_prelude n))
+        r
+        (let r2 (reached_all (look_edges g n) g (with r (seen (put (get r seen) n (lit "1")))) (- left 1))
+          (with r2 (order (Keys n (get r2 order))))))))
+
+  (fn reached_all ((ns Keys) (g Graph) (r Reach) (left Int)) Reach
+    (uses Alloc)
+    (if (<= left 0) r (match ns ((NoKeys) r) ((Keys n rest) (reached_all rest g (reached n g r (- left 1)) (- left 1))))))
+
+  (fn variants_of ((t Tree)) Keys
+    (uses Alloc)
+    (if (is (head_word t) "enum") (heads_of (past (items_of t) 2)) (NoKeys)))
+
+  (fn heads_of ((ts Trees)) Keys (uses Alloc) (match ts ((NoTrees) (NoKeys)) ((Trees h rest) (Keys (head_word h) (heads_of rest)))))
+
+  (fn suffixed ((n Bytes) (h Bytes)) Bytes
+    (uses Alloc)
+    (bytes.concat n (bytes.concat (lit "_") (bytes.slice h (Octets 5) (Octets 11)))))
+
+  ; Is something else already here under one of these names?
+  (fn taken ((ns Keys) (placed Map) (h Bytes)) Bool
+    (uses Alloc)
+    (match ns ((NoKeys) false) ((Keys n rest) (or (let p (look placed n) (and (< 0 (size p)) (not (bytes.eq p h)))) (taken rest placed h)))))
+
+  ; What one definition of an import is called here, or "" when it is here already.
+  (fn local ((n Bytes) (h Bytes) (t Tree) (root Bytes) (alias Bytes) (placed Map)) Bytes
+    (uses Alloc)
+    (if (bytes.eq n root)
+      (if (bytes.eq (look placed alias) h) (lit "") alias)
+      (let p (look placed n)
+        (if (bytes.eq p h)
+          (lit "")
+          (if (or (< 0 (size p)) (taken (variants_of t) placed h)) (suffixed n h) n)))))
+
+  ; The renames one import makes: a name to its new one, and a renamed enum's constructors
+  ; to theirs, with the same suffix.
+  (fn variant_renames ((vs Keys) (n Bytes) (suffix Bytes) (r Map)) Map
+    (uses Alloc)
+    (match vs ((NoKeys) r) ((Keys v rest) (variant_renames rest n suffix (if (or (bytes.eq v n) (= (size suffix) 0)) r (put r v (bytes.concat v suffix)))))))
+
+  (fn suffix_of ((n Bytes) (new Bytes)) Bytes
+    (uses Alloc)
+    (if (and (< (size n) (size new)) (bytes.eq (bytes.slice new (Octets 0) (Octets (size n))) n)) (bytes.slice new (Octets (size n)) (Octets (size new))) (lit "")))
+
+  ; --- renaming ----------------------------------------------------------------------------
+  (fn renamed_word ((w Bytes) (r Map)) Bytes (uses Alloc) (let n (look r w) (if (< 0 (size n)) n w)))
+
+  (fn leaf ((text Bytes)) Tree (Leaf text false))
+
+  (fn rn_leaf ((t Tree) (r Map)) Tree (uses Alloc) (match t ((Leaf text quoted) (if quoted t (leaf (renamed_word text r)))) ((Node items) t)))
+
+  ; A type: its name and its arguments' names; a label is not a declaration.
+  (fn rn_type ((t Tree) (r Map) (left Int)) Tree
+    (uses Alloc)
+    (if (<= left 0)
+      t
+      (match t
+        ((Leaf text quoted) (rn_leaf t r))
+        ((Node items) (let w (word (nth items 0))
+          (if (is w "label")
+            (Node (keep_but_last items r (- left 1)))
+            (if (is w "tensor") (Node (Trees (nth items 0) (Trees (rn_leaf (nth items 1) r) (past items 2)))) (Node (rn_types items r (- left 1))))))))))
+
+  (fn rn_types ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0) ts (match ts ((NoTrees) ts) ((Trees h rest) (Trees (rn_type h r (- left 1)) (rn_types rest r (- left 1)))))))
+
+  ; `(label L... T)`: the labels as they are, the type renamed.
+  (fn keep_but_last ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0)
+      ts
+      (match ts
+        ((NoTrees) ts)
+        ((Trees h rest) (match rest ((NoTrees) (Trees (rn_type h r (- left 1)) (NoTrees))) ((Trees h2 more) (Trees h (keep_but_last rest r (- left 1)))))))))
+
+  ; `(name Type)` pairs.
+  (fn rn_pairs ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts ((NoTrees) ts) ((Trees h rest) (Trees (Node (Trees (nth (items_of h) 0) (Trees (rn_type (nth (items_of h) 1) r 100000) (NoTrees)))) (rn_pairs rest r)))))
+
+  (fn rn_expr ((t Tree) (r Map) (left Int)) Tree
+    (uses Alloc)
+    (if (<= left 0) t (match t ((Leaf text quoted) t) ((Node items) (Node (rn_form (word (nth items 0)) items r (- left 1)))))))
+
+  (fn rn_exprs ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0) ts (match ts ((NoTrees) ts) ((Trees h rest) (Trees (rn_expr h r (- left 1)) (rn_exprs rest r (- left 1)))))))
+
+  ; `(x value)` pairs, and `(pattern body)` arms: the second item is an expression.
+  (fn rn_seconds ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0)
+      ts
+      (match ts ((NoTrees) ts) ((Trees h rest) (Trees (Node (Trees (nth (items_of h) 0) (Trees (rn_expr (nth (items_of h) 1) r (- left 1)) (past (items_of h) 2)))) (rn_seconds rest r (- left 1)))))))
+
+  (fn rn_pattern ((t Tree) (r Map)) Tree
+    (uses Alloc)
+    (match t ((Leaf text quoted) t) ((Node items) (Node (Trees (rn_leaf (nth items 0) r) (past items 1))))))
+
+  (fn rn_arms ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0)
+      ts
+      (match ts ((NoTrees) ts) ((Trees h rest) (Trees (Node (Trees (rn_pattern (nth (items_of h) 0) r) (Trees (rn_expr (nth (items_of h) 1) r (- left 1)) (NoTrees)))) (rn_arms rest r (- left 1)))))))
+
+  ; A task: its work and the deadline inside `(deadline d)`.
+  (fn rn_tasks ((ts Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0)
+      ts
+      (match ts
+        ((NoTrees) ts)
+        ((Trees h rest) (let parts (items_of h)
+          (let d (items_of (nth parts 2))
+            (Trees (Node (Trees (nth parts 0) (Trees (rn_expr (nth parts 1) r (- left 1)) (Trees (Node (Trees (nth d 0) (Trees (rn_expr (nth d 1) r (- left 1)) (NoTrees)))) (past parts 3)))))
+                   (rn_tasks rest r (- left 1)))))))))
+
+  ; The items of an expression form whose head is `w`, renamed.
+  (fn rn_form ((w Bytes) (items Trees) (r Map) (left Int)) Trees
+    (uses Alloc)
+    (if (<= left 0)
+      items
+      (let head (nth items 0)
+        (let rest (past items 1)
+          (if (is w "let")
+            (Trees head (Trees (nth rest 0) (rn_exprs (past rest 1) r (- left 1))))
+            (if (is w "match")
+              (Trees head (Trees (rn_expr (nth rest 0) r (- left 1)) (rn_arms (past rest 1) r (- left 1))))
+              (if (is w "make")
+                (Trees head (Trees (rn_leaf (nth rest 0) r) (rn_seconds (past rest 1) r (- left 1))))
+                (if (is w "with")
+                  (Trees head (Trees (rn_expr (nth rest 0) r (- left 1)) (rn_seconds (past rest 1) r (- left 1))))
+                  (if (is w "get")
+                    (Trees head (Trees (rn_expr (nth rest 0) r (- left 1)) (past rest 1)))
+                    (if (or (is w "declassify") (or (is w "send") (is w "infer")))
+                      (Trees head (Trees (nth rest 0) (rn_exprs (past rest 1) r (- left 1))))
+                      (if (or (is w "bytes") (is w "recv"))
+                        items
+                        (if (is w "log.fields")
+                          (Trees head (rn_seconds rest r (- left 1)))
+                          (if (is w "par")
+                            (Trees head (Trees (Node (rn_seconds (items_of (nth rest 0)) r (- left 1))) (rn_exprs (past rest 1) r (- left 1))))
+                            (if (is w "scope")
+                              (Trees head (Trees (Node (rn_tasks (items_of (nth rest 0)) r (- left 1))) (rn_exprs (past rest 1) r (- left 1))))
+                              (Trees (rn_leaf head r) (rn_exprs rest r (- left 1)))))))))))))))))
+
+  ; A fn's clauses: a contract is an expression; the rest name no declaration.
+  (fn rn_clauses ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (Trees (if (or (is (head_word h) "requires") (is (head_word h) "ensures")) (Node (Trees (nth (items_of h) 0) (Trees (rn_expr (nth (items_of h) 1) r 100000) (NoTrees)))) h)
+                             (rn_clauses rest r)))))
+
+  ; `name` or `(name T...)`.
+  (fn rn_head ((t Tree) (r Map)) Tree
+    (uses Alloc)
+    (match t ((Leaf text quoted) (rn_leaf t r)) ((Node items) (Node (Trees (rn_leaf (nth items 0) r) (past items 1))))))
+
+  (fn rn_variants ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts ((NoTrees) ts) ((Trees h rest) (Trees (Node (Trees (rn_leaf (nth (items_of h) 0) r) (rn_pairs (past (items_of h) 1) r))) (rn_variants rest r)))))
+
+  ; A record's fields, past a schema clause.
+  (fn rn_fields ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts ((NoTrees) ts) ((Trees h rest) (if (is (head_word h) "schema") (Trees h (rn_pairs rest r)) (rn_pairs ts r)))))
+
+  ; `(input T)` and `(output T)`.
+  (fn rn_model ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (Trees (if (or (is (head_word h) "input") (is (head_word h) "output")) (Node (Trees (nth (items_of h) 0) (Trees (rn_type (nth (items_of h) 1) r 100000) (NoTrees)))) h) (rn_model rest r)))))
+
+  (fn last_items ((ts Trees)) Trees
+    (match ts ((NoTrees) ts) ((Trees h rest) (match rest ((NoTrees) ts) ((Trees h2 more) (last_items rest))))))
+
+  (fn but_last_items ((ts Trees)) Trees
+    (match ts ((NoTrees) ts) ((Trees h rest) (match rest ((NoTrees) (NoTrees)) ((Trees h2 more) (Trees h (but_last_items rest)))))))
+
+  (fn joined ((a Trees) (b Trees)) Trees (match a ((NoTrees) b) ((Trees h rest) (Trees h (joined rest b)))))
+
+  (fn rn_decl ((t Tree) (r Map)) Tree
+    (uses Alloc)
+    (let items (items_of t)
+      (let w (head_word t)
+        (let kw (nth items 0)
+          (let rest (past items 2)
+            (if (is w "fn")
+              (Node (Trees kw (Trees (rn_head (nth items 1) r) (Trees (Node (rn_pairs (items_of (nth items 2)) r)) (Trees (rn_type (nth items 3) r 100000)
+                (joined (rn_clauses (but_last_items (past items 4)) r) (rn_exprs (last_items (past items 4)) r 100000)))))))
+              (if (is w "enum")
+                (Node (Trees kw (Trees (rn_head (nth items 1) r) (rn_variants rest r))))
+                (if (is w "record")
+                  (Node (Trees kw (Trees (rn_leaf (nth items 1) r) (rn_fields rest r))))
+                    (if (is w "foreign")
+                      (Node (Trees kw (Trees (rn_leaf (nth items 1) r) (Trees (Node (rn_pairs (items_of (nth items 2)) r)) (Trees (rn_type (nth items 3) r 100000) (past items 4))))))
+                      (if (or (is w "patch") (is w "channel"))
+                        (Node (Trees kw (Trees (rn_leaf (nth items 1) r) rest)))
+                        (if (is w "model")
+                          (Node (Trees kw (Trees (rn_leaf (nth items 1) r) (rn_model rest r))))
+                          t)))))))))))
+
+  ; A refinement is `(requires v condition)`: the binder, then the condition.
+  (fn rn_refinement ((ts Trees) (r Map)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (Trees (Node (Trees (nth (items_of h) 0) (Trees (nth (items_of h) 1) (Trees (rn_expr (nth (items_of h) 2) r 100000) (NoTrees))))) rest))))
+
+  ; --- one import, spliced ------------------------------------------------------------------
+  (record Here (placed Map) (spliced Decls))
+
+  (record Plan (renames Map) (keep Keys))
+
+  ; Decide each definition's name here before anything moves, as resolve.py does.
+  (fn planned ((ns Keys) (home Done) (root Bytes) (alias Bytes) (placed Map) (p Plan)) Plan
+    (uses Alloc)
+    (match ns
+      ((NoKeys) p)
+      ((Keys n rest) (let h (look (get home refs) n)
+        (let t (look_decl (get home decls) n)
+          (let new (local n h t root alias placed)
+            (planned rest home root alias placed
+              (if (= (size new) 0)
+                p
+                (make Plan (renames (if (bytes.eq new n) (get p renames) (variant_renames (variants_of t) n (suffix_of n new) (put (get p renames) n new))))
+                           (keep (Keys n (get p keep))))))))))))
+
+  ; What is placed now, constructors too, under the names they took.
+  (fn placed_variants ((vs Keys) (suffix Bytes) (h Bytes) (m Map)) Map
+    (uses Alloc)
+    (match vs ((NoKeys) m) ((Keys v rest) (placed_variants rest suffix h (let k (bytes.concat v suffix) (if (holds m k) m (put m k h)))))))
+
+  (fn spliced_in ((ns Keys) (home Done) (r Map) (s Here)) Here
+    (uses Alloc)
+    (match ns
+      ((NoKeys) s)
+      ((Keys n rest) (let h (look (get home refs) n)
+        (let t (look_decl (get home decls) n)
+          (let new (renamed_word n r)
+            (let t2 (rn_decl_full t r)
+              (spliced_in rest home r
+                (make Here (placed (placed_variants (variants_of t) (suffix_of n new) h (if (holds (get s placed) new) (get s placed) (put (get s placed) new h))))
+                           (spliced (put_decl (get s spliced) new t2)))))))))))
+
+  (fn rn_decl_full ((t Tree) (r Map)) Tree
+    (uses Alloc)
+    (if (is (head_word t) "newtype")
+      (let items (items_of t) (Node (Trees (nth items 0) (Trees (rn_leaf (nth items 1) r) (Trees (rn_type (nth items 2) r 100000) (rn_refinement (past items 3) r))))))
+      (rn_decl t r)))
+
+  ; --- a module, resolved ---------------------------------------------------------------------
+  (record Step (here Here) (missing Bytes))
+
+  (fn quoted_hash ((t Tree)) Bytes
+    (uses Alloc)
+    (bytes.concat (lit "\"") (bytes.concat (word t) (lit "\""))))
+
+  (fn imported ((items Trees) (ms Mods) (s Step)) Step
+    (uses Alloc)
+    (match items
+      ((NoTrees) s)
+      ((Trees h rest) (if (and (is_use h) (= (size (get s missing)) 0))
+        (let parts (items_of h)
+          (let wanted (quoted_hash (nth parts 1))
+            (let alias (word (nth parts 3))
+              (match (home_of ms wanted)
+                ((None) (imported rest ms (with s (missing (word (nth parts 1))))))
+                ((Some home) (let root (name_in home wanted)
+                  (let closure (get (reached root (get home graph) (make Reach (seen (Tip)) (order (NoKeys))) 1000000000) order)
+                    (let plan (planned closure home root alias (get (get s here) placed) (make Plan (renames (Tip)) (keep (NoKeys))))
+                      (imported rest ms (with s (here (spliced_in (get plan keep) home (get plan renames) (get s here)))))))))))))
+        (imported rest ms s)))))
+
+  ; The module's own names, constructors too, are here before anything is brought.
+  (fn own_placed ((items Trees) (m Map)) Map
+    (uses Alloc)
+    (match items
+      ((NoTrees) m)
+      ((Trees h rest) (own_placed rest (if (or (is_use h) (is_test h)) m (placed_variants (variants_of h) (lit "") (lit "own") (put m (decl_name h) (lit "own"))))))))
+
+  (fn decl_trees ((m Decls) (out Trees)) Trees
+    (match m ((NoDecls) out) ((Decl key tree lo hi) (decl_trees lo (Trees tree (decl_trees hi out))))))
+
+  (fn not_uses ((items Trees)) Trees
+    (uses Alloc)
+    (match items ((NoTrees) items) ((Trees h rest) (if (is_use h) (not_uses rest) (Trees h (not_uses rest))))))
+
+  ; A module's resolved items: what it brought, in name order, then what it wrote.
+  (record Resolved (items Trees) (missing Bytes))
+
+  (fn resolved ((items Trees) (ms Mods)) Resolved
+    (uses Alloc)
+    (let s (imported items ms (make Step (here (make Here (placed (own_placed items (Tip))) (spliced (NoDecls)))) (missing (lit ""))))
+      (make Resolved (items (decl_trees (get (get s here) spliced) (not_uses items))) (missing (get s missing)))))
+
+  (fn done_of ((name Bytes) (items Trees) (written Trees)) Done
+    (uses Alloc)
+    (let hs (hashes_of_items items)
+      (make Done (name name) (items items) (decls (decls_of items (NoDecls))) (graph (get hs graph)) (refs (get hs refs)) (own (own_hashes written (get hs refs) (Tip))) (all (inverted (get hs refs) (Tip))))))
+
+  ; Each module in turn, every earlier one there to import from. The answer is the modules,
+  ; latest first, or the hash that was not found.
+  (record Linked (mods Mods) (missing Bytes))
+
+  (fn linked ((modules Trees) (l Linked)) Linked
+    (uses Alloc)
+    (match modules
+      ((NoTrees) l)
+      ((Trees m rest) (if (< 0 (size (get l missing)))
+        l
+        (let written (past (items_of m) 2)
+          (let r (resolved written (reversed_mods (get l mods) (NoMods)))
+            (if (< 0 (size (get r missing)))
+              (with l (missing (bytes.concat (get r missing) (bytes.concat (lit " in ") (word (nth (items_of m) 1))))))
+              (linked rest (with l (mods (Mods (done_of (word (nth (items_of m) 1)) (get r items) written) (get l mods))))))))))))
+
+  (fn reversed_mods ((ms Mods) (onto Mods)) Mods (match ms ((NoMods) onto) ((Mods h rest) (reversed_mods rest (Mods h onto)))))
+
+  ; --- the text --------------------------------------------------------------------------------
+  (fn text_of ((t Tree) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "")
+      (match t
+        ((Leaf text quoted) (if quoted (bytes.concat (lit "\"") (bytes.concat text (lit "\""))) text))
+        ((Node items) (bytes.concat (lit "(") (bytes.concat (texts_of items (- left 1)) (lit ")")))))))
+
+  (fn texts_of ((ts Trees) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "")
+      (match ts
+        ((NoTrees) (lit ""))
+        ((Trees h rest) (match rest ((NoTrees) (text_of h (- left 1))) ((Trees h2 more) (bytes.concat (text_of h (- left 1)) (bytes.concat (lit " ") (texts_of rest (- left 1))))))))))
+
+  (fn lines_of ((ts Trees)) Bytes
+    (uses Alloc)
+    (match ts ((NoTrees) (lit "")) ((Trees h rest) (bytes.concat (lit "\n  ") (bytes.concat (text_of h 100000) (lines_of rest))))))
+
+  ; What the runtime library adds: its definitions, not its tests or `main`.
+  (fn library ((items Trees)) Trees
+    (uses Alloc)
+    (match items
+      ((NoTrees) items)
+      ((Trees h rest) (if (or (or (is_use h) (is_test h)) (is (decl_name h) "main")) (library rest) (Trees h (library rest))))))
+
+  (fn library_of ((ms Mods)) Trees
+    (uses Alloc)
+    (match ms ((NoMods) (NoTrees)) ((Mods d rest) (if (is (get d name) "rtlib") (library (get d items)) (library_of rest)))))
+
+  (fn flattened_bytes ((src Bytes)) Bytes
+    (uses Alloc)
+    (match (parse (tokens_of src))
+      ((Err f) (lit "error the modules do not parse\n"))
+      ((Ok tree) (let l (linked (past (items_of tree) 1) (make Linked (mods (NoMods)) (missing (lit ""))))
+        (if (< 0 (size (get l missing)))
+          (bytes.concat (lit "error unresolved ") (bytes.concat (get l missing) (lit "\n")))
+          (match (get l mods)
+            ((NoMods) (lit "error no modules\n"))
+            ((Mods last others) (bytes.concat (lit "(module ") (bytes.concat (get last name) (bytes.concat (lines_of (joined (get last items) (library_of others))) (lit "\n)\n")))))))))))
+
+  ; The last of the modules, flattened, with the runtime library after it.
+  (fn flattened ((src Str)) Str
+    (uses Alloc)
+    (match (bytes.decode (flattened_bytes (str.encode src))) ((Err f) "error the answer is not text\n") ((Ok s) s)))
+
+  (test "an import is spliced in under the name it was asked for"
+    (str.eq (flattened "(modules (module a (fn one () Int 1)) (module b (use \"wtn:3bae204025843a143381e2657ca3740d425796cd35e8e29ebf2accde7fa09f64\" as uno) (fn two () Int (+ (uno) (uno)))))")
+            "(module b\n  (fn uno () Int 1)\n  (fn two () Int (+ (uno) (uno)))\n)\n"))
+
+  (test "what an import is built out of takes a name of its own when it clashes with one here"
+    (str.eq (flattened "(modules (module a (fn helper () Int 1) (fn one () Int (helper))) (module b (fn helper () Int 2) (use \"wtn:473941534c554fbb152644d0f298cb6f6da00486e1fb2bcd70df96b1277971b2\" as one) (fn two () Int (+ (one) (helper)))))")
+            "(module b\n  (fn helper_3bae20 () Int 1)\n  (fn one () Int (helper_3bae20))\n  (fn helper () Int 2)\n  (fn two () Int (+ (one) (helper)))\n)\n"))
+
+  (test "a hash nothing before holds is named, and nothing is made up for it"
+    (str.eq (flattened "(modules (module a (fn one () Int 1)) (module b (use \"wtn:0000000000000000000000000000000000000000000000000000000000000000\" as uno) (fn two () Int (uno))))")
+            "error unresolved wtn:0000000000000000000000000000000000000000000000000000000000000000 in b\n")))

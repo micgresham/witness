@@ -1,0 +1,951 @@
+; The content hash of every definition in a module: witness/hashing.py, in Witness.
+;
+; compiler/digest.wtn hashes a tree as it was written, and says plainly that this is not a
+; content address: a renamed parameter changes it. This module is the content address. A
+; definition is put into hashing.py's canonical form -- a variable is its position in scope,
+; a type parameter its index, the arms of a `match` are sorted by variant, and a dependency
+; is its own hash -- that form is written exactly as Python's
+; `json.dumps(form, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` writes it,
+; and the bytes are hashed with compiler/sha256.wtn. The same steps over the same tree give
+; the same bytes, so the hash is the one the codebase holds the definition by, and
+; tests/test_canon_wtn.py checks that it is, definition by definition, for the corpus.
+;
+; WHAT IS THE SAME AS hashing.py
+;
+; Everything that decides a hash. The definitions are the module's and the prelude's,
+; tests among them (keyed `kind:name`). A patch is the record it expands to. Each
+; definition depends on what `_deps` says it does, and the definitions that depend on one
+; another are one strongly connected component: a component of one is hashed as its form,
+; and a larger one as a `group` of its members' forms in name order, each member then the
+; hash of `["member", group, i]`. A name is a JSON string with JSON's escapes; a string
+; literal is the text it decodes to, which for the reader's four escapes is the text as
+; written; a decimal literal is spelt as Python's `str(Decimal(text))` spells it.
+;
+; WHAT IS NOT READ YET, AND SAYS SO
+;
+; A module that imports: a `use` is resolved against the codebase (step 3 of porting the
+; store). A `log.fields` in a module with a redaction: the policy a field is logged under is
+; part of its hash and depends on the labels its value carries, which needs the expression
+; typer. Either gives `unread`, never a hash that might be wrong.
+;
+;   witness test compiler/canon.wtn
+;   witness run  compiler/canon.wtn --grant Alloc,Console
+(module canon
+  (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (use "wtn:ce6bc8d6e4773e0df82ceaa91e0c3827343653940f9f9a55fcce94111224ea10" as sha256)
+
+  (use "wtn:90a50d84c8567129b33153303f56c5821e914f53aaabe33a6097595553c3817a" as hex)
+
+  ; --- bytes -------------------------------------------------------------------------------
+  (fn lit ((s Str)) Bytes (uses Alloc) (str.encode s))
+
+  (fn size ((t Bytes)) Int (ensures (<= 0 result)) (unwrap (bytes.len t)))
+
+  ; A byte, or -1 past the end.
+  (fn octet ((t Bytes) (i Int)) Int
+    (match (bytes.at t (Octets i)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn is ((t Bytes) (s Str)) Bool (uses Alloc) (bytes.eq t (str.encode s)))
+
+  ; Byte order, which for UTF-8 is the order Python sorts strings in.
+  (fn before ((a Bytes) (b Bytes)) Bool (precedes a b 0 (+ 1 (size a))))
+
+  (fn precedes ((a Bytes) (b Bytes) (i Int) (left Int)) Bool
+    (if (<= left 0)
+      false
+      (let x (octet a i)
+        (let y (octet b i)
+          (if (< x 0)
+            (<= 0 y)
+            (if (< y 0) false (if (< x y) true (if (< y x) false (precedes a b (+ i 1) (- left 1))))))))))
+
+  ; --- names -------------------------------------------------------------------------------
+  (enum Keys (NoKeys) (Keys (head Bytes) (rest Keys)))
+
+  ; Where a name first appears, or -1: a scope is innermost first, so this is the de Bruijn
+  ; index hashing.py takes as `scope[::-1].index(name)`.
+  (fn position ((ks Keys) (k Bytes)) Int
+    (match ks
+      ((NoKeys) (- 0 1))
+      ((Keys h rest) (if (bytes.eq h k) 0 (let p (position rest k) (if (< p 0) p (+ p 1)))))))
+
+  (fn has ((ks Keys) (k Bytes)) Bool (<= 0 (position ks k)))
+
+  (fn inserted ((k Bytes) (ks Keys)) Keys
+    (match ks
+      ((NoKeys) (Keys k (NoKeys)))
+      ((Keys h rest) (if (bytes.eq h k) ks (if (before k h) (Keys k ks) (Keys h (inserted k rest)))))))
+
+  ; `sorted(set(...))`.
+  (fn set_of ((ks Keys)) Keys
+    (match ks ((NoKeys) (NoKeys)) ((Keys h rest) (inserted h (set_of rest)))))
+
+  (fn keys_length ((ks Keys)) Int (match ks ((NoKeys) 0) ((Keys h rest) (+ 1 (keys_length rest)))))
+
+  ; --- a binary tree of names, three ways --------------------------------------------------
+  ; A module and its imports hold a few thousand definitions, and every call in every body
+  ; asks what its head is, so a list would be asked a few million questions.
+  (enum Map (Tip) (Fork (key Bytes) (value Bytes) (lo Map) (hi Map)))
+
+  (fn put ((m Map) (k Bytes) (v Bytes)) Map
+    (match m
+      ((Tip) (Fork k v (Tip) (Tip)))
+      ((Fork key value lo hi) (if (bytes.eq k key) (Fork k v lo hi) (if (before k key) (Fork key value (put lo k v) hi) (Fork key value lo (put hi k v)))))))
+
+  ; Nothing is kept as the empty value, so an empty answer is an absent one.
+  (fn look ((m Map) (k Bytes)) Bytes
+    (uses Alloc)
+    (match m
+      ((Tip) (lit ""))
+      ((Fork key value lo hi) (if (bytes.eq k key) value (if (before k key) (look lo k) (look hi k))))))
+
+  (fn holds ((m Map) (k Bytes)) Bool (uses Alloc) (< 0 (size (look m k))))
+
+  (enum Nums (NoNums) (Num (key Bytes) (value Int) (lo Nums) (hi Nums)))
+
+  (fn put_num ((m Nums) (k Bytes) (v Int)) Nums
+    (match m
+      ((NoNums) (Num k v (NoNums) (NoNums)))
+      ((Num key value lo hi) (if (bytes.eq k key) (Num k v lo hi) (if (before k key) (Num key value (put_num lo k v) hi) (Num key value lo (put_num hi k v)))))))
+
+  (fn look_num ((m Nums) (k Bytes)) Int
+    (match m
+      ((NoNums) (- 0 1))
+      ((Num key value lo hi) (if (bytes.eq k key) value (if (before k key) (look_num lo k) (look_num hi k))))))
+
+  (enum Graph (NoGraph) (Edges (key Bytes) (value Keys) (lo Graph) (hi Graph)))
+
+  (fn put_edges ((m Graph) (k Bytes) (v Keys)) Graph
+    (match m
+      ((NoGraph) (Edges k v (NoGraph) (NoGraph)))
+      ((Edges key value lo hi) (if (bytes.eq k key) (Edges k v lo hi) (if (before k key) (Edges key value (put_edges lo k v) hi) (Edges key value lo (put_edges hi k v)))))))
+
+  (fn look_edges ((m Graph) (k Bytes)) Keys
+    (match m
+      ((NoGraph) (NoKeys))
+      ((Edges key value lo hi) (if (bytes.eq k key) value (if (before k key) (look_edges lo k) (look_edges hi k))))))
+
+  ; --- JSON, as json.dumps writes it -------------------------------------------------------
+  (enum Parts (NoParts) (Parts (head Bytes) (rest Parts)))
+
+  (fn commas ((ps Parts)) Bytes
+    (uses Alloc)
+    (match ps
+      ((NoParts) (lit ""))
+      ((Parts h rest) (match rest ((NoParts) h) ((Parts h2 more) (bytes.concat h (bytes.concat (lit ",") (commas rest))))))))
+
+  (fn json_list ((ps Parts)) Bytes (uses Alloc) (bytes.concat (lit "[") (bytes.concat (commas ps) (lit "]"))))
+
+  (fn tag ((s Str)) Bytes (uses Alloc) (bytes.concat (lit "\"") (bytes.concat (lit s) (lit "\""))))
+
+  (fn one ((a Bytes)) Bytes (uses Alloc) (json_list (Parts a (NoParts))))
+
+  (fn two ((a Bytes) (b Bytes)) Bytes (uses Alloc) (json_list (Parts a (Parts b (NoParts)))))
+
+  (fn three ((a Bytes) (b Bytes) (c Bytes)) Bytes (uses Alloc) (json_list (Parts a (Parts b (Parts c (NoParts))))))
+
+  (fn four ((a Bytes) (b Bytes) (c Bytes) (d Bytes)) Bytes
+    (uses Alloc)
+    (json_list (Parts a (Parts b (Parts c (Parts d (NoParts)))))))
+
+  (fn number ((n Int)) Bytes (uses Alloc) (str.encode (num.to_str n)))
+
+  (fn boolean ((b Bool)) Bytes (uses Alloc) (if b (lit "true") (lit "false")))
+
+  (fn nibble ((d Int)) Bytes (uses Alloc) (bytes.slice (lit "0123456789abcdef") (Octets d) (Octets (+ d 1))))
+
+  ; How json.dumps writes a byte inside a string, or nothing for a byte that stands for
+  ; itself. Text the reader kept `raw` already has its quote and backslash escaped -- the
+  ; reader's four escapes are JSON's spelling of the same characters -- so only a control
+  ; byte written into the source as itself is left to escape.
+  (fn escape_of ((c Int) (raw Bool)) Bytes
+    (uses Alloc)
+    (if (and (= c 34) (not raw))
+      (lit "\\\"")
+      (if (and (= c 92) (not raw))
+        (lit "\\\\")
+        (if (= c 10)
+          (lit "\\n")
+          (if (= c 13)
+            (lit "\\r")
+            (if (= c 9)
+              (lit "\\t")
+              (if (= c 8)
+                (lit "\\b")
+                (if (= c 12)
+                  (lit "\\f")
+                  (if (< c 16) (bytes.concat (lit "\\u000") (nibble c)) (if (< c 32) (bytes.concat (lit "\\u001") (nibble (- c 16))) (lit "")))))))))))
+
+  ; The bytes from `from` up to `i` stand for themselves and are copied in one piece.
+  (fn escaped ((t Bytes) (raw Bool) (from Int) (i Int) (left Int) (out Bytes)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (let c (octet t i)
+        (if (< c 0)
+          (bytes.concat out (bytes.slice t (Octets from) (Octets i)))
+          (let e (escape_of c raw)
+            (if (= (size e) 0)
+              (escaped t raw from (+ i 1) (- left 1) out)
+              (escaped t raw (+ i 1) (+ i 1) (- left 1) (bytes.concat (bytes.concat out (bytes.slice t (Octets from) (Octets i))) e))))))))
+
+  (fn json_text ((t Bytes) (raw Bool)) Bytes
+    (uses Alloc)
+    (bytes.concat (lit "\"") (bytes.concat (escaped t raw 0 0 (+ 1 (size t)) (lit "")) (lit "\""))))
+
+  (fn name_json ((t Bytes)) Bytes (uses Alloc) (json_text t false))
+
+  (fn str_json ((t Bytes)) Bytes (uses Alloc) (json_text t true))
+
+  (fn names_json ((ks Keys)) Bytes (uses Alloc) (json_list (names_parts ks)))
+
+  (fn names_parts ((ks Keys)) Parts
+    (uses Alloc)
+    (match ks ((NoKeys) (NoParts)) ((Keys h rest) (Parts (name_json h) (names_parts rest)))))
+
+  ; --- literals ----------------------------------------------------------------------------
+  ; The reader's numbers: `-?[0-9]+` is an integer and `-?[0-9]+\.[0-9]+` a decimal.
+  (fn digit_run ((t Bytes) (i Int) (left Int)) Int
+    (if (<= left 0) i (let c (octet t i) (if (and (<= 48 c) (<= c 57)) (digit_run t (+ i 1) (- left 1)) i))))
+
+  (fn sign_length ((t Bytes)) Int (if (= (octet t 0) 45) 1 0))
+
+  (fn is_int ((t Bytes)) Bool
+    (let s (sign_length t) (let e (digit_run t s (+ 1 (size t))) (and (< s e) (= e (size t))))))
+
+  (fn is_real ((t Bytes)) Bool
+    (let s (sign_length t)
+      (let dot (digit_run t s (+ 1 (size t)))
+        (if (and (< s dot) (= (octet t dot) 46)) (let e (digit_run t (+ dot 1) (+ 1 (size t))) (and (< (+ dot 1) e) (= e (size t)))) false))))
+
+  ; The first byte from `i` that is not a 0, stopping at `stop`.
+  (fn zeros_end ((t Bytes) (i Int) (stop Int) (left Int)) Int
+    (if (<= left 0) i (if (and (< i stop) (= (octet t i) 48)) (zeros_end t (+ i 1) stop (- left 1)) i)))
+
+  ; An integer as Python prints it: no leading zeros, and no sign on zero.
+  (fn int_text ((t Bytes)) Bytes
+    (uses Alloc)
+    (let s (sign_length t)
+      (let n (size t)
+        (let mag (bytes.slice t (Octets (zeros_end t s (- n 1) (+ 1 n))) (Octets n))
+          (if (or (= s 0) (is mag "0")) mag (bytes.concat (lit "-") mag))))))
+
+  (fn zero_run ((left Int)) Bytes (uses Alloc) (if (<= left 0) (lit "") (bytes.concat (lit "0") (zero_run (- left 1)))))
+
+  ; `str(Decimal(text))` for a decimal with `places` digits after the point, its digits
+  ; `coef` without leading zeros: plain unless the leading digit is more than six places
+  ; down, and then scientific, as the decimal module's to-string rule has it.
+  (fn decimal ((coef Bytes) (places Int)) Bytes
+    (uses Alloc)
+    (let k (size coef)
+      (let adjusted (- (- k 1) places)
+        (if (<= (- 0 6) adjusted)
+          (if (< places k)
+            (bytes.concat (bytes.slice coef (Octets 0) (Octets (- k places))) (bytes.concat (lit ".") (bytes.slice coef (Octets (- k places)) (Octets k))))
+            (bytes.concat (lit "0.") (bytes.concat (zero_run (- places k)) coef)))
+          (bytes.concat (bytes.slice coef (Octets 0) (Octets 1))
+                        (bytes.concat (if (< 1 k) (bytes.concat (lit ".") (bytes.slice coef (Octets 1) (Octets k))) (lit ""))
+                                      (bytes.concat (lit "E") (number adjusted))))))))
+
+  (fn real_text ((t Bytes)) Bytes
+    (uses Alloc)
+    (let s (sign_length t)
+      (let n (size t)
+        (let dot (digit_run t s (+ 1 n))
+          (let whole (bytes.concat (bytes.slice t (Octets s) (Octets dot)) (bytes.slice t (Octets (+ dot 1)) (Octets n)))
+            (let w (size whole)
+              (bytes.concat (if (= s 1) (lit "-") (lit ""))
+                            (decimal (bytes.slice whole (Octets (zeros_end whole 0 (- w 1) (+ 1 w))) (Octets w)) (- n (+ dot 1))))))))))
+
+  ; `bytes.fromhex(digits).hex()`: the same digits, lower case.
+  (fn lowered ((t Bytes) (i Int) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "")
+      (let c (octet t i)
+        (if (< c 0)
+          (lit "")
+          (bytes.concat (if (and (<= 65 c) (<= c 70)) (nibble (- c 55)) (bytes.slice t (Octets i) (Octets (+ i 1)))) (lowered t (+ i 1) (- left 1)))))))
+
+  ; --- the parts of a form -----------------------------------------------------------------
+  (fn word ((t Tree)) Bytes (uses Alloc) (match t ((Leaf text quoted) text) ((Node items) (lit ""))))
+
+  (fn items_of ((t Tree)) Trees (match t ((Leaf text quoted) (NoTrees)) ((Node items) items)))
+
+  (fn nth ((ts Trees) (n Int)) Tree
+    (uses Alloc)
+    (match ts ((NoTrees) (Leaf (lit "") false)) ((Trees h rest) (if (<= n 0) h (nth rest (- n 1))))))
+
+  (fn past ((ts Trees) (n Int)) Trees (match ts ((NoTrees) ts) ((Trees h rest) (if (<= n 0) ts (past rest (- n 1))))))
+
+  (fn trees_length ((ts Trees)) Int (match ts ((NoTrees) 0) ((Trees h rest) (+ 1 (trees_length rest)))))
+
+  (fn head_word ((t Tree)) Bytes (uses Alloc) (word (nth (items_of t) 0)))
+
+  ; All but the last, and the last: a fn's clauses and its body.
+  (fn but_last ((ts Trees)) Trees
+    (match ts ((NoTrees) ts) ((Trees h rest) (match rest ((NoTrees) (NoTrees)) ((Trees h2 more) (Trees h (but_last rest)))))))
+
+  (fn last ((ts Trees)) Tree
+    (uses Alloc)
+    (match ts ((NoTrees) (Leaf (lit "") false)) ((Trees h rest) (match rest ((NoTrees) h) ((Trees h2 more) (last rest))))))
+
+  (fn words ((ts Trees)) Keys (uses Alloc) (match ts ((NoTrees) (NoKeys)) ((Trees h rest) (Keys (word h) (words rest)))))
+
+  ; The clause of a form that starts with `which`, as its items after the head.
+  (fn clause ((ts Trees) (which Str)) Trees
+    (uses Alloc)
+    (match ts ((NoTrees) (NoTrees)) ((Trees h rest) (if (is (head_word h) which) (past (items_of h) 1) (clause rest which)))))
+
+  (fn has_clause ((ts Trees) (which Str)) Bool
+    (uses Alloc)
+    (match ts ((NoTrees) false) ((Trees h rest) (or (is (head_word h) which) (has_clause rest which)))))
+
+  ; A decl's name: `(fn name ...)`, or `(fn (name T...) ...)` for a generic one.
+  (fn decl_name ((t Tree)) Bytes
+    (uses Alloc)
+    (let n (nth (items_of t) 1) (match n ((Leaf text quoted) text) ((Node items) (word (nth items 0))))))
+
+  ; A record's fields, past the schema clause if it has one.
+  (fn record_fields ((t Tree)) Trees
+    (uses Alloc)
+    (let rest (past (items_of t) 2) (if (is (head_word (nth rest 0)) "schema") (past rest 1) rest)))
+
+  ; --- the module's definitions ------------------------------------------------------------
+  (record Def (key Bytes) (tree Tree))
+
+  (enum Defs (NoDefs) (Defs (head Def) (rest Defs)))
+
+  ; What a call head is: "f" a fn, "x" a foreign fn, "n" a newtype, and "v" and its enum's
+  ; name a variant. Anything else is a builtin.
+  (record Book (defs Defs) (names Map) (heads Map) (redacts Bool) (imports Bool))
+
+  (fn added ((b Book) (key Bytes) (t Tree)) Book
+    (uses Alloc)
+    (with b (defs (Defs (make Def (key key) (tree t)) (get b defs))) (names (put (get b names) key (lit "1")))))
+
+  (fn variants_put ((vs Trees) (owner Bytes) (m Map)) Map
+    (uses Alloc)
+    (match vs ((NoTrees) m) ((Trees h rest) (variants_put rest owner (put m (head_word h) (bytes.concat (lit "v") owner))))))
+
+  (fn headed ((b Book) (name Bytes) (kind Str)) Book (uses Alloc) (with b (heads (put (get b heads) name (lit kind)))))
+
+  (fn book_one ((t Tree) (b Book)) Book
+    (uses Alloc)
+    (let w (head_word t)
+      (if (is w "redact")
+        (with b (redacts true))
+        (if (is w "use")
+          (with b (imports true))
+          (if (or (is w "test") (or (is w "property") (is w "snapshot")))
+            (added b (bytes.concat w (bytes.concat (lit ":") (word (nth (items_of t) 1)))) t)
+            (let name (decl_name t)
+              (let b2 (added b name t)
+                (if (is w "fn")
+                  (headed b2 name "f")
+                  (if (is w "foreign")
+                    (headed b2 name "x")
+                    (if (is w "newtype")
+                      (headed b2 name "n")
+                      (if (is w "enum") (with b2 (heads (variants_put (past (items_of t) 2) name (get b2 heads)))) b2)))))))))))
+
+  (fn booked ((items Trees) (b Book)) Book
+    (uses Alloc)
+    (match items ((NoTrees) b) ((Trees h rest) (booked rest (book_one h b)))))
+
+  (fn find_def ((ds Defs) (key Bytes)) Tree
+    (uses Alloc)
+    (match ds ((NoDefs) (Leaf (lit "") false)) ((Defs d rest) (if (bytes.eq (get d key) key) (get d tree) (find_def rest key)))))
+
+  ; --- what a definition depends on: _deps -------------------------------------------------
+  ; The names in a type, a type parameter's excepted. A label is not a name of anything.
+  (fn type_names ((t Tree) (params Keys) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match t
+        ((Leaf text quoted) (if (has params text) out (Keys text out)))
+        ((Node items) (let w (word (nth items 0))
+          (if (and (is w "tensor") (<= 3 (trees_length items)))
+            (type_names (nth items 1) params (Keys (lit "Tensor") out) (- left 1))
+            (if (and (is w "label") (<= 3 (trees_length items)))
+              (type_names (last items) params out (- left 1))
+              (types_names (past items 1) params (if (has params w) out (Keys w out)) (- left 1)))))))))
+
+  (fn types_names ((ts Trees) (params Keys) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts ((NoTrees) out) ((Trees h rest) (types_names rest params (type_names h params out (- left 1)) (- left 1))))))
+
+  ; The types of `(name Type)` pairs.
+  (fn pair_names ((ts Trees) (params Keys) (out Keys)) Keys
+    (uses Alloc)
+    (match ts ((NoTrees) out) ((Trees h rest) (pair_names rest params (type_names (nth (items_of h) 1) params out 100000)))))
+
+  ; What a call head is a dependency on, if anything.
+  (fn head_dep ((b Book) (w Bytes) (out Keys)) Keys
+    (uses Alloc)
+    (let k (look (get b heads) w)
+      (if (= (size k) 0) out (if (= (octet k 0) 118) (Keys (bytes.slice k (Octets 1) (Octets (size k))) out) (Keys w out)))))
+
+  ; A function's (`full`) also depends on the models it runs and the channels it uses; a
+  ; test's, as in hashing.py, does not.
+  (fn also ((full Bool) (w Bytes) (out Keys)) Keys (if full (Keys w out) out))
+
+  ; The names an expression depends on.
+  (fn expr_deps ((t Tree) (b Book) (full Bool) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match t
+        ((Leaf text quoted) out)
+        ((Node items) (form_deps (word (nth items 0)) (past items 1) b full out (- left 1))))))
+
+  (fn form_deps ((w Bytes) (rest Trees) (b Book) (full Bool) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+            (if (is w "make")
+              (values_deps (past rest 1) b full (Keys (word (nth rest 0)) out) (- left 1))
+              (if (is w "infer")
+                (expr_deps (nth rest 1) b full (also full (word (nth rest 0)) out) (- left 1))
+                (if (is w "send")
+                  (expr_deps (nth rest 1) b full (also full (word (nth rest 0)) out) (- left 1))
+                  (if (is w "recv")
+                    (also full (word (nth rest 0)) out)
+                    (if (is w "let")
+                      (all_deps (past rest 1) b full out (- left 1))
+                      (if (is w "match")
+                        (values_deps (past rest 1) b full (expr_deps (nth rest 0) b full out (- left 1)) (- left 1))
+                        (if (or (is w "get") (is w "bytes"))
+                          (if (is w "get") (expr_deps (nth rest 0) b full out (- left 1)) out)
+                          (if (is w "declassify")
+                            (expr_deps (nth rest 1) b full out (- left 1))
+                            (if (is w "with")
+                              (values_deps (past rest 1) b full (expr_deps (nth rest 0) b full out (- left 1)) (- left 1))
+                              (if (is w "log.fields")
+                                (values_deps rest b full out (- left 1))
+                                (if (is w "par")
+                                  (expr_deps (nth rest 1) b full (values_deps (items_of (nth rest 0)) b full out (- left 1)) (- left 1))
+                                  (if (is w "scope")
+                                    (expr_deps (nth rest 1) b full (tasks_deps (items_of (nth rest 0)) b full out (- left 1)) (- left 1))
+                                    (all_deps rest b full (head_dep b w out) (- left 1))))))))))))))))
+
+  (fn all_deps ((ts Trees) (b Book) (full Bool) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts ((NoTrees) out) ((Trees h rest) (all_deps rest b full (expr_deps h b full out (- left 1)) (- left 1))))))
+
+  ; The values of `(field value)` pairs, and the bodies of `(pattern body)` arms: the second
+  ; item of each.
+  (fn values_deps ((ts Trees) (b Book) (full Bool) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts ((NoTrees) out) ((Trees h rest) (values_deps rest b full (expr_deps (nth (items_of h) 1) b full out (- left 1)) (- left 1))))))
+
+  ; A task is `(name work (deadline d) (on-fail p) [(on where)])`: its work and its deadline.
+  (fn tasks_deps ((ts Trees) (b Book) (full Bool) (out Keys) (left Int)) Keys
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts
+        ((NoTrees) out)
+        ((Trees h rest) (let parts (items_of h)
+          (tasks_deps rest b full (expr_deps (nth (items_of (nth parts 2)) 1) b full (expr_deps (nth parts 1) b full out (- left 1)) (- left 1)) (- left 1)))))))
+
+  ; A fn's type and label parameters: `(name T... [(label L)])`.
+  (fn type_params ((t Tree)) Keys
+    (match t ((Leaf text quoted) (NoKeys)) ((Node items) (plain_words (past items 1)))))
+
+  (fn plain_words ((ts Trees)) Keys
+    (match ts ((NoTrees) (NoKeys)) ((Trees h rest) (match h ((Leaf text quoted) (Keys text (plain_words rest))) ((Node items) (plain_words rest))))))
+
+  (fn label_param ((t Tree)) Bytes
+    (uses Alloc)
+    (match t ((Leaf text quoted) (lit "")) ((Node items) (let l (clause (past items 1) "label") (word (nth l 0))))))
+
+  ; The fn-shaped parts: params, the clauses between the return type and the body, the body.
+  (fn fn_deps ((t Tree) (b Book)) Keys
+    (uses Alloc)
+    (let items (items_of t)
+      (let tp (type_params (nth items 1))
+        (let clauses (but_last (past items 4))
+          (let out (type_names (nth items 3) tp (pair_names (items_of (nth items 2)) tp (NoKeys)) 100000)
+            (expr_deps (last items) b true (all_deps (contract_parts clauses) b true out 100000) 100000))))))
+
+  (fn contract_parts ((clauses Trees)) Trees
+    (uses Alloc)
+    (match clauses
+      ((NoTrees) (NoTrees))
+      ((Trees h rest) (if (or (is (head_word h) "requires") (is (head_word h) "ensures")) (Trees (nth (items_of h) 1) (contract_parts rest)) (contract_parts rest)))))
+
+  ; A test's: a property's inputs, its `requires`, and the proposition.
+  (fn test_deps ((t Tree) (b Book)) Keys
+    (uses Alloc)
+    (let w (head_word t)
+      (let rest (past (items_of t) 2)
+        (if (is w "property")
+          (let after (past rest 1)
+            (let out (pair_names (items_of (nth rest 0)) (NoKeys) (NoKeys))
+              (if (is (head_word (nth after 0)) "requires")
+                (expr_deps (nth after 1) b false (expr_deps (nth (items_of (nth after 0)) 1) b false out 100000) 100000)
+                (expr_deps (nth after 0) b false out 100000))))
+          (expr_deps (nth rest 0) b false (NoKeys) 100000)))))
+
+  (fn variants_names ((vs Trees) (params Keys) (out Keys)) Keys
+    (uses Alloc)
+    (match vs ((NoTrees) out) ((Trees h rest) (variants_names rest params (pair_names (past (items_of h) 1) params out)))))
+
+  (fn decl_deps ((d Def) (b Book)) Keys
+    (uses Alloc)
+    (let t (get d tree)
+      (let w (head_word t)
+        (let items (items_of t)
+          (if (is w "fn")
+            (fn_deps t b)
+            (if (or (is w "test") (or (is w "property") (is w "snapshot")))
+              (test_deps t b)
+              (if (is w "channel")
+                (Keys (word (nth items 2)) (NoKeys))
+                (if (is w "model")
+                  (type_names (nth (clause items "input") 0) (NoKeys) (type_names (nth (clause items "output") 0) (NoKeys) (NoKeys) 100000) 100000)
+                  (if (is w "foreign")
+                    (type_names (nth items 3) (NoKeys) (pair_names (items_of (nth items 2)) (NoKeys) (NoKeys)) 100000)
+                    (if (is w "enum")
+                      (variants_names (past items 2) (type_params (nth items 1)) (NoKeys))
+                      (if (is w "newtype")
+                        (type_names (nth items 2) (NoKeys) (NoKeys) 100000)
+                        (if (is w "record")
+                          (pair_names (record_fields t) (NoKeys) (NoKeys))
+                          (if (is w "patch")
+                            (let fields (record_fields (find_def (get b defs) (word (nth items 2))))
+                              (match fields ((NoTrees) (NoKeys)) ((Trees h more) (pair_names fields (NoKeys) (Keys (lit "Option") (NoKeys))))))
+                            (NoKeys))))))))))))))
+
+  ; Only what is defined here is an edge: a primitive type is not a definition.
+  (fn defined ((ks Keys) (b Book) (out Keys)) Keys
+    (uses Alloc)
+    (match ks ((NoKeys) out) ((Keys h rest) (defined rest b (if (holds (get b names) h) (Keys h out) out)))))
+
+  (fn graph_of ((ds Defs) (b Book) (g Graph)) Graph
+    (uses Alloc)
+    (match ds ((NoDefs) g) ((Defs d rest) (graph_of rest b (put_edges g (get d key) (set_of (defined (decl_deps d b) b (NoKeys))))))))
+
+  ; --- the components: Tarjan --------------------------------------------------------------
+  ; A name is on the stack while it has been visited and is not yet in a component, so
+  ; `done` stands in for the on-stack set.
+  (enum Comps (NoComps) (Comps (head Keys) (rest Comps)))
+
+  (record Walk (index Nums) (low Nums) (stack Keys) (done Map) (count Int) (comps Comps))
+
+  (fn lowered_to ((w Walk) (v Bytes) (n Int)) Walk
+    (if (< n (look_num (get w low) v)) (with w (low (put_num (get w low) v n))) w))
+
+  (fn popped ((v Bytes) (stack Keys) (comp Keys) (w Walk)) Walk
+    (uses Alloc)
+    (match stack
+      ((NoKeys) (with w (stack (NoKeys)) (comps (Comps comp (get w comps)))))
+      ((Keys h rest) (let w2 (with w (done (put (get w done) h (lit "1"))))
+        (if (bytes.eq h v) (with w2 (stack rest) (comps (Comps (Keys h comp) (get w2 comps)))) (popped v rest (Keys h comp) w2))))))
+
+  (fn visit ((v Bytes) (g Graph) (w Walk) (left Int)) Walk
+    (uses Alloc)
+    (if (<= left 0)
+      w
+      (let n (get w count)
+        (let w2 (successors v (look_edges g v) g (make Walk (index (put_num (get w index) v n)) (low (put_num (get w low) v n)) (stack (Keys v (get w stack))) (done (get w done)) (count (+ n 1)) (comps (get w comps))) (- left 1))
+          (if (= (look_num (get w2 low) v) n) (popped v (get w2 stack) (NoKeys) w2) w2)))))
+
+  (fn successors ((v Bytes) (ws Keys) (g Graph) (w Walk) (left Int)) Walk
+    (uses Alloc)
+    (if (<= left 0)
+      w
+      (match ws
+        ((NoKeys) w)
+        ((Keys x rest) (let seen (look_num (get w index) x)
+          (if (< seen 0)
+            (let w2 (visit x g w (- left 1)) (successors v rest g (lowered_to w2 v (look_num (get w2 low) x)) (- left 1)))
+            (if (holds (get w done) x) (successors v rest g w (- left 1)) (successors v rest g (lowered_to w v seen) (- left 1)))))))))
+
+  (fn walked ((ds Defs) (g Graph) (w Walk)) Walk
+    (uses Alloc)
+    (match ds
+      ((NoDefs) w)
+      ((Defs d rest) (walked rest g (if (< (look_num (get w index) (get d key)) 0) (visit (get d key) g w 1000000000) w)))))
+
+  (fn comps_reversed ((cs Comps) (onto Comps)) Comps (match cs ((NoComps) onto) ((Comps h rest) (comps_reversed rest (Comps h onto)))))
+
+  ; --- the canonical form: _canon, _ty and _expr -------------------------------------------
+  (record Ctx (refs Map) (heads Map) (tparams Keys) (lparam Bytes) (book Book))
+
+  (fn ref_json ((c Ctx) (name Bytes)) Bytes
+    (uses Alloc)
+    (let r (look (get c refs) name) (if (= (size r) 0) (lit "null") r)))
+
+  (fn is_prim ((w Bytes)) Bool
+    (uses Alloc)
+    (has (Keys (lit "Array") (Keys (lit "Bool") (Keys (lit "Bytes") (Keys (lit "Int") (Keys (lit "Str") (Keys (lit "Tensor") (Keys (lit "Unit") (Keys (lit "I8") (Keys (lit "I16") (Keys (lit "I32") (Keys (lit "I64") (Keys (lit "U8") (Keys (lit "U16") (Keys (lit "U32") (Keys (lit "U64") (Keys (lit "F16") (Keys (lit "BF16") (Keys (lit "F32") (NoKeys)))))))))))))))))))
+         w))
+
+  (fn label_keys ((ts Trees) (c Ctx) (out Keys)) Keys
+    (uses Alloc)
+    (match ts ((NoTrees) out) ((Trees h rest) (label_keys rest c (Keys (if (and (< 0 (size (get c lparam))) (bytes.eq (word h) (get c lparam))) (lit "?") (word h)) out)))))
+
+  (fn base_json ((c Ctx) (w Bytes)) Bytes
+    (uses Alloc)
+    (let i (position (get c tparams) w)
+      (if (<= 0 i) (two (tag "param") (number i)) (if (is_prim w) (two (tag "prim") (name_json w)) (ref_json c w)))))
+
+  (fn ty_json ((t Tree) (c Ctx) (labels Keys) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "null")
+      (match t
+        ((Leaf text quoted) (three (tag "ty") (base_json c text) (names_json (set_of labels))))
+        ((Node items) (let w (word (nth items 0))
+          (if (and (is w "label") (<= 3 (trees_length items)))
+            (ty_json (last items) c (label_keys (but_last (past items 1)) c labels) (- left 1))
+            (if (and (is w "tensor") (<= 3 (trees_length items)))
+              (four (tag "tensor") (name_json (word (nth items 1))) (json_list (axes (past items 2))) (names_json (set_of labels)))
+              (four (tag "ty") (base_json c w) (names_json (set_of labels)) (json_list (tys_parts (past items 1) c (- left 1)))))))))))
+
+  (fn tys_parts ((ts Trees) (c Ctx) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0) (NoParts) (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (ty_json h c (NoKeys) (- left 1)) (tys_parts rest c (- left 1)))))))
+
+  (fn ty ((t Tree) (c Ctx)) Bytes (uses Alloc) (ty_json t c (NoKeys) 100000))
+
+  (fn axes ((ts Trees)) Parts
+    (uses Alloc)
+    (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (name_json (word (nth (items_of h) 0))) (int_text (word (nth (items_of h) 1)))) (axes rest)))))
+
+  ; The types of `(name Type)` pairs, and the pairs with their names.
+  (fn pair_tys ((ts Trees) (c Ctx)) Parts
+    (uses Alloc)
+    (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (ty (nth (items_of h) 1) c) (pair_tys rest c)))))
+
+  (fn named_tys ((ts Trees) (c Ctx)) Parts
+    (uses Alloc)
+    (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (name_json (word (nth (items_of h) 0))) (ty (nth (items_of h) 1) c)) (named_tys rest c)))))
+
+  ; Names bound in order, so the last is innermost.
+  (fn bound ((ts Trees) (vars Keys)) Keys (uses Alloc) (match ts ((NoTrees) vars) ((Trees h rest) (bound rest (Keys (word h) vars)))))
+
+  (fn bound_firsts ((ts Trees) (vars Keys)) Keys
+    (uses Alloc)
+    (match ts ((NoTrees) vars) ((Trees h rest) (bound_firsts rest (Keys (word (nth (items_of h) 0)) vars)))))
+
+  ; A leaf in an expression: a literal, or a variable as its position in scope.
+  (fn atom ((t Bytes) (quoted Bool) (vars Keys)) Bytes
+    (uses Alloc)
+    (if quoted
+      (two (tag "str") (str_json t))
+      (if (is_int t)
+        (two (tag "int") (int_text t))
+        (if (is_real t)
+          (two (tag "real") (name_json (real_text t)))
+          (if (is t "true")
+            (two (tag "bool") (lit "true"))
+            (if (is t "false") (two (tag "bool") (lit "false")) (if (is t "unit") (one (tag "unit")) (two (tag "var") (number (position vars t))))))))))
+
+  (fn ex ((t Tree) (c Ctx) (vars Keys) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "null")
+      (match t
+        ((Leaf text quoted) (atom text quoted vars))
+        ((Node items) (form (word (nth items 0)) (past items 1) c vars (- left 1))))))
+
+  (fn exs ((ts Trees) (c Ctx) (vars Keys) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0) (NoParts) (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (ex h c vars (- left 1)) (exs rest c vars (- left 1)))))))
+
+  ; `(field value)` pairs as `[field, value]`.
+  (fn inits ((ts Trees) (c Ctx) (vars Keys) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0)
+      (NoParts)
+      (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (name_json (word (nth (items_of h) 0))) (ex (nth (items_of h) 1) c vars (- left 1))) (inits rest c vars (- left 1)))))))
+
+  ; Fields logged with no redaction in the module are kept as they are.
+  (fn logged ((ts Trees) (c Ctx) (vars Keys) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0)
+      (NoParts)
+      (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (three (name_json (word (nth (items_of h) 0))) (tag "keep") (ex (nth (items_of h) 1) c vars (- left 1))) (logged rest c vars (- left 1)))))))
+
+  (fn placement ((t Tree)) Bytes (uses Alloc) (if (is (head_word t) "on") (name_json (word (nth (items_of t) 1))) (tag "core")))
+
+  (fn branches ((ts Trees) (c Ctx) (vars Keys) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0)
+      (NoParts)
+      (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (ex (nth (items_of h) 1) c vars (- left 1)) (placement (nth (items_of h) 2))) (branches rest c vars (- left 1)))))))
+
+  ; `(name work (deadline d) (on-fail p [N]) [(on where)])` as `[work, d, p, N, where]`.
+  (fn tasks ((ts Trees) (c Ctx) (vars Keys) (left Int)) Parts
+    (uses Alloc)
+    (if (<= left 0)
+      (NoParts)
+      (match ts
+        ((NoTrees) (NoParts))
+        ((Trees h rest) (let parts (items_of h)
+          (let fail (items_of (nth parts 3))
+            (Parts (json_list (Parts (ex (nth parts 1) c vars (- left 1)) (Parts (ex (nth (items_of (nth parts 2)) 1) c vars (- left 1)) (Parts (name_json (word (nth fail 1))) (Parts (if (is (word (nth fail 1)) "restart") (int_text (word (nth fail 2))) (lit "0")) (Parts (placement (nth parts 4)) (NoParts)))))))
+                   (tasks rest c vars (- left 1)))))))))
+
+  ; Arms sorted by variant, stably, as `sorted(e.arms, key=lambda a: a.variant)`.
+  (enum Arms (NoArms) (Arms (variant Bytes) (json Bytes) (rest Arms)))
+
+  (fn arm_in ((v Bytes) (j Bytes) (sorted Arms)) Arms
+    (match sorted ((NoArms) (Arms v j (NoArms))) ((Arms h hj rest) (if (before v h) (Arms v j sorted) (Arms h hj (arm_in v j rest))))))
+
+  (fn arms_parts ((sorted Arms)) Parts (match sorted ((NoArms) (NoParts)) ((Arms h hj rest) (Parts hj (arms_parts rest)))))
+
+  (fn arms ((ts Trees) (c Ctx) (vars Keys) (left Int) (out Arms)) Arms
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts
+        ((NoTrees) out)
+        ((Trees h rest) (let pat (nth (items_of h) 0)
+          (let v (match pat ((Leaf text quoted) text) ((Node items) (word (nth items 0))))
+            (let binds (past (items_of pat) 1)
+              (arms rest c vars (- left 1) (arm_in v (four (tag "arm") (name_json v) (number (trees_length binds)) (ex (nth (items_of h) 1) c (bound binds vars) (- left 1))) out)))))))))
+
+  (fn call ((w Bytes) (args Bytes) (c Ctx)) Bytes
+    (uses Alloc)
+    (let k (look (get c heads) w)
+      (if (is k "f")
+        (three (tag "call") (ref_json c w) args)
+        (if (is k "x")
+          (three (tag "foreign-call") (ref_json c w) args)
+          (if (is k "n")
+            (three (tag "wrap") (ref_json c w) args)
+            (if (and (< 0 (size k)) (= (octet k 0) 118))
+              (four (tag "ctor") (ref_json c (bytes.slice k (Octets 1) (Octets (size k)))) (name_json w) args)
+              (three (tag "builtin") (name_json w) args)))))))
+
+  (fn form ((w Bytes) (rest Trees) (c Ctx) (vars Keys) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (lit "null")
+      (let a (nth rest 0)
+        (let b (nth rest 1)
+          (if (is w "let")
+            (three (tag "let") (ex b c vars (- left 1)) (ex (nth rest 2) c (Keys (word a) vars) (- left 1)))
+            (if (is w "if")
+              (four (tag "if") (ex a c vars (- left 1)) (ex b c vars (- left 1)) (ex (nth rest 2) c vars (- left 1)))
+              (if (is w "seq")
+                (two (tag "seq") (json_list (exs rest c vars (- left 1))))
+                (if (is w "bytes")
+                  (two (tag "bytes") (str_json (lowered (word a) 0 (+ 1 (size (word a))))))
+                  (if (is w "unwrap")
+                    (two (tag "unwrap") (ex a c vars (- left 1)))
+                    (if (is w "declassify")
+                      (three (tag "declassify") (name_json (word a)) (ex b c vars (- left 1)))
+                      (if (is w "match")
+                        (three (tag "match") (ex a c vars (- left 1)) (json_list (arms_parts (arms (past rest 1) c vars (- left 1) (NoArms)))))
+                        (if (is w "make")
+                          (three (tag "make") (ref_json c (word a)) (json_list (inits (past rest 1) c vars (- left 1))))
+                          (if (is w "get")
+                            (three (tag "get") (ex a c vars (- left 1)) (name_json (word b)))
+                            (if (is w "with")
+                              (three (tag "with") (ex a c vars (- left 1)) (json_list (inits (past rest 1) c vars (- left 1))))
+                              (if (is w "update")
+                                (three (tag "update") (ex a c vars (- left 1)) (ex b c vars (- left 1)))
+                                (if (is w "infer")
+                                  (three (tag "infer") (ref_json c (word a)) (ex b c vars (- left 1)))
+                                  (if (is w "send")
+                                    (three (tag "send") (name_json (word a)) (ex b c vars (- left 1)))
+                                    (if (is w "recv")
+                                      (two (tag "recv") (name_json (word a)))
+                                      (if (is w "scope")
+                                        (three (tag "scope") (json_list (tasks (items_of a) c vars (- left 1))) (ex b c (bound_firsts (items_of a) vars) (- left 1)))
+                                        (if (is w "par")
+                                          (three (tag "par") (json_list (branches (items_of a) c vars (- left 1))) (ex b c (bound_firsts (items_of a) vars) (- left 1)))
+                                          (if (is w "log.fields")
+                                            (two (tag "log.fields") (json_list (logged rest c vars (- left 1))))
+                                            (call w (json_list (exs rest c vars (- left 1))) c))))))))))))))))))))))
+
+  (fn expr ((t Tree) (c Ctx) (vars Keys)) Bytes (uses Alloc) (ex t c vars 100000))
+
+  (fn json_or_null ((ts Trees) (c Ctx) (vars Keys)) Bytes
+    (uses Alloc)
+    (match ts ((NoTrees) (lit "null")) ((Trees h rest) (expr h c vars))))
+
+  (fn parts_then ((ps Parts) (more Parts)) Parts (match ps ((NoParts) more) ((Parts h rest) (Parts h (parts_then rest more)))))
+
+  (fn fn_form ((t Tree) (c Ctx)) Bytes
+    (uses Alloc)
+    (let items (items_of t)
+      (let head (nth items 1)
+        (let tp (type_params head)
+          (let lp (label_param head)
+            (let fc (with c (tparams tp) (lparam lp))
+              (let params (items_of (nth items 2))
+                (let vars (bound_firsts params (NoKeys))
+                  (let clauses (but_last (past items 4))
+                    (let req (clause clauses "requires")
+                      (let ens (clause clauses "ensures")
+                        (let base (Parts (tag "fn") (Parts (json_list (pair_tys params fc)) (Parts (ty (nth items 3) fc) (Parts (names_json (set_of (words (clause clauses "uses")))) (Parts (names_json (set_of (words (clause clauses "declassifies")))) (Parts (expr (last items) fc vars) (NoParts)))))))
+                          (let contract (if (or (has_clause clauses "requires") (has_clause clauses "ensures")) (Parts (two (json_or_null req fc vars) (json_or_null ens fc (Keys (lit "result") vars))) (NoParts)) (NoParts))
+                            (let generic (if (or (< 0 (keys_length tp)) (< 0 (size lp))) (Parts (number (keys_length tp)) (Parts (boolean (< 0 (size lp))) (NoParts))) (NoParts))
+                              (json_list (parts_then base (parts_then contract generic)))))))))))))))))
+
+  (fn test_form ((t Tree) (c Ctx)) Bytes
+    (uses Alloc)
+    (let w (head_word t)
+      (let rest (past (items_of t) 2)
+        (if (is w "property")
+          (let params (items_of (nth rest 0))
+            (let vars (bound_firsts params (NoKeys))
+              (let after (past rest 1)
+                (let req (is (head_word (nth after 0)) "requires")
+                  (json_list (Parts (tag "test") (Parts (tag "property") (Parts (json_list (pair_tys params c)) (Parts (if req (expr (nth (items_of (nth after 0)) 1) c vars) (lit "null")) (Parts (expr (nth after (if req 1 0)) c vars) (Parts (lit "null") (NoParts))))))))))))
+          (json_list (Parts (tag "test") (Parts (name_json w) (Parts (lit "[]") (Parts (lit "null") (Parts (expr (nth rest 0) c (NoKeys)) (Parts (if (is w "snapshot") (str_json (word (nth rest 1))) (lit "null")) (NoParts))))))))))))
+
+  (fn variant_parts ((vs Trees) (c Ctx)) Parts
+    (uses Alloc)
+    (match vs ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (name_json (head_word h)) (json_list (pair_tys (past (items_of h) 1) c))) (variant_parts rest c)))))
+
+  (fn optional_tys ((ts Trees) (c Ctx)) Parts
+    (uses Alloc)
+    (match ts ((NoTrees) (NoParts)) ((Trees h rest) (Parts (two (name_json (word (nth (items_of h) 0))) (four (tag "ty") (ref_json c (lit "Option")) (lit "[]") (one (ty (nth (items_of h) 1) c)))) (optional_tys rest c)))))
+
+  ; `(record Name [(schema S N)] ...)`: a record's schema and version are its identity too.
+  (fn record_form ((name Bytes) (target Tree) (fields Parts)) Bytes
+    (uses Alloc)
+    (let s (nth (past (items_of target) 2) 0)
+      (json_list (Parts (tag "record") (Parts (name_json name) (Parts (json_list fields) (if (is (head_word s) "schema") (Parts (name_json (word (nth (items_of s) 1))) (Parts (int_text (word (nth (items_of s) 2))) (NoParts))) (NoParts))))))))
+
+  (fn canon ((t Tree) (c Ctx)) Bytes
+    (uses Alloc)
+    (let w (head_word t)
+      (let items (items_of t)
+        (let name (decl_name t)
+          (if (is w "fn")
+            (fn_form t c)
+            (if (or (is w "test") (or (is w "property") (is w "snapshot")))
+              (test_form t c)
+              (if (is w "enum")
+                (let tp (type_params (nth items 1))
+                  (json_list (Parts (tag "enum") (Parts (name_json name) (Parts (json_list (variant_parts (past items 2) (with c (tparams tp)))) (if (< 0 (keys_length tp)) (Parts (number (keys_length tp)) (NoParts)) (NoParts)))))))
+                (if (is w "newtype")
+                  (let r (nth items 3)
+                    (if (is (head_word r) "requires")
+                      (four (tag "newtype") (name_json name) (ty (nth items 2) c) (expr (nth (items_of r) 2) c (Keys (word (nth (items_of r) 1)) (NoKeys))))
+                      (three (tag "newtype") (name_json name) (ty (nth items 2) c))))
+                  (if (is w "record")
+                    (record_form name t (named_tys (record_fields t) c))
+                    (if (is w "patch")
+                      (let target (find_def (get (get c book) defs) (word (nth items 2))) (record_form name target (optional_tys (record_fields target) c)))
+                      (if (is w "channel")
+                        (four (tag "channel") (name_json name) (ref_json c (word (nth items 2))) (names_json (set_of (words (clause (past items 3) "accepts")))))
+                        (if (is w "model")
+                          (json_list (Parts (tag "model") (Parts (name_json name) (Parts (ty (nth (clause items "input") 0) c) (Parts (ty (nth (clause items "output") 0) c) (Parts (names_json (set_of (words (clause items "trained-on")))) (Parts (name_json (word (nth (clause items "device") 0))) (Parts (str_json (word (nth (clause items "weights") 0))) (NoParts)))))))))
+                          (if (is w "foreign")
+                            (json_list (Parts (tag "foreign") (Parts (name_json name) (Parts (json_list (pair_tys (items_of (nth items 2)) c)) (Parts (ty (nth items 3) c) (Parts (names_json (set_of (words (clause (past items 4) "uses")))) (NoParts)))))))
+                            (lit "null"))))))))))))))
+
+  ; --- hashing, a component at a time ------------------------------------------------------
+  (fn wtn ((form Bytes)) Bytes
+    (uses Alloc)
+    (let d (sha256 form) (bytes.concat (lit "wtn:") (str.encode (hex d 0 (size d) "")))))
+
+  (record Hashed (refs Map) (out Bytes))
+
+  ; `["rec", i]` for each member, in name order.
+  (fn recs ((ms Keys) (i Int) (m Map)) Map
+    (uses Alloc)
+    (match ms ((NoKeys) m) ((Keys h rest) (recs rest (+ i 1) (put m h (two (tag "rec") (number i)))))))
+
+  (fn forms ((ms Keys) (c Ctx)) Parts
+    (uses Alloc)
+    (match ms ((NoKeys) (NoParts)) ((Keys h rest) (Parts (canon (find_def (get (get c book) defs) h) c) (forms rest c)))))
+
+  (fn line ((h Bytes) (name Bytes)) Bytes (uses Alloc) (bytes.concat h (bytes.concat (lit " ") (bytes.concat name (lit "\n")))))
+
+  (fn members ((ms Keys) (group Bytes) (i Int) (s Hashed)) Hashed
+    (uses Alloc)
+    (match ms
+      ((NoKeys) s)
+      ((Keys h rest) (let mh (wtn (three (tag "member") (name_json group) (number i)))
+        (members rest group (+ i 1) (make Hashed (refs (put (get s refs) h (name_json mh))) (out (bytes.concat (get s out) (line mh h)))))))))
+
+  (fn hashed ((cs Comps) (b Book) (s Hashed)) Hashed
+    (uses Alloc)
+    (match cs
+      ((NoComps) s)
+      ((Comps comp rest) (let ms (set_of comp)
+        (let c (make Ctx (refs (recs ms 0 (get s refs))) (heads (get b heads)) (tparams (NoKeys)) (lparam (lit "")) (book b))
+          (hashed rest b (match ms
+            ((NoKeys) s)
+            ((Keys only more) (match more
+              ((NoKeys) (let h (wtn (canon (find_def (get b defs) only) c)) (make Hashed (refs (put (get s refs) only (name_json h))) (out (bytes.concat (get s out) (line h only))))))
+              ((Keys second others) (members ms (wtn (two (tag "group") (json_list (forms ms c)))) 0 s)))))))))))
+
+  ; --- the module --------------------------------------------------------------------------
+  ; The prelude as hashing.py reads it, witness/checker.py's PRELUDE: every module has it,
+  ; so every module's hashes include its definitions'.
+  (fn prelude_source () Str
+    "(module prelude (enum (Option T) (None) (Some (value T))) (enum (Result T E) (Ok (value T)) (Err (error E))) (record Fault (schema Fault 1) (op Str) (why Str) (cause (Option Fault))) (newtype Chars Int) (newtype Octets Int) (newtype Count Int) (newtype Instant I64) (newtype WallTime I64) (newtype Ticks I64) (newtype Duration I64) (fn fault ((op Str) (why Str)) Fault (bounds (depth 1) (alloc 0)) (make Fault (op op) (why why) (cause (None)))) (fn (context T) ((r (Result T Fault)) (op Str) (why Str)) (Result T Fault) (bounds (depth 1) (alloc 0)) (match r ((Ok v) (Ok v)) ((Err cause) (Err (make Fault (op op) (why why) (cause (Some cause))))))))")
+
+  (fn module_items ((t Tree)) Trees (past (items_of t) 2))
+
+  (fn mentions ((src Bytes) (what Bytes) (i Int) (left Int)) Bool
+    (uses Alloc)
+    (if (<= left 0)
+      false
+      (if (< (size src) (+ i (size what))) false (if (bytes.eq (bytes.slice src (Octets i) (Octets (+ i (size what)))) what) true (mentions src what (+ i 1) (- left 1))))))
+
+  ; A module's items and the prelude's, booked: what each definition is and is called by.
+  (fn booked_with_prelude ((items Trees)) Book
+    (uses Alloc)
+    (let empty (make Book (defs (NoDefs)) (names (Tip)) (heads (Tip)) (redacts false) (imports false))
+      (match (parse (tokens_of (str.encode (prelude_source))))
+        ((Err f) (booked items empty))
+        ((Ok pre) (booked items (booked (module_items pre) empty))))))
+
+  ; Everything compiler/link.wtn resolves an import against: the definitions, what each
+  ; depends on, and each one's hash (as JSON, quoted) by name.
+  (record Hashes (book Book) (graph Graph) (refs Map) (out Bytes))
+
+  (fn hashes_of_book ((b Book)) Hashes
+    (uses Alloc)
+    (let g (graph_of (get b defs) b (NoGraph))
+      (let w (walked (get b defs) g (make Walk (index (NoNums)) (low (NoNums)) (stack (NoKeys)) (done (Tip)) (count 0) (comps (NoComps))))
+        (let s (hashed (comps_reversed (get w comps) (NoComps)) b (make Hashed (refs (Tip)) (out (lit ""))))
+          (make Hashes (book b) (graph g) (refs (get s refs)) (out (get s out)))))))
+
+  (fn hashes_of_items ((items Trees)) Hashes (uses Alloc) (hashes_of_book (booked_with_prelude items)))
+
+  (fn hashes_of_tree ((tree Tree) (src Bytes)) Bytes
+    (uses Alloc)
+    (let b (booked_with_prelude (module_items tree))
+      (if (get b imports)
+        (lit "unread module an import is resolved against the codebase, which is not read here\n")
+        (if (and (get b redacts) (mentions src (lit "(log.fields") 0 (+ 1 (size src))))
+          (lit "unread module a logged field's policy needs its labels, which are not read here\n")
+          (get (hashes_of_book b) out)))))
+
+  ; Every definition's hash and name, a line each, in an order that puts a definition after
+  ; what it depends on.
+  (fn hashes_of ((src Str)) Str
+    (uses Alloc)
+    (let text (str.encode src)
+      (match (parse (tokens_of text))
+        ((Err f) "unread module the source does not parse\n")
+        ((Ok tree) (match (bytes.decode (hashes_of_tree tree text)) ((Err f) "unread module a name is not text\n") ((Ok s) s))))))
+
+  (fn main () Unit
+    (uses Alloc Console)
+    (print (hashes_of "(module m (fn f ((n Int)) Int n))"))))

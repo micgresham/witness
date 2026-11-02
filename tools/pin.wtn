@@ -1,0 +1,180 @@
+; Re-pinning after an edit: witness-bootstrap's `witness pin` cascade, in Witness.
+;
+; A module imports by content hash, and the hash is the definition, so an edit that changes a
+; definition changes its hash and leaves every `(use "wtn:..." ...)` of it naming something
+; that no longer exists -- and, once those are pinned again, everything that imports *them*.
+; What each stale hash meant is in the modules as they were before the edit: resolved, they
+; say which module wrote that hash and under which name. So the old modules and the new are
+; both read, the old ones resolved to know every hash's module and name, and then the new ones
+; in compiler/ORDER's order: each import of a hash no longer held is given the hash its name
+; has now, and the module is resolved again before the next is read, so the change runs on
+; through everything after it.
+;
+; The text is rewritten where the hash is written and nowhere else, so comments and layout are
+; kept and a pin shows in a diff as the hash that changed.
+;
+; The input is records separated by NUL bytes: `old PATH` or `new PATH`, a newline, and the
+; module's text, the old ones and then the new, each in ORDER's order. The answer is each
+; changed module's path and new text, NUL-separated, for tools/wasmc.js to write; or a line
+; starting `error` if an import names a hash nothing held, before or after.
+;
+;   witness test tools/pin.wtn
+(module pin
+  (use "wtn:1cab8de3e8124d429588631292862cdaee19c2f71bb17f7b891344bf8f3c0370" as linked)
+
+  (use "wtn:704c900a148195fd6f4bd090561c4b9eee73f44d3ac76ab990455fd49a1273b9" as resolved)
+
+  (use "wtn:f5df45a82c0bac3af88a1777ffcd5e572f850d0a0e8169392a5ad9cc5f7bfb92" as done_of)
+
+  (use "wtn:a534fe0c0571a603e0112cb9dd1bbc3915a7a104c4d1b57cb3fde133f37e5890" as look)
+
+  (use "wtn:6f605c6a543f7f80ff1100abcc4728703f812f931eb9da431a33fec14afa6eea" as put)
+
+  (use "wtn:7b37f980376328ade8e5287443a4f264a3145a35e9b039b547ae8b545bc0b0ef" as holds)
+
+  (use "wtn:1d19b19c3c97e9a5947a2f089b5e062d4105217a91ccd058f389e31071424503" as items_of)
+
+  (use "wtn:17f42e91ba108de20303fad741a62e2751f230ae977a6dab97d53a2294c3a8d7" as past)
+
+  (use "wtn:41b818418b74174abf5bc079a59e5f0853fd5e4dbff6667d1f90c6524a10e430" as nth)
+
+  (use "wtn:3a233fc1610ddea8229aeec72fe5a2accf26f5d31d23df9acc7446f8dca0444c" as word)
+
+  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+
+  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+
+  (fn lit ((s Str)) Bytes (uses Alloc) (str.encode s))
+
+  (fn size ((t Bytes)) Int (ensures (<= 0 result)) (unwrap (bytes.len t)))
+
+  (fn octet ((t Bytes) (i Int)) Int
+    (match (bytes.at t (Octets i)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn slice ((t Bytes) (from Int) (to Int)) Bytes (uses Alloc) (bytes.slice t (Octets from) (Octets to)))
+
+  (fn glue ((a Bytes) (b Bytes)) Bytes (uses Alloc) (bytes.concat a b))
+
+  (fn find ((t Bytes) (what Bytes) (i Int) (left Int)) Int
+    (uses Alloc)
+    (if (<= left 0)
+      (- 0 1)
+      (if (< (size t) (+ i (size what))) (- 0 1) (if (bytes.eq (slice t i (+ i (size what))) what) i (find t what (+ i 1) (- left 1))))))
+
+  (enum Records (NoRecords) (Records (head Bytes) (rest Records)))
+
+  (fn split ((t Bytes) (from Int) (i Int) (left Int)) Records
+    (uses Alloc)
+    (if (<= left 0)
+      (NoRecords)
+      (let c (octet t i)
+        (if (< c 0)
+          (Records (slice t from i) (NoRecords))
+          (if (= c 0) (Records (slice t from i) (split t (+ i 1) (+ i 1) (- left 1))) (split t from (+ i 1) (- left 1)))))))
+
+  ; A record's first line, and the rest.
+  (fn header ((r Bytes)) Bytes (uses Alloc) (let e (find r (lit "\n") 0 (+ 1 (size r))) (if (< e 0) r (slice r 0 e))))
+
+  (fn body ((r Bytes)) Bytes (uses Alloc) (let e (find r (lit "\n") 0 (+ 1 (size r))) (if (< e 0) (lit "") (slice r (+ e 1) (size r)))))
+
+  (fn is_old ((r Bytes)) Bool (uses Alloc) (bytes.eq (slice r 0 4) (lit "old ")))
+
+  (fn tree_of ((text Bytes)) Tree
+    (uses Alloc)
+    (match (parse (tokens_of text)) ((Err f) (Leaf (lit "") false)) ((Ok t) t)))
+
+  (fn old_trees ((rs Records)) Trees
+    (uses Alloc)
+    (match rs ((NoRecords) (NoTrees)) ((Records r rest) (if (is_old r) (Trees (tree_of (body r)) (old_trees rest)) (old_trees rest)))))
+
+  ; --- what each old hash was ---------------------------------------------------------------
+  ; A hash, quoted, to the module that wrote it and its name there: "module name". The modules
+  ; are taken earliest first, and the first to write a hash keeps it, as resolution has it --
+  ; two modules can write one definition, and an import of it was found in the first.
+  (fn indexed ((m Map) (home Bytes) (out Map)) Map
+    (uses Alloc)
+    (match m
+      ((Tip) out)
+      ((Fork key value lo hi) (indexed hi home (indexed lo home (if (holds out key) out (put out key (glue home (glue (lit " ") value)))))))))
+
+  (fn index_of ((ms Mods) (out Map)) Map
+    (uses Alloc)
+    (match ms ((NoMods) out) ((Mods d rest) (index_of rest (indexed (get d own) (get d name) out)))))
+
+  (fn held ((ms Mods) (h Bytes)) Bool (uses Alloc) (match ms ((NoMods) false) ((Mods d rest) (or (holds (get d all) h) (held rest h)))))
+
+  (fn module_named ((ms Mods) (name Bytes)) (Option Done)
+    (match ms ((NoMods) (None)) ((Mods d rest) (if (bytes.eq (get d name) name) (Some d) (module_named rest name)))))
+
+  ; What a stale hash is called now, or "" if it is not known to have been anything.
+  (fn now_called ((old Map) (ms Mods) (h Bytes)) Bytes
+    (uses Alloc)
+    (let was (look old h)
+      (let space (find was (lit " ") 0 (+ 1 (size was)))
+        (if (< space 0)
+          (lit "")
+          (match (module_named ms (slice was 0 space)) ((None) (lit "")) ((Some d) (look (get d refs) (slice was (+ space 1) (size was)))))))))
+
+  ; --- the text, re-pinned ------------------------------------------------------------------
+  ; Every `(use "wtn:...` from `i` on: kept if the hash is held, given its new hash if it was
+  ; something, and kept as it is if not, for resolution to report.
+  (fn repinned ((t Bytes) (i Int) (old Map) (ms Mods) (left Int)) Bytes
+    (uses Alloc)
+    (if (<= left 0)
+      (slice t i (size t))
+      (let at (find t (lit "(use \"wtn:") i (+ 1 (size t)))
+        (if (< at 0)
+          (slice t i (size t))
+          (let h (slice t (+ at 5) (+ at 75))
+            (let fresh (if (held ms h) h (now_called old ms h))
+              (glue (glue (slice t i (+ at 5)) (if (= (size fresh) 0) h fresh)) (repinned t (+ at 75) old ms (- left 1)))))))))
+
+  (record Run (mods Mods) (out Bytes) (missing Bytes))
+
+  (fn reversed ((ms Mods) (onto Mods)) Mods (match ms ((NoMods) onto) ((Mods h rest) (reversed rest (Mods h onto)))))
+
+  (fn pinned_all ((rs Records) (old Map) (run Run)) Run
+    (uses Alloc)
+    (match rs
+      ((NoRecords) run)
+      ((Records r rest) (if (or (is_old r) (< 0 (size (get run missing))))
+        (pinned_all rest old run)
+        (let path (slice (header r) 4 (size (header r)))
+          (let text (body r)
+            (let fresh (repinned text 0 old (get run mods) (+ 1 (size text)))
+              (let tree (tree_of fresh)
+                (let written (past (items_of tree) 2)
+                  (let res (resolved written (reversed (get run mods) (NoMods)))
+                    (if (< 0 (size (get res missing)))
+                      (with run (missing (glue (get res missing) (glue (lit " in ") path))))
+                      (pinned_all rest old
+                        (make Run (mods (Mods (done_of (word (nth (items_of tree) 1)) (get res items) written) (get run mods)))
+                                  (out (if (bytes.eq fresh text) (get run out) (glue (get run out) (glue (glue path (bytes.of (u8.of 0))) (glue fresh (bytes.of (u8.of 0)))))))
+                                  (missing (lit "")))))))))))))))
+
+  (fn pinned ((src Str)) Bytes
+    (uses Alloc)
+    (let rs (split (str.encode src) 0 0 (+ 1 (size (str.encode src))))
+      (let old (get (linked (old_trees rs) (make Linked (mods (NoMods)) (missing (lit "")))) mods)
+        (let run (pinned_all rs (index_of (reversed old (NoMods)) (Tip)) (make Run (mods (NoMods)) (out (lit "")) (missing (lit ""))))
+          (if (< 0 (size (get run missing))) (glue (lit "error unresolved ") (glue (get run missing) (lit "\n"))) (get run out))))))
+
+  (fn drive_files ((src Str)) Bytes (uses Alloc) (pinned src))
+
+  (fn records ((rs Records)) Bytes
+    (uses Alloc)
+    (match rs ((NoRecords) (lit "")) ((Records r rest) (glue r (match rest ((NoRecords) (lit "")) ((Records h more) (glue (bytes.of (u8.of 0)) (records rest))))))))
+
+  (fn decoded ((b Bytes)) Str (uses Alloc) (match (bytes.decode b) ((Err f) "") ((Ok s) s)))
+
+  (test "an import of a definition that changed is given its new hash, and what imports that follows"
+    (let old (Records (lit "old a.wtn\n(module a (fn one () Int 1))")
+               (Records (lit "old b.wtn\n(module b (use \"wtn:3bae204025843a143381e2657ca3740d425796cd35e8e29ebf2accde7fa09f64\" as one) (fn two () Int (one)))") (NoRecords)))
+      (let new (Records (lit "new a.wtn\n(module a (fn one () Int 2))")
+                 (Records (lit "new b.wtn\n(module b (use \"wtn:3bae204025843a143381e2657ca3740d425796cd35e8e29ebf2accde7fa09f64\" as one) (fn two () Int (one)))") (NoRecords)))
+        (let out (pinned (decoded (records (Records (records old) (Records (records new) (NoRecords))))))
+          (and (< 0 (size out)) (< (find out (lit "3bae2040") 0 (+ 1 (size out))) 0))))))
+
+  (test "nothing changes when nothing did"
+    (let both (Records (lit "old a.wtn\n(module a (fn one () Int 1))") (Records (lit "new a.wtn\n(module a (fn one () Int 1))") (NoRecords)))
+      (= 0 (size (pinned (decoded (records both))))))))

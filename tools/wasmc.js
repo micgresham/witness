@@ -5,7 +5,9 @@
 //   node --stack-size=200000 tools/wasmc.js compiler.wasm source.wtn - drive_check
 //
 // The second checks the source instead (drive_check_mcu, _esp32 and _embedded for the other
-// profiles), prints what it found and exits with the verdict.
+// profiles), prints what it found and exits with the verdict. With drive_flatten the source
+// is every module of compiler/ORDER as one `(modules ...)` form, and what is written is the
+// compiler as one module: imports resolved by hash and spliced in (compiler/link.wtn).
 //
 // The host does three things the language does not: it loads the module, it puts the
 // source in the module's memory as a length word and the bytes, and it reads the answer
@@ -63,6 +65,34 @@ if (require.main === module) {
     process.stdout.write(text.endsWith('\n') ? text : text + '\n');
     const verdict = text.trimEnd().split('\n').pop();
     process.exit(verdict === 'accept' || verdict === 'warn' ? 0 : verdict === 'reject' ? 1 : 3);
+  }
+  if (entry === 'drive_files') {
+    // Several files at once (tools/pin.wtn's re-pinned modules): each path and its text,
+    // NUL-separated, or a line saying why not.
+    const text = out.toString('utf8');
+    if (text.startsWith('error')) { console.error(text); process.exit(1); }
+    const parts = text.split('\0');
+    for (let i = 0; i + 1 < parts.length; i += 2) {
+      fs.writeFileSync(parts[i], parts[i + 1]);
+      console.error(`wrote ${parts[i]}`);
+    }
+    process.exit(0);
+  }
+  if (entry && !entry.startsWith('drive')) {
+    // Any other entry gives text (tools/gen.wtn's backends, say), written where asked.
+    fs.writeFileSync(outPath, out);
+    process.exit(0);
+  }
+  if (entry === 'drive_flatten') {
+    // The flattened compiler is source text; an answer that is not one says why.
+    const text = out.toString('utf8');
+    if (text.startsWith('(module ')) {
+      fs.writeFileSync(outPath, out);
+      console.error(`wrote ${out.length} bytes of source`);
+      process.exit(0);
+    }
+    console.error(text);
+    process.exit(1);
   }
   const isWasm = out[0] === 0 && out[1] === 0x61 && out[2] === 0x73 && out[3] === 0x6d;
   const isElf = out[0] === 0x7f && out[1] === 0x45 && out[2] === 0x4c && out[3] === 0x46;

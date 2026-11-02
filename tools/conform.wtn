@@ -1,0 +1,202 @@
+; The conformance suite, run by the checker in Witness (compiler/check.wtn) and nothing else.
+;
+; conformance/manifest.json says, for each case, the verdict and the very rules among its errors
+; and among its warnings, and under which profile it is checked. `drive_check_cases` reads the
+; manifest and names its cases, a line each; `drive_check_case` is handed the manifest, a NUL
+; byte, a case's file name, a NUL byte and the case's text, checks it, and says whether the
+; checker agrees with the manifest about it:
+;
+;   agrees FILE                                      and then `accept`
+;   differs FILE want VERDICT ERRORS got VERDICT ERRORS    and then `reject`
+;   unread FILE                                      and then `unread`, when the checker
+;                                                    says it does not read the case
+;
+; One case is one run, because a compiled checker that stops on a case (a trap: see the
+; runtime's 64-bit Int in docs/ROADMAP.md) stops the whole module; tools/wasmc.js reports that
+; run as `unread`, never as agreeing. conform.sh in the Witness-only repository runs them all.
+;
+; The manifest is read as far as it is written: strings, and lists of strings, in objects.
+;
+;   witness test tools/conform.wtn
+(module conform
+  (use "wtn:f0a7631545c378e8397a4dc5cec1f8766ded854fa9f772b3eb384d762a5b7fff" as check_source)
+
+  (fn lit ((s Str)) Bytes (uses Alloc) (str.encode s))
+
+  (fn size ((t Bytes)) Int (ensures (<= 0 result)) (unwrap (bytes.len t)))
+
+  (fn octet ((t Bytes) (i Int)) Int
+    (match (bytes.at t (Octets i)) ((None) (- 0 1)) ((Some d) (int.of d))))
+
+  (fn slice ((t Bytes) (from Int) (to Int)) Bytes (uses Alloc) (bytes.slice t (Octets from) (Octets to)))
+
+  (fn glue ((a Bytes) (b Bytes)) Bytes (uses Alloc) (bytes.concat a b))
+
+  (fn is ((t Bytes) (s Str)) Bool (uses Alloc) (bytes.eq t (str.encode s)))
+
+  (enum Words (NoWords) (Words (head Bytes) (rest Words)))
+
+  (fn split ((t Bytes) (sep Int) (from Int) (i Int) (left Int)) Words
+    (uses Alloc)
+    (if (<= left 0)
+      (NoWords)
+      (let c (octet t i)
+        (if (< c 0)
+          (Words (slice t from i) (NoWords))
+          (if (= c sep) (Words (slice t from i) (split t sep (+ i 1) (+ i 1) (- left 1))) (split t sep from (+ i 1) (- left 1)))))))
+
+  (fn pieces ((t Bytes) (sep Int)) Words (uses Alloc) (split t sep 0 0 (+ 1 (size t))))
+
+  (fn nth ((ws Words) (n Int)) Bytes
+    (uses Alloc)
+    (match ws ((NoWords) (lit "")) ((Words h rest) (if (<= n 0) h (nth rest (- n 1))))))
+
+  ; --- the manifest's tokens -------------------------------------------------------------
+  ; A string is "s" and its text; a bracket or brace is itself. Nothing else is kept.
+  (fn tokens ((t Bytes) (i Int) (left Int)) Words
+    (uses Alloc)
+    (if (<= left 0)
+      (NoWords)
+      (let c (octet t i)
+        (if (< c 0)
+          (NoWords)
+          (if (= c 34)
+            (let e (string_end t (+ i 1) (+ 1 (size t))) (Words (glue (lit "s") (slice t (+ i 1) e)) (tokens t (+ e 1) (- left 1))))
+            (if (or (or (= c 123) (= c 125)) (or (= c 91) (= c 93))) (Words (slice t i (+ i 1)) (tokens t (+ i 1) (- left 1))) (tokens t (+ i 1) (- left 1))))))))
+
+  (fn string_end ((t Bytes) (i Int) (left Int)) Int
+    (if (<= left 0) i (let c (octet t i) (if (or (< c 0) (= c 34)) i (if (= c 92) (string_end t (+ i 2) (- left 1)) (string_end t (+ i 1) (- left 1)))))))
+
+  (fn text_of ((tok Bytes)) Bytes (uses Alloc) (slice tok 1 (size tok)))
+
+  ; --- the cases ----------------------------------------------------------------------------
+  (record Case (file Bytes) (outcome Bytes) (errors Words) (warnings Words) (profile Bytes))
+
+  (enum Cases (NoCases) (Cases (head Case) (rest Cases)))
+
+  (fn blank () Case (uses Alloc) (make Case (file (lit "")) (outcome (lit "")) (errors (NoWords)) (warnings (NoWords)) (profile (lit "host"))))
+
+  ; A list of strings, up to its `]`, and what follows it.
+  (record Listed (items Words) (rest Words))
+
+  (fn listed ((ts Words) (out Words)) Listed
+    (uses Alloc)
+    (match ts
+      ((NoWords) (make Listed (items out) (rest ts)))
+      ((Words h more) (if (is h "]") (make Listed (items out) (rest more)) (listed more (Words (text_of h) out))))))
+
+  (fn with_value ((c Case) (key Bytes) (v Bytes)) Case
+    (uses Alloc)
+    (if (is key "file") (with c (file v)) (if (is key "outcome") (with c (outcome v)) (if (is key "profile") (with c (profile v)) c))))
+
+  (fn with_list ((c Case) (key Bytes) (vs Words)) Case
+    (uses Alloc)
+    (if (is key "errors") (with c (errors vs)) (if (is key "warnings") (with c (warnings vs)) c)))
+
+  ; The keys and values of one case, up to its `}`; then the next case.
+  (fn fields ((ts Words) (c Case) (out Cases) (left Int)) Cases
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts
+        ((NoWords) out)
+        ((Words h more) (if (is h "}")
+          (cases_from more (Cases c out) (- left 1))
+          (match more
+            ((NoWords) out)
+            ((Words v after) (if (is v "[")
+              (let l (listed after (NoWords)) (fields (get l rest) (with_list c (text_of h) (get l items)) out (- left 1)))
+              (fields after (with_value c (text_of h) (text_of v)) out (- left 1))))))))))
+
+  (fn cases_from ((ts Words) (out Cases) (left Int)) Cases
+    (uses Alloc)
+    (if (<= left 0)
+      out
+      (match ts ((NoWords) out) ((Words h more) (if (is h "{") (fields more (blank) out (- left 1)) (if (is h "]") out (cases_from more out (- left 1))))))))
+
+  (fn after_cases ((ts Words)) Words
+    (uses Alloc)
+    (match ts ((NoWords) ts) ((Words h more) (if (is h "scases") more (after_cases more)))))
+
+  (fn reversed ((cs Cases) (onto Cases)) Cases (match cs ((NoCases) onto) ((Cases h rest) (reversed rest (Cases h onto)))))
+
+  (fn cases_of ((manifest Bytes)) Cases
+    (uses Alloc)
+    (let ts (tokens manifest 0 (+ 1 (size manifest)))
+      (reversed (cases_from (after_cases ts) (NoCases) (+ 1 (size manifest))) (NoCases))))
+
+  (fn case_named ((cs Cases) (file Bytes)) Case
+    (uses Alloc)
+    (match cs ((NoCases) (blank)) ((Cases c rest) (if (bytes.eq (get c file) file) c (case_named rest file)))))
+
+  ; --- what the checker says ------------------------------------------------------------------
+  ; The rules among the lines of one kind, as a sorted set written with spaces.
+  (fn before ((a Bytes) (b Bytes) (i Int) (left Int)) Bool
+    (if (<= left 0)
+      false
+      (let x (octet a i) (let y (octet b i) (if (< x 0) (<= 0 y) (if (< y 0) false (if (< x y) true (if (< y x) false (before a b (+ i 1) (- left 1))))))))))
+
+  (fn inserted ((w Bytes) (ws Words)) Words
+    (match ws ((NoWords) (Words w ws)) ((Words h rest) (if (bytes.eq h w) ws (if (before w h 0 (+ 1 (size w))) (Words w ws) (Words h (inserted w rest)))))))
+
+  (fn set_of ((ws Words)) Words (match ws ((NoWords) ws) ((Words h rest) (inserted h (set_of rest)))))
+
+  (fn shown ((ws Words)) Bytes
+    (uses Alloc)
+    (match ws ((NoWords) (lit "-")) ((Words h rest) (match rest ((NoWords) h) ((Words h2 more) (glue h (glue (lit ",") (shown rest))))))))
+
+  (fn rules ((lines Words) (kind Str) (out Words)) Words
+    (uses Alloc)
+    (match lines
+      ((NoWords) out)
+      ((Words h rest) (let ws (pieces h 32) (rules rest kind (if (is (nth ws 0) kind) (Words (nth ws 2) out) out))))))
+
+  (fn last_of ((ws Words)) Bytes
+    (uses Alloc)
+    (match ws ((NoWords) (lit "")) ((Words h rest) (match rest ((NoWords) h) ((Words h2 more) (last_of rest))))))
+
+  (fn said ((outcome Bytes) (errors Words) (warnings Words)) Bytes
+    (uses Alloc)
+    (glue (glue outcome (glue (lit " errors ") (shown (set_of errors)))) (glue (lit " warnings ") (shown (set_of warnings)))))
+
+  (fn decoded ((b Bytes)) Str (uses Alloc) (match (bytes.decode b) ((Err f) "") ((Ok s) s)))
+
+  (fn case_verdict ((bundle Str)) Str
+    (uses Alloc)
+    (let parts (pieces (str.encode bundle) 0)
+      (let file (nth parts 1)
+        (let c (case_named (cases_of (nth parts 0)) file)
+          (if (= (size (get c file)) 0)
+            (decoded (glue (glue (lit "differs ") file) (lit " the manifest has no such case\nreject")))
+            (let lines (pieces (str.encode (check_source (decoded (get c profile)) (decoded (nth parts 2)))) 10)
+              (let want (said (get c outcome) (get c errors) (get c warnings))
+                (let got (said (last_of lines) (rules lines "error" (NoWords)) (rules lines "warning" (NoWords)))
+                  (decoded (if (is (last_of lines) "unread")
+                    (glue (glue (lit "unread ") file) (lit "\nunread"))
+                    (if (bytes.eq want got)
+                    (glue (glue (lit "agrees ") file) (lit "\naccept"))
+                    (glue (glue (glue (lit "differs ") file) (glue (lit " want ") want)) (glue (glue (lit " got ") got) (lit "\nreject"))))))))))))))
+
+  (fn case_files ((ms Cases)) Bytes
+    (uses Alloc)
+    (match ms ((NoCases) (lit "")) ((Cases c rest) (glue (glue (get c file) (lit "\n")) (case_files rest)))))
+
+  ; The case files, then `accept`, the last line tools/wasmc.js reads as how the run went.
+  (fn drive_check_cases ((manifest Str)) Bytes (uses Alloc) (glue (case_files (cases_of (str.encode manifest))) (lit "accept")))
+
+  (fn drive_check_case ((bundle Str)) Bytes (uses Alloc) (str.encode (case_verdict bundle)))
+
+  ; The manifest, a case's name and its text, NUL between them, as conform.sh hands them over.
+  (fn bundled ((manifest Str) (file Str) (text Str)) Str
+    (uses Alloc)
+    (let nul (bytes.of (u8.of 0)) (decoded (glue (glue (glue (lit manifest) nul) (glue (lit file) nul)) (lit text)))))
+
+  (test "a manifest's cases are read, with the profile when there is one"
+    (str.eq (decoded (drive_check_cases "{\"witness\": \"0\", \"cases\": [{\"file\": \"a.wtn\", \"outcome\": \"accept\", \"errors\": [], \"warnings\": []}, {\"file\": \"b.wtn\", \"outcome\": \"reject\", \"errors\": [\"x\"], \"warnings\": [], \"profile\": \"mcu\"}]}"))
+            "a.wtn\nb.wtn\naccept"))
+
+  (test "a case the checker gets right agrees, and one it gets wrong differs"
+    (let manifest "{\"cases\": [{\"file\": \"a.wtn\", \"outcome\": \"accept\", \"errors\": [], \"warnings\": []}, {\"file\": \"b.wtn\", \"outcome\": \"accept\", \"errors\": [], \"warnings\": []}]}"
+      (and (str.eq (case_verdict (bundled manifest "a.wtn" "(module m (fn f ((n Int)) Int n))")) "agrees a.wtn\naccept")
+           (str.eq (case_verdict (bundled manifest "b.wtn" "(module m (fn f ((n Int)) Str n))"))
+                   "differs b.wtn want accept errors - warnings - got reject errors type-mismatch warnings -\nreject")))))
