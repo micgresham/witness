@@ -34,6 +34,8 @@
 
   (use "wtn:eb01605a4ed93c26fd7b1776e3234637fd8fed5a5f96948a551ce1becd2d6280" as thumb_room)
 
+  (use "wtn:e73777641ef2aae92f48ed76c8c6dfabc5999e3fe3d38822589fd58e2140ae03" as armv6m_elf_of)
+
   (use "wtn:a4f3af076a5d9004f62397643122425483c1ef4ce32b6bde82ed46b511416f44" as esp32p4_room)
 
   (use "wtn:5ba222511c6b121419a2adfe0d3a79142b281696dbc7c7fd4e0217b8aa88400a" as esp32p4_elf_of)
@@ -41,6 +43,10 @@
   (use "wtn:bb9f8a5d043801690ea8a49ba4e916f7e9a049e679c38dde567c28e89040f5aa" as esp32s31_room)
 
   (use "wtn:87184d65131bd3c689165e253fc4792ec0a0e6e7222c88b87f633b4379bae27a" as esp32s31_elf_of)
+
+  (use "wtn:bb9f8a5d043801690ea8a49ba4e916f7e9a049e679c38dde567c28e89040f5aa" as rv32e_room)
+
+  (use "wtn:6f3c733b938f80a57d15e63694e471754f12a63814c6d3fe0986a778471889a0" as rv32e_elf_of)
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
@@ -161,6 +167,36 @@
         ((Err f) (str.encode (concat "error: " (get f why))))
         ((Ok b) (match (esp32s31_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
 
+  ; Cortex-M0 and M0+ (compiler/native_armv6m.wtn): the Cortex-M3 image's memory, so its room.
+  (fn drive_armv6m ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir_words src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (armv6m_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_armv6m_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir_words src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bounds_in m "main" src (thumb_room))
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (armv6m_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
+  ; RV32E, or RV32I, with or without M (compiler/native_rv32e.wtn).
+  (fn drive_rv32e ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir_words src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (rv32e_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))
+
+  (fn drive_rv32e_bounded ((src Str)) Bytes
+    (uses Alloc)
+    (match (module_ir_words src)
+      ((Err f) (str.encode (concat "error: " (get f why))))
+      ((Ok m) (match (checked_bounds_in m "main" src (rv32e_room))
+        ((Err f) (str.encode (concat "error: " (get f why))))
+        ((Ok b) (match (rv32e_elf_of m "main" false) ((Ok elf) elf) ((Err f) (str.encode (concat "error: " (get f why))))))))))
+
   ; For a board whose stacks and heap must not overflow (the `mcu` and `esp32` profiles): the
   ; image only if what it can use of each, bounded before it runs (compiler/stack.wtn), fits
   ; the room it has.
@@ -175,7 +211,7 @@
   ; The bound itself, as text: the operand stack's bytes, then the machine stack's.
   (fn thumb_stack ((src Str)) Str
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (concat "error: " (get f why)))
       ((Ok m) (match (checked_bound m "main" src)
         ((Err f) (concat "error: " (get f why)))
@@ -203,19 +239,19 @@
   ; machine stack's.
   (fn xtensa_stack ((src Str) (chip Str)) Str
     (uses Alloc)
-    (match (module_ir src)
+    (match (module_ir_words src)
       ((Err f) (concat "error: " (get f why)))
       ((Ok m) (match (checked_bound_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (esp32_room)))
         ((Err f) (concat "error: " (get f why)))
         ((Ok b) (concat (num.to_str (get b operand)) (concat " " (num.to_str (get b machine)))))))))
 
-  ; Every bound as text for a chip ("thumb", "esp32", "esp32s3", "esp32p4" or "esp32s31"): the operand stack's bytes,
+  ; Every bound as text for a chip ("thumb", "esp32", "esp32s3", "esp32p4", "esp32s31" or "rv32e"): the operand stack's bytes,
   ; the machine stack's, the most the heap can grow by, and where it starts.
   (fn bounds_text ((src Str) (chip Str)) Str
     (uses Alloc)
     (match (module_ir_words src)
       ((Err f) (concat "error: " (get f why)))
-      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (if (str.eq chip "esp32s31") (esp32s31_room) (thumb_room))))))
+      ((Ok m) (match (checked_bounds_in m "main" src (if (str.eq chip "esp32s3") (esp32s3_room) (if (str.eq chip "esp32") (esp32_room) (if (str.eq chip "esp32p4") (esp32p4_room) (if (str.eq chip "esp32s31") (esp32s31_room) (if (str.eq chip "rv32e") (rv32e_room) (thumb_room)))))))
         ((Err f) (concat "error: " (get f why)))
         ((Ok b) (concat (num.to_str (get (get b stack) operand)) (concat " " (concat (num.to_str (get (get b stack) machine))
           (concat " " (concat (num.to_str (get b heap)) (concat " " (num.to_str (get b base)))))))))))))

@@ -14,6 +14,8 @@
 ;   thumb      native_riscv.wtn, thumb.wtn          -> native_thumb.wtn
 ;   esp32p4    native_riscv32.wtn                   -> native_esp32p4.wtn
 ;   esp32s31   native_riscv32.wtn                   -> native_esp32s31.wtn
+;   rv32e      native_riscv32.wtn                   -> native_rv32e.wtn
+;   armv6m     native_thumb.wtn                     -> native_armv6m.wtn
 ;   xtensa     native_riscv.wtn, xtensa.wtn         -> native_xtensa.wtn
 ;   xtensa_s3  native_riscv.wtn, xtensa.wtn         -> native_xtensa_s3.wtn
 ;
@@ -218,7 +220,7 @@
     (imm "u32.of"
       (if (is x "A") (lit "10") (if (is x "B") (lit "11") (if (is x "C") (lit "12") (if (is x "D") (lit "13") (if (is x "E") (lit "14") (if (is x "F") (lit "15")
       (if (is x "Z") (lit "0") (if (is x "T") (lit "5") (if (is x "g") (lit "6") (if (is x "h") (lit "7") (if (is x "i") (lit "28") (if (is x "j") (lit "29")
-      (if (is x "k") (lit "30") (if (is x "l") (lit "31") (lit "9")))))))))))))))))
+      (if (is x "k") (lit "30") (if (is x "l") (lit "31") (if (is x "R") (lit "1") (if (is x "O") (lit "3") (lit "9")))))))))))))))))))
 
   (fn rv_labels ((items Words) (n Int) (out Labels)) Labels
     (uses Alloc)
@@ -235,7 +237,7 @@
         (let b (rv_reg (nth w 2))
           (if (has_word op "add sub and or xor sll srl sra slt sltu mul mulhu")
             (call_of (glue op (lit "_rr")) (three a b (rv_reg (nth w 3))))
-            (if (has_word op "addi sltiu xori ori andi")
+            (if (has_word op "addi sltiu xori ori andi lw sw")
               (call_of op (three a b (imm "i64.of" (nth w 3))))
               (if (has_word op "slli srli srai")
                 (call_of op (three a b (imm "u32.of" (nth w 3))))
@@ -764,6 +766,10 @@
     (make Layout (named "native_esp32s31") (chip "ESP32-S31") (short "S31") (ram "SRAM") (base 788529152) (code 131072)
                  (mem 788660224) (os_top 788955136) (sp_top 789028864) (host 789028864) (words 73728)))
 
+  (fn rv32e_board () Layout
+    (make Layout (named "native_rv32e") (chip "RV32E board") (short "board") (ram "RAM") (base 536870912) (code 131056)
+                 (mem 537001984) (os_top 537296896) (sp_top 537370624) (host 537370624) (words 73728)))
+
   (fn esp_base_address ((l Layout)) Bytes
     (uses Alloc)
     (glue (glue (lit "(fn base_address () I64 (i64.of ") (num (get l base))) (lit "))")))
@@ -841,6 +847,239 @@
   (fn esp32p4 ((src Str)) Str (uses Alloc) (esp src (p4)))
 
   (fn esp32s31 ((src Str)) Str (uses Alloc) (esp src (s31)))
+
+  ; --- Cortex-M0, ARMv6-M: gen_armv6m.py ----------------------------------------------------
+  (fn m0_program ((k Str)) Bytes
+    (uses Alloc)
+      (if (str.eq k "add")
+      (lit "adds3 A A C,adcs B D")
+      (if (str.eq k "sub")
+      (lit "subs3 A A C,sbcs B D")
+      (if (str.eq k "mul")
+      (lit "movs E 0,movs F 0,label LOOP,mov_rr T A,orrs T B,beq DONE,movs T 1,ands T A,beq SKIP,adds3 E E C,adcs F D,label SKIP,lsri A A 1,lsli T B 31,orrs A T,lsri B B 1,adds3 C C C,adcs D D,jmp LOOP,label DONE,mov_rr A E,mov_rr B F")
+      (if (str.eq k "and")
+      (lit "ands A C,ands B D")
+      (if (str.eq k "or")
+      (lit "orrs A C,orrs B D")
+      (if (str.eq k "xor")
+      (lit "eors A C,eors B D")
+      (if (str.eq k "shl")
+      (lit "movs T 63,ands C T,movs E 32,subs3 E E C,mov_rr F C,subi8 F 32,lsls B C,mov_rr T A,lsrs T E,orrs B T,mov_rr T A,lsls T F,orrs B T,lsls A C")
+      (if (str.eq k "shru")
+      (lit "movs T 63,ands C T,movs E 32,subs3 E E C,mov_rr F C,subi8 F 32,lsrs A C,mov_rr T B,lsls T E,orrs A T,mov_rr T B,lsrs T F,orrs A T,lsrs B C")
+      (if (str.eq k "shrs")
+      (lit "movs T 63,ands C T,cmpi C 32,bhs BIG,movs E 32,subs3 E E C,lsrs A C,mov_rr T B,lsls T E,orrs A T,asrs B C,jmp END,label BIG,subi8 C 32,mov_rr A B,asrs A C,asri B B 31,label END")
+      (if (str.eq k "lts")
+      (lit "cmp_rr A C,mov_rr E B,sbcs E D,blt YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "ltu")
+      (lit "cmp_rr A C,mov_rr E B,sbcs E D,blo YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "gts")
+      (lit "cmp_rr C A,mov_rr E D,sbcs E B,blt YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "gtu")
+      (lit "cmp_rr C A,mov_rr E D,sbcs E B,blo YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "les")
+      (lit "cmp_rr C A,mov_rr E D,sbcs E B,bge YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "leu")
+      (lit "cmp_rr C A,mov_rr E D,sbcs E B,bhs YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "ges")
+      (lit "cmp_rr A C,mov_rr E B,sbcs E D,bge YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "geu")
+      (lit "cmp_rr A C,mov_rr E B,sbcs E D,bhs YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "eq")
+      (lit "mov_rr E A,eors E C,mov_rr F B,eors F D,orrs E F,beq YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "ne")
+      (lit "mov_rr E A,eors E C,mov_rr F B,eors F D,orrs E F,bne YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "eqz")
+      (lit "orrs A B,beq YES,movs A 0,jmp END,label YES,movs A 1,label END,movs B 0")
+      (if (str.eq k "wrap")
+      (lit "movs B 0")
+      (if (str.eq k "ext8")
+      (lit "lsli A A 24,asri A A 24,asri B A 31")
+      (if (str.eq k "ext16")
+      (lit "lsli A A 16,asri A A 16,asri B A 31")
+      (if (str.eq k "exts")
+      (lit "asri B A 31")
+      (if (str.eq k "zero_check")
+      (lit "mov_rr E C,orrs E D,bne OK,bkpt,label OK")
+      (if (str.eq k "overflow_check")
+      (lit "addi3 E C 1,addi3 F D 1,orrs E F,bne OK,movs F 1,lsli F F 31,eors F B,orrs F A,bne OK,bkpt,label OK")
+      (if (str.eq k "udiv")
+      (lit "movs E 0,movs F 0,movs T 64,mov_rr i T,label LOOP,adds3 A A A,adcs B B,adcs E E,adcs F F,bhs DO,cmp_rr E C,mov_rr T F,sbcs T D,blo SKIP,label DO,subs3 E E C,sbcs F D,movs T 1,orrs A T,label SKIP,mov_rr T i,subi8 T 1,mov_rr i T,bne LOOP")
+      (if (str.eq k "sdiv")
+      (lit "lsri E B 31,lsri F D 31,mov_rr T E,mov_rr g T,eors T F,mov_rr h T,cmpi E 0,beq S1,mvns A A,mvns B B,addi8 A 1,movs T 0,adcs B T,label S1,cmpi F 0,beq S2,mvns C C,mvns D D,addi8 C 1,movs T 0,adcs D T,label S2,movs E 0,movs F 0,movs T 64,mov_rr i T,label LOOP,adds3 A A A,adcs B B,adcs E E,adcs F F,bhs DO,cmp_rr E C,mov_rr T F,sbcs T D,blo SKIP,label DO,subs3 E E C,sbcs F D,movs T 1,orrs A T,label SKIP,mov_rr T i,subi8 T 1,mov_rr i T,bne LOOP,mov_rr T h,cmpi T 0,beq S3,mvns A A,mvns B B,addi8 A 1,movs T 0,adcs B T,label S3")
+      (if (str.eq k "srem")
+      (lit "lsri E B 31,lsri F D 31,mov_rr T E,mov_rr g T,eors T F,mov_rr h T,cmpi E 0,beq S1,mvns A A,mvns B B,addi8 A 1,movs T 0,adcs B T,label S1,cmpi F 0,beq S2,mvns C C,mvns D D,addi8 C 1,movs T 0,adcs D T,label S2,movs E 0,movs F 0,movs T 64,mov_rr i T,label LOOP,adds3 A A A,adcs B B,adcs E E,adcs F F,bhs DO,cmp_rr E C,mov_rr T F,sbcs T D,blo SKIP,label DO,subs3 E E C,sbcs F D,movs T 1,orrs A T,label SKIP,mov_rr T i,subi8 T 1,mov_rr i T,bne LOOP,mov_rr T g,cmpi T 0,beq S3,mvns E E,mvns F F,addi8 E 1,movs T 0,adcs F T,label S3,mov_rr A E,mov_rr B F")
+      (if (str.eq k "urem")
+      (lit "movs E 0,movs F 0,movs T 64,mov_rr i T,label LOOP,adds3 A A A,adcs B B,adcs E E,adcs F F,bhs DO,cmp_rr E C,mov_rr T F,sbcs T D,blo SKIP,label DO,subs3 E E C,sbcs F D,movs T 1,orrs A T,label SKIP,mov_rr T i,subi8 T 1,mov_rr i T,bne LOOP,mov_rr A E,mov_rr B F")
+      (lit ""))))))))))))))))))))))))))))))))
+
+  (fn m0_reg ((x Bytes)) Bytes (uses Alloc) (imm "u32.of" (if (is x "A") (lit "0") (if (is x "B") (lit "1") (if (is x "C") (lit "2") (if (is x "D") (lit "3") (if (is x "E") (lit "4") (if (is x "F") (lit "5") (if (is x "T") (lit "6") (if (is x "i") (lit "10") (if (is x "h") (lit "11") (lit "12"))))))))))))
+
+  (fn m0_labels ((items Words) (n Int) (out Labels)) Labels
+    (uses Alloc)
+    (match items
+      ((NoWords) out)
+      ((Words h rest) (let w (pieces h 32) (if (is (nth w 0) "label") (m0_labels rest n (Labels (nth w 1) n out)) (m0_labels rest (+ n 1) out))))))
+
+  (fn m0_to ((ls Labels) (name Bytes) (n Int)) Bytes (uses Alloc) (imm "i64.of" (num (* 2 (- (label_at ls name) n)))))
+
+  (fn m0_instruction ((w Words) (ls Labels) (n Int)) Bytes
+    (uses Alloc)
+    (let op (nth w 0)
+      (if (has_word op "adds3 subs3")
+        (call_of op (three (m0_reg (nth w 1)) (m0_reg (nth w 2)) (m0_reg (nth w 3))))
+        (if (has_word op "ands eors orrs adcs sbcs lsls lsrs asrs mvns cmp_rr mov_rr")
+          (call_of op (two (m0_reg (nth w 1)) (m0_reg (nth w 2))))
+          (if (has_word op "movs addi8 subi8 cmpi")
+            (call_of op (two (m0_reg (nth w 1)) (imm "i64.of" (nth w 2))))
+            (if (has_word op "lsli lsri asri addi3")
+              (call_of op (three (m0_reg (nth w 1)) (m0_reg (nth w 2)) (imm "i64.of" (nth w 3))))
+              (if (has_word op "beq bne bhs blo bge blt")
+                (call_of (lit "bcond") (two (imm "u32.of" (if (is op "beq") (lit "0") (if (is op "bne") (lit "1") (if (is op "bhs") (lit "2") (if (is op "blo") (lit "3") (if (is op "bge") (lit "10") (if (is op "blt") (lit "11") (lit "13")))))))) (m0_to ls (nth w 1) n)))
+                (if (is op "jmp") (call_of (lit "b_near") (one (m0_to ls (nth w 1) n))) (lit "(bkpt)")))))))))
+
+  (fn m0_assembled ((items Words) (ls Labels) (n Int)) Words
+    (uses Alloc)
+    (match items
+      ((NoWords) (NoWords))
+      ((Words h rest) (let w (pieces h 32) (if (is (nth w 0) "label") (m0_assembled rest ls n) (Words (m0_instruction w ls n) (m0_assembled rest ls (+ n 1))))))))
+
+  (fn m0_asm ((prog Bytes)) Bytes
+    (uses Alloc)
+    (let items (pieces prog 44) (nest (m0_assembled items (m0_labels items 0 (NoLabels)) 0) 100000)))
+
+  (fn m0_replacement ((n Bytes)) Bytes
+    (uses Alloc)
+    (if (is n "rg")
+        (lit "(fn low ((r U32)) I64 (i64.of (bit.and r (u32.of 7))))\n\n  (fn number ((r U32)) I64 (i64.of (bit.and r (u32.of 15))))\n\n  ; MOV, ADD: any two registers, and neither touches the flags when written this way.\n  (fn high_form ((op I64) (d U32) (m U32)) Bytes\n    (uses Alloc)\n    (half (plus op (plus (at (bit.shr (number d) 3) (u32.of 7)) (plus (at (number m) (u32.of 3)) (low d))))))\n\n  (fn mov_rr ((d U32) (m U32)) Bytes (uses Alloc) (high_form (i64.of 17920) d m))\n\n  (fn add_high ((d U32) (m U32)) Bytes (uses Alloc) (high_form (i64.of 17408) d m))\n\n  (fn three ((op I64) (d U32) (n U32) (m U32)) Bytes\n    (uses Alloc)\n    (half (plus op (plus (at (low m) (u32.of 6)) (plus (at (low n) (u32.of 3)) (low d))))))\n\n  (fn adds3 ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (three (i64.of 6144) d n m))\n\n  (fn subs3 ((d U32) (n U32) (m U32)) Bytes (uses Alloc) (three (i64.of 6656) d n m))\n\n  (fn addi3 ((d U32) (n U32) (v I64)) Bytes\n    (uses Alloc)\n    (half (plus (i64.of 7168) (plus (at (bit.and v (i64.of 7)) (u32.of 6)) (plus (at (low n) (u32.of 3)) (low d))))))\n\n  ; d, and a byte.\n  (fn eight ((op I64) (d U32) (v I64)) Bytes\n    (uses Alloc)\n    (half (plus op (plus (at (low d) (u32.of 8)) (bit.and v (i64.of 255))))))\n\n  (fn movs ((d U32) (v I64)) Bytes (uses Alloc) (eight (i64.of 8192) d v))\n\n  (fn cmpi ((d U32) (v I64)) Bytes (uses Alloc) (eight (i64.of 10240) d v))\n\n  (fn addi8 ((d U32) (v I64)) Bytes (uses Alloc) (eight (i64.of 12288) d v))\n\n  (fn subi8 ((d U32) (v I64)) Bytes (uses Alloc) (eight (i64.of 14336) d v))\n\n  ; The two-register data operations: d is both the first operand and the answer.\n  (fn alu ((op I64) (d U32) (m U32)) Bytes\n    (uses Alloc)\n    (half (plus (i64.of 16384) (plus (at op (u32.of 6)) (plus (at (low m) (u32.of 3)) (low d))))))\n\n  (fn ands ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 0) d m))\n\n  (fn eors ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 1) d m))\n\n  (fn lsls ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 2) d m))\n\n  (fn lsrs ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 3) d m))\n\n  (fn asrs ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 4) d m))\n\n  (fn adcs ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 5) d m))\n\n  (fn sbcs ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 6) d m))\n\n  (fn cmp_rr ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 10) d m))\n\n  (fn orrs ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 12) d m))\n\n  (fn mvns ((d U32) (m U32)) Bytes (uses Alloc) (alu (i64.of 15) d m))\n\n  (fn shifted ((op I64) (d U32) (m U32) (by I64)) Bytes\n    (uses Alloc)\n    (half (plus op (plus (at (bit.and by (i64.of 31)) (u32.of 6)) (plus (at (low m) (u32.of 3)) (low d))))))\n\n  (fn lsli ((d U32) (m U32) (by I64)) Bytes (uses Alloc) (shifted (i64.of 0) d m by))\n\n  (fn lsri ((d U32) (m U32) (by I64)) Bytes (uses Alloc) (shifted (i64.of 2048) d m by))\n\n  (fn asri ((d U32) (m U32) (by I64)) Bytes (uses Alloc) (shifted (i64.of 4096) d m by))\n\n  ; A word's offset is in words, and a load's base is r0-r7 or sp; a byte's in bytes.\n  (fn word_at ((op I64) (t U32) (n U32) (off I64)) Bytes\n    (uses Alloc)\n    (half (plus op (plus (at (bit.and (bit.shr off 2) (i64.of 31)) (u32.of 6)) (plus (at (low n) (u32.of 3)) (low t))))))\n\n  (fn ldr ((t U32) (n U32) (off I64)) Bytes (uses Alloc) (word_at (i64.of 26624) t n off))\n\n  (fn str ((t U32) (n U32) (off I64)) Bytes (uses Alloc) (word_at (i64.of 24576) t n off))\n\n  (fn ldrb ((t U32) (n U32)) Bytes (uses Alloc) (word_at (i64.of 30720) t n (i64.of 0)))\n\n  (fn strb ((t U32) (n U32)) Bytes (uses Alloc) (word_at (i64.of 28672) t n (i64.of 0)))\n\n  (fn ldr_sp ((t U32) (off I64)) Bytes (uses Alloc) (eight (i64.of 38912) t (bit.shr off 2)))\n\n  (fn str_sp ((t U32) (off I64)) Bytes (uses Alloc) (eight (i64.of 36864) t (bit.shr off 2)))\n\n  ; A constant a byte at a time, from its top; each step leaves the flags changed.\n  (fn next_byte ((d U32) (v I64)) Bytes\n    (uses Alloc)\n    (if (= v (i64.of 0)) (lsli d d (i64.of 8)) (bytes.concat (lsli d d (i64.of 8)) (addi8 d v))))\n\n  (fn byte_of ((v I64) (from U32)) I64 (bit.and (bit.shr v (int.of from)) (i64.of 255)))\n\n  (fn mov_imm ((d U32) (n I64)) Bytes\n    (uses Alloc)\n    (let v (bit.and n (i64.of 4294967295))\n      (if (< v (i64.of 256))\n        (movs d v)\n        (if (< v (i64.of 65536))\n          (bytes.concat (movs d (byte_of v (u32.of 8))) (next_byte d (byte_of v (u32.of 0))))\n          (if (< v (i64.of 16777216))\n            (bytes.concat (movs d (byte_of v (u32.of 16))) (bytes.concat (next_byte d (byte_of v (u32.of 8))) (next_byte d (byte_of v (u32.of 0)))))\n            (bytes.concat (movs d (byte_of v (u32.of 24))) (bytes.concat (next_byte d (byte_of v (u32.of 16))) (bytes.concat (next_byte d (byte_of v (u32.of 8))) (next_byte d (byte_of v (u32.of 0)))))))))))\n\n  ; d = n + m, with whichever of them may be high.\n  (fn add_rr ((d U32) (n U32) (m U32)) Bytes\n    (uses Alloc)\n    (if (= d n)\n      (add_high d m)\n      (if (= d m) (add_high d n) (bytes.concat (mov_rr d n) (add_high d m)))))\n\n  ; A condition's branch reaches 256 bytes each way, B 2048, and BL sixteen megabytes.\n  (fn bcond ((c U32) (off I64)) Bytes\n    (uses Alloc)\n    (half (plus (i64.of 53248) (plus (at (i64.of c) (u32.of 8)) (bit.and (bit.shr (wrap.sub off (i64.of 4)) 1) (i64.of 255))))))\n\n  (fn b_near ((off I64)) Bytes\n    (uses Alloc)\n    (half (plus (i64.of 57344) (bit.and (bit.shr (wrap.sub off (i64.of 4)) 1) (i64.of 2047)))))\n\n  (fn cmp_i ((n U32) (v I64)) Bytes (uses Alloc) (cmpi n v))\n\n  (fn blx_r ((m U32)) Bytes (uses Alloc) (half (plus (i64.of 18304) (at (number m) (u32.of 3)))))\n\n  (fn ret () Bytes (uses Alloc) (half (i64.of 18288)))\n\n  (fn bkpt () Bytes (uses Alloc) (half (i64.of 48640)))\n\n  ; The jump within a function: BL, whose clobbering of LR costs nothing, the frame having it.\n  (fn b ((off I64)) Bytes (uses Alloc) (bl off))\n\n  (fn cond_of ((f3 U32)) U32\n    (if (= f3 (u32.of 0)) (u32.of 0)\n      (if (= f3 (u32.of 1)) (u32.of 1)\n        (if (= f3 (u32.of 4)) (u32.of 11)\n          (if (= f3 (u32.of 5)) (u32.of 10)\n            (if (= f3 (u32.of 6)) (u32.of 3) (u32.of 2)))))))")
+        (if (is n "tmp")
+        (lit "(fn tmp () U32 (u32.of 6))")
+        (if (is n "os")
+        (lit "(fn os () U32 (u32.of 7))")
+        (if (is n "fp")
+        (lit "(fn fp () U32 (u32.of 8))")
+        (if (is n "mem")
+        (lit "(fn mem () U32 (u32.of 9))")
+        (if (is n "push")
+        (lit "(fn push ((r U32)) Bytes\n    (uses Alloc)\n    (cat4 (subi8 (os) (i64.of 8)) (str r (os) (i64.of 0)) (movs (tmp) (i64.of 0)) (str (tmp) (os) (i64.of 4))))")
+        (if (is n "pop")
+        (lit "(fn pop ((r U32)) Bytes\n    (uses Alloc)\n    (cat (ldr r (os) (i64.of 0)) (addi8 (os) (i64.of 8))))")
+        (if (is n "pushp")
+        (lit "(fn pushp ((lo U32) (hi U32)) Bytes\n    (uses Alloc)\n    (cat3 (subi8 (os) (i64.of 8)) (str lo (os) (i64.of 0)) (str hi (os) (i64.of 4))))")
+        (if (is n "popp")
+        (lit "(fn popp ((lo U32) (hi U32)) Bytes\n    (uses Alloc)\n    (cat3 (ldr lo (os) (i64.of 0)) (ldr hi (os) (i64.of 4)) (addi8 (os) (i64.of 8))))")
+        (if (is n "addi")
+        (lit "(fn addi ((d U32) (n U32) (imm I64)) Bytes\n    (uses Alloc)\n    (if (and (<= (i64.of -255) imm) (<= imm (i64.of 255)))\n      (cat (if (= d n) (no_bytes) (mov_rr d n))\n           (if (< imm (i64.of 0)) (subi8 d (wrap.sub (i64.of 0) imm)) (addi8 d imm)))\n      (cat (mov_imm (tmp) imm) (add_rr d n (tmp)))))")
+        (if (is n "lbux")
+        (lit "(fn lbux ((dst U32) (base U32) (idx U32)) Bytes\n    (uses Alloc)\n    (cat (add_rr (tmp) base idx) (ldrb dst (tmp))))")
+        (if (is n "sbx")
+        (lit "(fn sbx ((src U32) (base U32) (idx U32)) Bytes\n    (uses Alloc)\n    (cat (add_rr (tmp) base idx) (strb src (tmp))))")
+        (if (is n "add_big")
+        (lit "(fn add_big ((d U32) (n U32) (imm I64)) Bytes (uses Alloc) (addi d n imm))")
+        (if (is n "frame_loadp")
+        (lit "; The temporary at a frame's slot: the frame's register is one no load can use.\n  (fn frame_slot ((disp I64)) Bytes (uses Alloc) (addi (tmp) (fp) disp))\n\n  (fn frame_loadp ((lo U32) (hi U32) (disp I64)) Bytes\n    (uses Alloc)\n    (cat3 (frame_slot disp) (ldr lo (tmp) (i64.of 0)) (ldr hi (tmp) (i64.of 4))))")
+        (if (is n "frame_storep")
+        (lit "(fn frame_storep ((lo U32) (hi U32) (disp I64)) Bytes\n    (uses Alloc)\n    (cat3 (frame_slot disp) (str lo (tmp) (i64.of 0)) (str hi (tmp) (i64.of 4))))")
+        (if (is n "compare_work")
+        (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (lit "(fn compare_work ((code U8)) (Option Bytes)\n    (uses Alloc)\n    (if (= code (u8.of 81)) (Some ") (m0_asm (m0_program "eq"))) (lit ") (if (= code (u8.of 82)) (Some ")) (m0_asm (m0_program "ne"))) (lit ") (if (= code (u8.of 83)) (Some ")) (m0_asm (m0_program "lts"))) (lit ") (if (= code (u8.of 84)) (Some ")) (m0_asm (m0_program "ltu"))) (lit ") (if (= code (u8.of 85)) (Some ")) (m0_asm (m0_program "gts"))) (lit ") (if (= code (u8.of 86)) (Some ")) (m0_asm (m0_program "gtu"))) (lit ") (if (= code (u8.of 87)) (Some ")) (m0_asm (m0_program "les"))) (lit ") (if (= code (u8.of 88)) (Some ")) (m0_asm (m0_program "leu"))) (lit ") (if (= code (u8.of 89)) (Some ")) (m0_asm (m0_program "ges"))) (lit ") (if (= code (u8.of 90)) (Some ")) (m0_asm (m0_program "geu"))) (lit ") (None))))))))))))"))
+        (if (is n "alu_work")
+        (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (lit "(fn alu_work ((code U8)) (Option Bytes)\n    (uses Alloc)\n    (if (= code (u8.of 124)) (Some ") (m0_asm (m0_program "add"))) (lit ") (if (= code (u8.of 125)) (Some ")) (m0_asm (m0_program "sub"))) (lit ") (if (= code (u8.of 126)) (Some ")) (m0_asm (m0_program "mul"))) (lit ") (if (= code (u8.of 131)) (Some ")) (m0_asm (m0_program "and"))) (lit ") (if (= code (u8.of 132)) (Some ")) (m0_asm (m0_program "or"))) (lit ") (if (= code (u8.of 133)) (Some ")) (m0_asm (m0_program "xor"))) (lit ") (if (= code (u8.of 134)) (Some ")) (m0_asm (m0_program "shl"))) (lit ") (if (= code (u8.of 135)) (Some ")) (m0_asm (m0_program "shrs"))) (lit ") (if (= code (u8.of 136)) (Some ")) (m0_asm (m0_program "shru"))) (lit ") (if (= code (u8.of 114)) (Some ")) (m0_asm (m0_program "or"))) (lit ") (if (= code (u8.of 113)) (Some ")) (m0_asm (m0_program "and"))) (lit ") (None)))))))))))))"))
+        (if (is n "zero_check")
+        (glue (glue (lit "(fn zero_check () Bytes (uses Alloc) ") (m0_asm (m0_program "zero_check"))) (lit ")"))
+        (if (is n "overflow_check")
+        (glue (glue (lit "(fn overflow_check () Bytes (uses Alloc) ") (m0_asm (m0_program "overflow_check"))) (lit ")"))
+        (if (is n "divide_code")
+        (glue (glue (glue (glue (glue (glue (glue (glue (lit "(fn divide_code ((code U8)) (Option Bytes)\n    (uses Alloc)\n    (if (= code (u8.of 127))\n      (Some (binary_code (cat3 (zero_check) (overflow_check) ") (m0_asm (m0_program "sdiv"))) (lit ")))\n      (if (= code (u8.of 128))\n        (Some (binary_code (cat (zero_check) ")) (m0_asm (m0_program "udiv"))) (lit ")))\n        (if (= code (u8.of 129))\n          (Some (binary_code (cat (zero_check) ")) (m0_asm (m0_program "srem"))) (lit ")))\n          (if (= code (u8.of 130))\n            (Some (binary_code (cat (zero_check) ")) (m0_asm (m0_program "urem"))) (lit ")))\n            (None))))))"))
+        (if (is n "unary_work")
+        (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (glue (lit "(fn unary_work ((code U8)) (Option Bytes)\n    (uses Alloc)\n    (if (= code (u8.of 80)) (Some ") (m0_asm (m0_program "eqz"))) (lit ") (if (= code (u8.of 69)) (Some ")) (m0_asm (m0_program "eqz"))) (lit ") (if (= code (u8.of 167)) (Some ")) (m0_asm (m0_program "wrap"))) (lit ") (if (= code (u8.of 173)) (Some (no_bytes)) (if (= code (u8.of 194)) (Some ")) (m0_asm (m0_program "ext8"))) (lit ") (if (= code (u8.of 195)) (Some ")) (m0_asm (m0_program "ext16"))) (lit ") (if (= code (u8.of 196)) (Some ")) (m0_asm (m0_program "exts"))) (lit ") (None)))))))))"))
+        (if (is n "push_frame")
+        (lit "(fn push_frame () Bytes\n    (uses Alloc)\n    (cat4 (half (i64.of 45188)) (cat (mov_rr (tmp) (u32.of 14)) (str_sp (tmp) (i64.of 8))) (mov_rr (tmp) (fp)) (str_sp (tmp) (i64.of 0))))")
+        (if (is n "pop_frame")
+        (lit "(fn pop_frame () Bytes\n    (uses Alloc)\n    (cat4 (ldr_sp (tmp) (i64.of 0)) (cat (mov_rr (fp) (tmp)) (ldr_sp (tmp) (i64.of 8))) (mov_rr (u32.of 14) (tmp)) (half (i64.of 45060))))")
+        (if (is n "copy_loop")
+        (lit "(fn copy_loop () Bytes\n    (uses Alloc)\n    (cat4 (cat (cmpi (r2) (i64.of 0)) (bcond (u32.of 0) (i64.of 14)))\n      (ldrb (r3) (r1))\n      (strb (r3) (r0))\n      (cat4 (addi8 (r1) (i64.of 1)) (addi8 (r0) (i64.of 1)) (subi8 (r2) (i64.of 1)) (bcond (u32.of 1) (i64.of -10)))))")
+        (if (is n "cleared")
+        (lit "(fn cleared () Bytes\n    (uses Alloc)\n    (cat4 (mov_rr (r0) (mem)) (mov_imm (r2) (i64.of 98304)) (movs (r3) (i64.of 0))\n      (cat4 (str (r3) (r0) (i64.of 0)) (addi8 (r0) (i64.of 4)) (subi8 (r2) (i64.of 1)) (bcond (u32.of 1) (i64.of -6)))))")
+        (lit "")))))))))))))))))))))))))))
+
+  (fn m0_rewritten ((f Bytes)) Bytes
+    (uses Alloc)
+    (let n (fn_name f)
+      (let r (m0_replacement n)
+        (if (< 0 (size r))
+          r
+          (if (has_word n "adc_i adc_rr adcs_rr add_rr adds_i adds_rr addsub12 addw and_i and_rr asr_i asr_r b bcond bkpt blx_r cc_eq cc_ge cc_gt cc_hi cc_hs cc_le cc_lo cc_ls cc_lt cc_ne cmp_i cmp_rr cond_of dp dpi eor_rr ldr ldrb ldx lsl_i lsl_r lsr_i lsr_r mem12 mem8m mov16 mov_imm mov_rr movt movw mul_rr mvn_rr nop orr_i orr_rr ret rsb_i rsb_rr sbc_rr sbcs_rr sdiv sdx shift_i shift_r str strb sub_rr subs_i subs_rr subw svc udiv umull")
+            (lit "")
+            (if (is n "item_size")
+          (replaced f (lit "((VJumpIf f3 a b id) (u32.of 12))") (lit "((VJumpIf f3 a b id) (u32.of 8))") 100)
+          (if (is n "item_bytes")
+          (replaced f (lit "((VJumpIf f3 a b id) (cat3 (jump_cmp a b) (bcond (not_cond (cond_of f3)) (i64.of 8)) (b (distance (label_at ls id) (wrap.add at (u32.of 8))))))") (lit "((VJumpIf f3 a b id) (cat3 (jump_cmp a b) (bcond (not_cond (cond_of f3)) (i64.of 6)) (b (distance (label_at ls id) (wrap.add at (u32.of 4))))))") 100)
+          (if (is n "other_op")
+          (replaced f (lit "(bcond (u32.of 1) (i64.of 12))") (lit "(bcond (u32.of 1) (i64.of 6))") 100)
+          (if (is n "start_code")
+          (replaced f (lit "(mov_imm (mem) (i64.of 536870912))") (lit "(cat (mov_imm (r0) (i64.of 536870912)) (mov_rr (mem) (r0)))") 100)
+          f)))))))))
+
+  (fn m0_rewritten_all ((fs Words)) Words
+    (uses Alloc)
+    (match fs ((NoWords) fs) ((Words f rest) (let e (m0_rewritten f) (if (= (size e) 0) (m0_rewritten_all rest) (Words e (m0_rewritten_all rest)))))))
+
+  (fn armv6m ((src Str)) Str
+    (uses Alloc)
+    (module_text (lit "; Witness to Cortex-M0 (ARMv6-M), from the same instructions the other backends write.\n;\n; This is the Cortex-M3 image (native_thumb.wtn) on the smaller instruction set, with its memory\n; map and so its bounds. A constant is built a byte at a time; the operand stack pointer moves\n; before a push writes, there being no negative offset; r6 is the temporary and r7 the operand stack\n; pointer, with the frame and the memory base in r8 and r9, reached through r6; a product is shift\n; and add; and BL is the jump, since LR is already in the frame.\n;\n; Almost nothing here is written by hand: tools/gen_armv6m.py makes it from native_thumb.wtn.\n; Edit that, not this.\n;\n; The evidence is tests/test_native_thumb.py: the image is run in Unicorn, every instruction it\n; holds is read and refused if ARMv6-M has no such thing (Unicorn's Cortex-M0 would run it), and\n; what it prints is compared with the interpreter's.\n;\n;   witness test compiler/native_armv6m.wtn\n") "native_armv6m" (m0_rewritten_all (forms (str.encode src)))))
+
+  ; --- RV32E, the same image with sixteen registers: gen_esp32p4.py ------------------------
+  ; A quotient's and a product's work, for the machine with no M and nothing above x15.
+  (fn e_program ((k Str)) Bytes
+    (uses Alloc)
+      (if (str.eq k "mul")
+      (lit "addi E Z 0,addi F Z 0,label LOOP,or T A B,beq T Z DONE,andi T A 1,beq T Z SKIP,add E E C,sltu T E C,add F F D,add F F T,label SKIP,srli A A 1,slli T B 31,or A A T,srli B B 1,srli T C 31,slli C C 1,slli D D 1,or D D T,jal LOOP,label DONE,mov A E,mov B F")
+      (if (str.eq k "udiv")
+      (lit "addi E Z 0,addi F Z 0,addi g Z 64,label LOOP,srli h B 31,slli B B 1,srli m A 31,or B B m,slli A A 1,srli T F 31,slli F F 1,srli m E 31,or F F m,slli E E 1,or E E h,bne T Z DO,sltu m F D,xor R F D,sltiu R R 1,sltu h E C,and R R h,or m m R,bne m Z SKIP,label DO,sltu R E C,sub E E C,sub F F D,sub F F R,ori A A 1,label SKIP,addi g g -1,bne g Z LOOP")
+      (if (str.eq k "urem")
+      (lit "addi E Z 0,addi F Z 0,addi g Z 64,label LOOP,srli h B 31,slli B B 1,srli m A 31,or B B m,slli A A 1,srli T F 31,slli F F 1,srli m E 31,or F F m,slli E E 1,or E E h,bne T Z DO,sltu m F D,xor R F D,sltiu R R 1,sltu h E C,and R R h,or m m R,bne m Z SKIP,label DO,sltu R E C,sub E E C,sub F F D,sub F F R,ori A A 1,label SKIP,addi g g -1,bne g Z LOOP,mov A E,mov B F")
+      (if (str.eq k "sdiv")
+      (lit "srli m B 31,srli R D 31,xor g m R,sw g O -4,beq m Z S1,sltu T Z A,sub A Z A,sub B Z B,sub B B T,label S1,beq R Z S2,sltu T Z C,sub C Z C,sub D Z D,sub D D T,label S2,addi E Z 0,addi F Z 0,addi g Z 64,label LOOP,srli h B 31,slli B B 1,srli m A 31,or B B m,slli A A 1,srli T F 31,slli F F 1,srli m E 31,or F F m,slli E E 1,or E E h,bne T Z DO,sltu m F D,xor R F D,sltiu R R 1,sltu h E C,and R R h,or m m R,bne m Z SKIP,label DO,sltu R E C,sub E E C,sub F F D,sub F F R,ori A A 1,label SKIP,addi g g -1,bne g Z LOOP,lw g O -4,beq g Z S3,sltu T Z A,sub A Z A,sub B Z B,sub B B T,label S3")
+      (if (str.eq k "srem")
+      (lit "srli m B 31,srli R D 31,sw m O -4,beq m Z S1,sltu T Z A,sub A Z A,sub B Z B,sub B B T,label S1,beq R Z S2,sltu T Z C,sub C Z C,sub D Z D,sub D D T,label S2,addi E Z 0,addi F Z 0,addi g Z 64,label LOOP,srli h B 31,slli B B 1,srli m A 31,or B B m,slli A A 1,srli T F 31,slli F F 1,srli m E 31,or F F m,slli E E 1,or E E h,bne T Z DO,sltu m F D,xor R F D,sltiu R R 1,sltu h E C,and R R h,or m m R,bne m Z SKIP,label DO,sltu R E C,sub E E C,sub F F D,sub F F R,ori A A 1,label SKIP,addi g g -1,bne g Z LOOP,lw g O -4,beq g Z S3,sltu T Z E,sub E Z E,sub F Z F,sub F F T,label S3,mov A E,mov B F")
+      (lit "")))))))
+
+  (fn e_work ((f Bytes) (k Str)) Bytes
+    (uses Alloc)
+    (replaced f (rv_asm (rv_program k)) (rv_asm (e_program k)) 100))
+
+  (fn e_rewritten ((f Bytes)) Bytes
+    (uses Alloc)
+    (let n (fn_name f)
+      (if (has_word n "div_rr divu_rr ecall hp mul_rr mulhu_rr pg rem_rr remu_rr sn sv")
+        (lit "")
+        (if (bytes.eq n (lit "os"))
+          (lit "(fn os () U32 (u32.of 3))")
+          (if (bytes.eq n (lit "mem"))
+            (lit "(fn mem () U32 (u32.of 4))")
+            (if (bytes.eq n (lit "alu_work"))
+              (e_work f "mul")
+              (if (bytes.eq n (lit "divide_code"))
+                (e_work (e_work (e_work (e_work f "sdiv") "udiv") "srem") "urem")
+                (if (bytes.eq n (lit "elf_header"))
+        (replaced f (lit "(le32 (i64.of 52))\n        (le32 (i64.of 0))\n        (le32 (i64.of 0))") (lit "(le32 (i64.of 52))\n        (le32 (i64.of 0))\n        (le32 (i64.of 8))") 100)
+        (if (bytes.eq n (lit "start_code"))
+        (replaced f (lit "(cat (mov_imm (hp) heap) (mov_imm (pg) pages))") (lit "(cat4 (mov_imm (r0) heap) (sw (r0) (mem) (i64.of -8)) (mov_imm (r0) pages) (sw (r0) (mem) (i64.of -4)))") 100)
+        (if (bytes.eq n (lit "step"))
+        (replaced (replaced (replaced (replaced f (lit "(walked (push (hp)) st") (lit "(walked (cat (lw (r0) (mem) (i64.of -8)) (push (r0))) st") 100) (lit "(walked (pop (hp)) st") (lit "(walked (cat (pop (r0)) (sw (r0) (mem) (i64.of -8))) st") 100) (lit "(walked (push (pg)) st") (lit "(walked (cat (lw (r0) (mem) (i64.of -4)) (push (r0))) st") 100) (lit "(cat4 (pop (r0)) (mov_rr (r1) (pg)) (add_rr (pg) (pg) (r0)) (push (r1)))") (lit "(cat4 (pop (r0)) (lw (r1) (mem) (i64.of -4)) (add_rr (r0) (r1) (r0)) (cat (sw (r0) (mem) (i64.of -4)) (push (r1))))") 100)
+        f))))))))))
+
+  (fn e_rewritten_all ((fs Words)) Words
+    (uses Alloc)
+    (match fs ((NoWords) fs) ((Words f rest) (let e (e_rewritten f) (if (= (size e) 0) (e_rewritten_all rest) (Words e (e_rewritten_all rest)))))))
+
+  (fn e_comment () Bytes
+    (uses Alloc)
+    (lit "; Witness to RV32E (RISC-V with sixteen registers, bare metal), from the same instructions the other backends write.\n;\n; This is the ESP32-S31's image on a board of no particular make, 512 KiB of RAM from 0x20000000,\n; and it uses nothing above x15 and no M instruction, so it runs on RV32E and RV32I with or\n; without M. The operand stack pointer and the memory base are x3 and x4; the heap pointer and\n; the page count are the two words under the wasm memory; a product is shift and add, and a\n; quotient's working registers are x9 and ra.\n;\n; Almost nothing here is written by hand: tools/gen_esp32p4.py makes it from native_riscv32.wtn.\n; Edit that, not this.\n;\n; The evidence is tests/test_native_esp32p4.py: the image is run in Unicorn's RV32, every\n; instruction it holds is read and refused if RV32E has no such thing, and what it prints is\n; compared with the interpreter's.\n;\n;   witness test compiler/native_rv32e.wtn\n"))
+
+  (fn rv32e ((src Str)) Str
+    (uses Alloc)
+    (module_text (e_comment) "native_rv32e" (e_rewritten_all (esp_rewritten_all (forms (str.encode src)) (rv32e_board)))))
 
   ; --- ESP32 and ESP32-S3, Xtensa: gen_xtensa.py --------------------------------------------
   ; The two are the same code for two memory maps; gen_xtensa.py says why each address is where

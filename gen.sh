@@ -3,8 +3,8 @@
 #
 #   ./gen.sh
 #
-# native_riscv32.wtn, native_thumb.wtn, native_xtensa.wtn, native_xtensa_s3.wtn,
-# native_esp32p4.wtn and native_esp32s31.wtn are the RV64 backend (compiler/native_riscv.wtn)
+# native_riscv32.wtn, native_thumb.wtn, native_armv6m.wtn, native_xtensa.wtn, native_xtensa_s3.wtn,
+# native_esp32p4.wtn, native_esp32s31.wtn and native_rv32e.wtn are the RV64 backend (compiler/native_riscv.wtn)
 # with another machine behind it, made by tools/gen.wtn from it and from riscv.wtn, thumb.wtn
 # and xtensa.wtn. Edit those and tools/gen.wtn, then run this; the seed compiles the generator
 # and runs it. What is written is compiler/'s, so `git diff` shows what changed.
@@ -42,8 +42,11 @@ made() {
 
 made riscv32 native_riscv32.wtn native_riscv.wtn riscv.wtn
 made thumb native_thumb.wtn native_riscv.wtn thumb.wtn
+# Made from the Cortex-M3 one, so after it.
+made armv6m native_armv6m.wtn native_thumb.wtn
 made xtensa native_xtensa.wtn native_riscv.wtn xtensa.wtn
 made xtensa_s3 native_xtensa_s3.wtn native_riscv.wtn xtensa.wtn
-# These two are made from the RV32 one, so after it.
+# These three are made from the RV32 one, so after it.
 made esp32p4 native_esp32p4.wtn native_riscv32.wtn
 made esp32s31 native_esp32s31.wtn native_riscv32.wtn
+made rv32e native_rv32e.wtn native_riscv32.wtn

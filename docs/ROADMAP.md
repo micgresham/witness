@@ -479,11 +479,6 @@ the rest of the list, and each open item is waiting on something other than effo
 
 **What is left**, each with what it is waiting on:
 
-- *ARMv6-M and RV32E.* Each is close to a backend of its own. The Thumb backend's 64-bit
-  operations use r0-r7 as working registers and keep the operand stack, frame and memory base
-  in r9-r11, and every instruction is a four-byte Thumb-2 form; a Cortex-M0 has 16-bit forms,
-  mostly low registers, no hardware division and no 32x32-to-64 multiply. The RV32 backend uses
-  about 22 registers and RV32E has 16.
 - *Regions.* [DESIGN.md](DESIGN.md) names them and nothing else does: the specification has no
   syntax or rule for one, and neither the compiler nor the runtime has one. What a region is has
   to be decided before it can be built.
@@ -1159,7 +1154,16 @@ that has to emit bytes — every item below was blocked behind three missing pri
       support is two targets, not one, and which one a board needs depends on its part
       number. Xtensa is a windowed-register architecture, but the backend uses its
       windowless `call0` convention, so a window overflow cannot happen and the frame is
-      Thumb's. **All three are written and run in emulators**; what is not done is the
+      Thumb's. **ARMv6-M and RV32E are written too**, each made from a larger backend:
+      [compiler/native_armv6m.wtn](../compiler/native_armv6m.wtn) is the Cortex-M3 image in sixteen-bit
+      forms, with BL as its jump, and [compiler/native_rv32e.wtn](../compiler/native_rv32e.wtn) is the
+      bare-metal RV32 image in x0-x15, with the heap pointer and page count in memory. Neither
+      uses a multiply-divide extension (a product is shift and add), so the second runs on RV32E
+      and RV32I, with or without M. Unicorn has no RV32E, and its Cortex-M0 runs Thumb-2 as readily
+      as the M3 does, so an emulator's agreeing says nothing about the smaller machine: the tests
+      read every instruction of an image, and every one a run reaches, against what that machine
+      has. Neither has run on silicon, and the RV32E layout is a board of no particular make: 512
+      KiB of RAM, far more than a CH32V003's 2 KiB. **All are written and run in emulators**; what is not done is the
       `esp32` profile (below), and with it a bound for the ESP32 image like the one `mcu`
       has for Cortex-M: compiler/stack.wtn knows Thumb's layout, not the ESP32's
 - [ ] An `esp32` target profile: Internal Memory: 512 KB SRAM, 384 KB ROM, and 16 KB RTC SRAM, External Memory: Support for high-speed Octal SPI flash and PSRAM, AI Acceleration (ESP32-S3, ESP32-S31 and ESP32-P4 only): Vector instructions extension for neural network and signal processing  and a radio, so it sits between `mcu` and `embedded` rather than at either end — heap allowed,`Net` allowed, and the proven bounds of the `mcu` profile still enforced, because a

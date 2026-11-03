@@ -23,6 +23,7 @@ compiler/ir.wtn
 compiler/lower_ir.wtn
 compiler/native_riscv32.wtn
 compiler/native_thumb.wtn
+compiler/native_armv6m.wtn
 compiler/riscv.wtn
 compiler/stack.wtn
 compiler/thumb.wtn
@@ -40,4 +41,5 @@ compiler/native_xtensa.wtn
 compiler/native_xtensa_s3.wtn
 compiler/native_esp32p4.wtn
 compiler/native_esp32s31.wtn
+compiler/native_rv32e.wtn
 compiler/driver.wtn

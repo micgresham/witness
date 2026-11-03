@@ -682,6 +682,10 @@
   ; under the part its boot ROM keeps (native_esp32s31.wtn, from tools/gen_esp32p4.py).
   (fn esp32s31_room () Room (make Room (data 294912) (machine 73728)))
 
+  ; An RV32E board: 0x20020000 to 0x20068000 of its RAM, then the machine stack to 0x2007A000
+  ; (native_rv32e.wtn, from tools/gen_esp32p4.py).
+  (fn rv32e_room () Room (make Room (data 294912) (machine 73728)))
+
   (fn operand_room ((m Module) (room Room)) Int (- (get room data) (* 65536 (int.of (get m pages)))))
 
   (fn fits ((m Module) (b Bound) (room Room)) (Result Bound Fault)
