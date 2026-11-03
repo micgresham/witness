@@ -74,6 +74,14 @@ any atom standing for a product. A hypothesis is either
 The order is the order each fact was learned, so nothing is ever used before it is
 established. A kernel replays the list and then checks the goal.
 
+The list holds the facts the proof rests on, which need not be every fact known at that
+point. A case split about something else multiplies the cases without touching the goal, so
+the prover tries the facts joined to the goal first (`relevant` in
+[witness/logic.py](../witness/logic.py)) and lists only those. Nothing changes for a kernel:
+fewer hypotheses mean fewer cases to rule out, and the reasons are given for those cases. A
+*proved* hypothesis is replayed against every hypothesis listed before it, so keeping one
+keeps all the facts learned before it.
+
 Hypotheses and the goal are formulas over:
 
 - linear terms: an integer constant plus integer multiples of named atoms;

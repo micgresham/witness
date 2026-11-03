@@ -469,14 +469,32 @@ the rest of the list, and each open item is waiting on something other than effo
   bytes** while freeing what it no longer holds: about 30 MB of heap for the self-compile,
   where the tree backend's never-freed run takes 59 MB ([tools/irc.js](../tools/irc.js) prints
   it). **It is now the road the driver takes**: `drive` and every native entry read the IR's
-  module, which imports only the host functions the program uses (`log`, the clocks and the
-  time arithmetic are read too; `store.get`, `net.send` and `env.secret` are not yet), and
+  module, which imports only the host functions the program uses (every one: `log`, the
+  clocks and the time arithmetic, the network, the environment and the store), and
   `witness bootstrap` is a fixpoint through it, natively too. A self-call in tail position
   is a jump, and the deeper non-tail recursion of the reader wants node's stack at 200000.
   `lower.wtn` stays: the IR reuses its tables and helpers, and its own tests still run.
-- *The front end in Witness* lacks several contract forms (`effect-under-label` for `match`,
-  the wire-form half of `placement`, termination and resource bounds are done); the **new
-  repository standing on its own** cannot happen before it does.
+- *The front end in Witness* is whole: compiler/check.wtn gives the Python checker's verdict on
+  every conformance case, and it runs compiled into the seed, without the reference.
+
+**What is left**, each with what it is waiting on:
+
+- *ARMv6-M and RV32E.* Each is close to a backend of its own. The Thumb backend's 64-bit
+  operations use r0-r7 as working registers and keep the operand stack, frame and memory base
+  in r9-r11, and every instruction is a four-byte Thumb-2 form; a Cortex-M0 has 16-bit forms,
+  mostly low registers, no hardware division and no 32x32-to-64 multiply. The RV32 backend uses
+  about 22 registers and RV32E has 16.
+- *Regions.* [DESIGN.md](DESIGN.md) names them and nothing else does: the specification has no
+  syntax or rule for one, and neither the compiler nor the runtime has one. What a region is has
+  to be decided before it can be built.
+- *Heap bounds for a block whose size is computed* (`concat`, `bytes.slice`). The bound is read
+  off the compiled module, where such a size is only known at run time, so it needs lengths
+  bounded at the source.
+- *The emulator runs in Witness*, the last thing the Witness-only repository takes from here.
+  The emulators are Python and Unicorn today, so this means writing them in Witness.
+- *The kernel*, which waits on a person's review: ten functions in kernel/core.wtn declare an
+  `Alloc` they never perform (`names_union` among them), and a `Bytes` literal has no derivation
+  because `const` knows five kinds and a sixth is a kernel edit.
 
 Starting it found that **none of it was possible**, and not for want of effort. Nothing
 could look inside a `Str` or a `Bytes`: the complete set of primitives that touched text
@@ -525,7 +543,16 @@ that has to emit bytes — every item below was blocked behind three missing pri
       declares **no effects at all** — records and variants are fixed-size, so only
       cutting bytes out and building text allocate, which means the parser is something
       the `mcu` profile would accept
-- [ ] Two findings from writing the parser, both worth acting on. A `match` on a
+- [x] Two findings from writing the parser, both worth acting on. **Both done**: the
+      relevance filter is in witness/logic.py (`relevant`) and in compiler/verify.wtn alike.
+      A goal is tried first with the facts joined to it through facts that are one case, plus
+      the case splits that bring in no new atom, then through every fact, then with all of
+      them. So a proof is never lost, and one past an unrelated `match` is found at once
+      (conformance case `accept/proof-past-unrelated-cases.wtn`; test_verify_wtn has the
+      nested match, which the Witness checker could not finish before, since its kernel
+      enumerates cases with no cap). The evidence lists only the facts a proof rests on, and
+      the kernel is unchanged: it replays a proved fact against every hypothesis before it,
+      so keeping one keeps everything before it too. A `match` on a
       five-variant enum asserts all ten pairwise exclusions as disjunctions, and nested
       inside another such match that is past the prover's disjunct cap — so a budget
       proof that shares no atom with any of them is reported as *unproven arithmetic*,
@@ -898,7 +925,13 @@ that has to emit bytes — every item below was blocked behind three missing pri
       codebase; to read a dependency, view the dependency. `view | read` is the identity
       again, and `--hashes` leaves an import untagged because the hash *is* what it is
       written as
-- [ ] Intermediate representation with effects and ownership explicit. **Started**, and
+- [x] Intermediate representation with effects and ownership explicit. **Done**: the driver
+      takes the IR's road (the summary above), and the IR reads every host function the tree
+      backend does -- `net.send`, `env.secret` (and `declassify`, which is nothing at run time),
+      `store.put` and `store.get`, whose answer is a `Some` holding the host's string or `None`;
+      what the host answers is a counted string, owned and released like any other
+      ([tests/test_lower_ir.py](../tests/test_lower_ir.py) runs them on a scripted host and the
+      heap stays put). What follows is how it got there. **Started**, and
       the next thing the backend wants: [compiler/lower.wtn](../compiler/lower.wtn) goes from
       the tree straight to WebAssembly instructions, so a function's effects and who owns
       what it allocates are not written anywhere a pass could read them. The effects are
@@ -920,8 +953,8 @@ that has to emit bytes — every item below was blocked behind three missing pri
       enums: `Option`, `Result` and any `(enum (N T...) ...)` of the module, with a type written
       as text (`(Option Str)`), a constructor's type taken from its arguments (a `?` where
       nothing fixes it, settled by the other branch), and a match binder typed from the
-      scrutinee's arguments. **Generic functions** are written out once per set of types they are called with (`id@Int`; the copies a copy calls follow, within a limit), in both `ir.wtn` and `lower_ir.wtn`. **Arrays** too: `array.empty`, `array.push` (a new array, each element held once more), `array.len` and `array.at` (an `Option` holding a reference of its own), with `Count` and its `unwrap` read as the number they are at run time. (Wildcard patterns are not a gap: the language refuses them.) **Not yet:** `lower.wtn` does
-      not consume it -- the backend still goes from the tree. **The runtime now counts:**
+      scrutinee's arguments. **Generic functions** are written out once per set of types they are called with (`id@Int`; the copies a copy calls follow, within a limit), in both `ir.wtn` and `lower_ir.wtn`. **Arrays** too: `array.empty`, `array.push` (a new array, each element held once more), `array.len` and `array.at` (an `Option` holding a reference of its own), with `Count` and its `unwrap` read as the number they are at run time. (Wildcard patterns are not a gap: the language refuses them.) (The backend
+      went from the tree then; it goes through the IR now.) **The runtime now counts:**
       `rt_make(n, mask)` answers a block with two header words (a count, and its size and a mask
       of which words hold counted blocks), `rt_retain` adds a reference, `rt_release` takes one
       away and at zero releases what the mask names and puts the block on a list for its size,
@@ -1036,7 +1069,9 @@ that has to emit bytes — every item below was blocked behind three missing pri
       guard~~ (done: a mask by a non-negative constant leaves 0..k on any width, and
       `arm64.wtn` lost its guard; `sha256.wtn` still has its own); and ~~**`witness run --entry f --arg ...`**~~
       (done: integers, `Bool` and `Str`; the entry's `requires` are taken on trust)
-- [ ] Minimal runtime: reference counting and regions; no tracing GC
+- [ ] Minimal runtime: reference counting and regions; no tracing GC. **Reference counting is
+      done** and the compiler runs on it (above); regions are not defined yet (the summary at the
+      top of this phase)
 - [x] Compile the compiler with Phase 0, then with itself
 - [x] **Byte-identical fixpoint; deterministic, content-hashed build artifacts.**
       `witness bootstrap` flattens the driver ([compiler/driver.wtn](../compiler/driver.wtn))
@@ -1250,7 +1285,7 @@ that has to emit bytes — every item below was blocked behind three missing pri
         agreement with the interpreter, which today runs in Python emulators. The first half is
         **done**: tools/conform.wtn reads the manifest and holds compiler/check.wtn to it, a
         case a run, and the Witness-only repository's `conform.sh` runs it with node alone --
-        88 cases agree, none differs, and the one it cannot read alone (a program that
+        89 cases agree, none differs, and the one it cannot read alone (a program that
         imports, which `check.sh` resolves) is listed as unread. Left: the emulator runs
 
 **Exit criteria:** the compiler compiles itself to byte-identical output (fixpoint),

@@ -333,7 +333,7 @@
     (uses Alloc)
     (match (width_range kind)
       ((None) st)
-      ((Some r) (if (str.eq (verdict (get st facts) (range_goal x kind)) "proved")
+      ((Some r) (if (str.eq (needed_verdict (get st facts) (range_goal x kind)) "proved")
         (in_range st x kind)
         (with st (errs (concat (get st errs) "overflow ")))))))
 
@@ -1071,9 +1071,102 @@
   ; --- an obligation -----------------------------------------------------------------------------------------------
   (fn must ((st St) (goal Formula) (rule Str) (where Str)) St
     (uses Alloc)
-    (if (str.eq (verdict (get st facts) goal) "proved")
+    (if (str.eq (needed_verdict (get st facts) goal) "proved")
       st
       (with st (errs (concat (get st errs) (concat rule " "))))))
+
+  ; --- the facts an obligation needs --------------------------------------------------------------------------------
+  ; A case split over facts about something else -- a `match` asserts every pair of an enum's
+  ; variants apart -- multiplies the cases without touching the goal. So a goal is tried first
+  ; with the facts joined to it through facts that are one case, and the splits that bring in
+  ; no atom those have not; then through every fact; then with all of them. A fact with no
+  ; atoms is always kept, since `false` refutes anything. This is witness/logic.py's `relevant`.
+  (fn lin_names ((ts Terms) (out Atoms)) Atoms
+    (uses Alloc)
+    (match ts ((NoTerms) out) ((Terms a k rest) (lin_names rest (Atoms a out)))))
+
+  (fn formula_atoms ((f Formula) (out Atoms)) Atoms
+    (uses Alloc)
+    (match f
+      ((Atom name) (Atoms name out))
+      ((Le x) (lin_names (get x terms) out))
+      ((Eq x) (lin_names (get x terms) out))
+      ((Not p) (formula_atoms p out))
+      ((And ps) (formulas_atoms ps out))
+      ((Or ps) (formulas_atoms ps out))))
+
+  (fn formulas_atoms ((ps Formulas) (out Atoms)) Atoms
+    (uses Alloc)
+    (match ps ((NoFormulas) out) ((Formulas h rest) (formulas_atoms rest (formula_atoms h out)))))
+
+  (fn formulas_len ((ps Formulas)) Int (ensures (<= 0 result)) (match ps ((NoFormulas) 0) ((Formulas h rest) (+ 1 (formulas_len rest)))))
+
+  ; Once negations are pushed down, is it a disjunction of two or more somewhere?
+  (fn splits ((f Formula) (negated Bool)) Bool
+    (match f
+      ((Atom name) false)
+      ((Le x) false)
+      ((Eq x) negated)
+      ((Not p) (splits p (not negated)))
+      ((And ps) (if (and negated (< 1 (formulas_len ps))) true (any_splits ps negated)))
+      ((Or ps) (if (and (not negated) (< 1 (formulas_len ps))) true (any_splits ps negated)))))
+
+  (fn any_splits ((ps Formulas) (negated Bool)) Bool
+    (match ps ((NoFormulas) false) ((Formulas h rest) (or (splits h negated) (any_splits rest negated)))))
+
+  (fn meets ((as Atoms) (bs Atoms)) Bool
+    (match as ((NoAtoms) false) ((Atoms a rest) (or (holds bs a) (meets rest bs)))))
+
+  (fn within ((as Atoms) (bs Atoms)) Bool
+    (match as ((NoAtoms) true) ((Atoms a rest) (and (holds bs a) (within rest bs)))))
+
+  (fn join_new ((as Atoms) (bs Atoms)) Atoms
+    (uses Alloc)
+    (match as ((NoAtoms) bs) ((Atoms a rest) (join_new rest (if (holds bs a) bs (Atoms a bs))))))
+
+  ; One pass: every fact that may carry the chain and meets it adds its atoms.
+  (fn widened ((fs Formulas) (reached Atoms) (all Bool)) Atoms
+    (uses Alloc)
+    (match fs
+      ((NoFormulas) reached)
+      ((Formulas f rest) (let as (formula_atoms f (NoAtoms))
+        (widened rest (if (and (or all (not (splits f false))) (meets as reached)) (join_new as reached) reached) all)))))
+
+  (fn reached_by ((fs Formulas) (reached Atoms) (all Bool) (left Int)) Atoms
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      reached
+      (let more (widened fs reached all)
+        (if (= (atoms_len more) (atoms_len reached)) reached (reached_by fs more all (- left 1))))))
+
+  (fn kept_facts ((fs Formulas) (reached Atoms) (all Bool)) Formulas
+    (uses Alloc)
+    (match fs
+      ((NoFormulas) fs)
+      ((Formulas f rest) (let as (formula_atoms f (NoAtoms))
+        (if (match as
+              ((NoAtoms) true)
+              ((Atoms a more) (if (or all (not (splits f false))) (meets as reached) (within as reached))))
+          (Formulas f (kept_facts rest reached all))
+          (kept_facts rest reached all))))))
+
+  (fn relevant_facts ((fs Formulas) (goal Formula) (all Bool)) Formulas
+    (uses Alloc)
+    (kept_facts fs (reached_by fs (formula_atoms goal (NoAtoms)) all (+ 1 (formulas_len fs))) all))
+
+  (fn needed_verdict ((facts Formulas) (goal Formula)) Str
+    (uses Alloc)
+    (let n (formulas_len facts)
+      (let some (relevant_facts facts goal false)
+        (let k (formulas_len some)
+          (if (if (< k n) (str.eq (verdict some goal) "proved") false)
+            "proved"
+            (let more (relevant_facts facts goal true)
+              (let m (formulas_len more)
+                (if (if (< k m) (if (< m n) (str.eq (verdict more goal) "proved") false) false)
+                  "proved"
+                  (verdict facts goal)))))))))
 
   ; --- records, enums and match -----------------------------------------------------------------------------------
   ; The declarations as written: a record's fields or an enum's variants, and the type parameters
@@ -2142,7 +2235,7 @@
         (if (not (get ends numeric))
           false
           (match (get ends arg)
-            ((Num x t) (str.eq (verdict facts (f_conj (pair (f_lt x (var_of m)) (f_lt (num 0) (var_of m))))) "proved"))
+            ((Num x t) (str.eq (needed_verdict facts (f_conj (pair (f_lt x (var_of m)) (f_lt (num 0) (var_of m))))) "proved"))
             ((Truth f) false) ((Rec n fs) false) ((Ctor v fs) false))))))
 
   (fn passes ((ends Ends)) Bool (str.eq (lone_atom (get ends arg)) (get ends measure)))

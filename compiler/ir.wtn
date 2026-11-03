@@ -274,7 +274,7 @@
       ((RetNumber) (match tys ((NoStrs) "Int") ((Strs t rest) t)))
       ((RetBase n) (if (str.eq n "Octets") "Int" n))
       ((RetOptionOfNumber) (match tys ((NoStrs) "?") ((Strs t rest) (concat "(Option " (concat t ")")))))
-      ((RetWritten t) (if (str.eq (get b name) "bytes.at") "(Option U8)" "?"))))
+      ((RetWritten t) (if (str.eq (get b name) "bytes.at") "(Option U8)" (if (str.eq (get b name) "store.get") "(Option Str)" "?")))))
 
   ; The type a primitive answers, in the part of the language read here.
   (fn answer_ty ((b Builtin)) Str
@@ -346,9 +346,23 @@
               (conv_erased sigs vars args n (- left 1))
               (if (str.eq name "context")
                 (conv_context sigs vars args n (- left 1))
+              (if (str.eq name "declassify")
+                (conv_declassify sigs vars args n (- left 1))
               (match (find_sig sigs name)
                 ((Some sig) (conv_sig sigs vars sig args n (- left 1)))
-                ((None) (conv_prim sigs vars name args n (- left 1)))))))))))))))
+                ((None) (conv_prim sigs vars name args n (- left 1))))))))))))))))
+
+  ; `(declassify Label e)` is `e`: a label is the checker's, and nothing at run time.
+  (fn conv_declassify ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match args
+        ((NoTrees) (unsupported "a declassify needs a label"))
+        ((Trees tag rest) (match rest
+          ((NoTrees) (unsupported "a declassify needs a value"))
+          ((Trees e more) (conv sigs vars e n (- left 1))))))))
 
   ; `bytes.decode` is the check rtlib.wtn has, and then the same octets read as text or the
   ; reason Python's decoder gives -- written out as the code it is.
@@ -811,7 +825,8 @@
   (fn host_prim ((op Str)) Bool
     (or (or (or (str.eq op "log") (str.eq op "clock.now")) (or (str.eq op "clock.wall") (str.eq op "clock.ticks")))
       (or (or (or (str.eq op "instant.since") (str.eq op "wall.since")) (or (str.eq op "ticks.since") (str.eq op "instant.plus")))
-        (or (str.eq op "wall.plus") (or (str.eq op "duration.of_ms") (str.eq op "duration.ms"))))))
+        (or (or (str.eq op "wall.plus") (or (str.eq op "duration.of_ms") (str.eq op "duration.ms")))
+          (or (or (str.eq op "net.send") (str.eq op "env.secret")) (or (str.eq op "store.put") (str.eq op "store.get")))))))
 
   (fn bytes_prim ((op Str)) Bool
     (or (or (or (str.eq op "str.encode") (str.eq op "bytes.concat")) (or (str.eq op "bytes.len") (str.eq op "bytes.of")))

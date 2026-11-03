@@ -8,7 +8,7 @@
 ;
 ;   witness run compiler/driver.wtn --grant Alloc,Console
 (module driver
-  (use "wtn:f0a7631545c378e8397a4dc5cec1f8766ded854fa9f772b3eb384d762a5b7fff" as check_source)
+  (use "wtn:f035dfff10fe7dbf381b4ef0baf371a1dc62256056535e1c871650ca5848c3c3" as check_source)
 
   (use "wtn:28f6248f6071624ab0cba044e105a0bbc6966ccc14085fb75bdb5e6eb7101672" as flattened)
 
@@ -44,15 +44,15 @@
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
-  (use "wtn:357eb9753ce30ac21abf0ab438f0eac9de3d0fb799a1af49f5e5873e05534878" as module_ir)
+  (use "wtn:9f8612b02ae0558ba5fd8c4f739f7be1326e65425bf5883fd0bcc0fd057b3ee0" as module_ir)
 
   ; The bare-metal targets, whose memory is bounded before the program runs, keep an `Int` that
   ; is a word and traps on overflow (compiler/ir.wtn's `with_prelude_words`).
-  (use "wtn:d3587d61f3f048827d80d51f57e51448733970253bb678f35c3b58a878a82fbf" as module_ir_words)
+  (use "wtn:5a8fa3e61a617b6011a9d894cd7ffc76f8fbe8c5beea27454790804429c4ea40" as module_ir_words)
 
   (use "wtn:dc55715dcac24a1489129d0f2e28460470bbabf0de7086cfa46e5806d3435145" as elf_of)
 
-  (use "wtn:0a3acd4a2cfe0fda39c803c060c0c04c0a730d065290aadb5f82b3246a15f60e" as compile_ir)
+  (use "wtn:81bcd523974b740cacbbe64102194c392bc6e105c0023ef230c646993aa0cc9e" as compile_ir)
 
   (fn drive ((src Str)) Bytes
     (uses Alloc)

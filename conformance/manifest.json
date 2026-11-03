@@ -117,6 +117,12 @@
       "warnings": []
     },
     {
+      "file": "accept/proof-past-unrelated-cases.wtn",
+      "outcome": "accept",
+      "errors": [],
+      "warnings": []
+    },
+    {
       "file": "accept/records-and-patches.wtn",
       "outcome": "accept",
       "errors": [],

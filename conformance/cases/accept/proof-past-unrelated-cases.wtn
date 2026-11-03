@@ -1,0 +1,15 @@
+(module m
+  (enum Five (A) (B) (C) (D) (E))
+
+  (fn step ((x Five) (y Five) (budget Int)) Int
+    (requires (<= 1 budget))
+    (match x
+      ((A) budget)
+      ((B) budget)
+      ((C) budget)
+      ((D) budget)
+      ((E) (match y ((A) budget) ((B) budget) ((C) budget) ((D) budget) ((E) (wants (- budget 1)))))))
+
+  (fn wants ((n Int)) Int
+    (requires (<= 0 n))
+    n))

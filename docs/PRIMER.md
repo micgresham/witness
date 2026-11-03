@@ -630,7 +630,9 @@ Three clocks, three types, and they never mix `[type-mismatch]`:
 | `I64` | -2^63 … 2^63-1 | | `U64` | 0 … 2^64-1 |
 
 `Int` is the unbounded integer: arithmetic on it cannot overflow, and it is what literals
-give you. The fixed widths are machine integers, and on them **every
+give you. (Compiled for bare metal -- Cortex-M and the ESP32 family -- an `Int` that leaves
+the machine word stops the program with a trap rather than growing, since memory there is
+bounded before the run.) The fixed widths are machine integers, and on them **every
 operation must be proved to stay in range** — that is the `[overflow]` rule, discharged
 by the same prover as contracts (§9.1).
 
@@ -673,10 +675,10 @@ Missing on purpose — write the equivalent:
 | `(> a b)` / `(>= a b)` | `(< b a)` / `(<= b a)` |
 | negation | `(- 0 x)` or a literal `-5` |
 | a fixed-width literal | `(u8.of 200)`; a bare literal is always `Int` |
-| a byte literal | none in Stage 0; write `(str.encode "...")` |
+| a byte literal | `(bytes "0061736d")`, pairs of hex digits (`witness evidence` reports it unelaborated) |
 | string indexing, slicing, search, case folding | not yet |
 | Bool or Str equality | `if` / `and` / `or` / `not`; `str.eq` |
-| division, modulo, floats | not available in Stage 0 |
+| division | `num.div`, which answers an `Option`; there is no modulo |
 
 ### 7.4.1 Bit patterns
 
@@ -1342,13 +1344,12 @@ other than building values `[test-shape]`.
 | Not available | Use instead |
 |---|---|
 | type classes, bounded type parameters | generic functions (§5) with no assumptions about `T` |
-| lists, arrays, maps, loops | recursion over `Int`; enums for fixed sets |
+| maps, loops | recursion, over `Int` or over `(Array T)` (§7.3); enums for fixed sets |
 | lambdas, closures, higher-order functions | a named function per case |
-| imports, multiple modules | one self-contained module |
 | modulo, remainder | not yet; `num.div` answers the quotient only |
 | float to integer conversion | not yet |
 | fixed-point formats (`Q15`) | not yet; use an integer with a stated scale |
-| bit operations, shifts, rotations | not yet |
+| rotations | no primitive; combine `bit.shl` and `bit.shr` (§7.4.1) |
 | string formatting, interpolation | nested `concat` with `num.to_str` |
 | contracts over strings, records or variants | integer comparisons the prover can see into (§9.1) |
 | worst-case execution time, energy bounds | not yet |

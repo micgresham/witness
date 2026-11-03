@@ -631,8 +631,10 @@ host supplies the model's weights.
 
 ### 6.4 Numbers
 
-Integer arithmetic on `Int` is exact and unbounded. On a fixed width it is exact because
-§5.9 proves the result is in range. `wrap.*` is arithmetic modulo the width; `sat.*`
+Integer arithmetic on `Int` is exact and unbounded. A target whose memory must be bounded
+before the program runs has nowhere to put a number without a bound, so an implementation may
+stop such a program with a trap when an `Int` leaves the machine word; it must never answer
+with a wrong number. On a fixed width it is exact because §5.9 proves the result is in range. `wrap.*` is arithmetic modulo the width; `sat.*`
 clamps to the range.
 
 `bit.*` works on the bit pattern a fixed width holds, and on nothing else: each operand

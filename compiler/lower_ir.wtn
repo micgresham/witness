@@ -54,7 +54,7 @@
 
   (use "wtn:e4c149ba3f059c4ca4c1315a32cc797ea261b37ca748c63d8fdeffa4d99f805c" as const)
 
-  (use "wtn:7ec4918ad48bc4207748fc21a25d62bbf50e894be39b65927dc83e02b87eb77e" as conv)
+  (use "wtn:17e4d74320977c4bf6abc470ad4dbbc0a8bd18195c641124fbe05e22c09895a4" as conv)
 
   (use "wtn:7f605767659cf91d13d37c9c4a00f74ccb3f54984f19f8a705c4f0eafcbf8235" as drop)
 
@@ -563,8 +563,17 @@
     (match found
       ((NoHosts) (Err (fault "lower_ir" "a host function that is used and is not")))
       ((Hosts name effect slot params results more) (if (str.eq name "store.get")
-        (Err (fault "lower_ir" "not lowered yet: store.get"))
+        (Ok (inss_join (low_atoms c args) (Inss (WHost slot) (Inss (lset c "%ia") (stored c)))))
         (Ok (inss_join (low_atoms c args) (Inss (WHost slot) (if (= results (u32.of 0)) (inss_one (const (i64.of 0))) (NoInss)))))))))
+
+  ; `store.get` answers a string of its own or zero: Some, which holds the string, or None.
+  (fn stored ((c LCtx)) Inss
+    (let yes (inss_join (made_block c (inss_one (const (i64.of 16))) (i64.of 2))
+      (inss_join (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "Some"))) (inss_one (store_word (u32.of 0))))))
+        (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (lget c "%ia") (Inss (store_word (u32.of 8)) (inss_one (lget c "%mk"))))))))
+      (let no (inss_join (made_block c (inss_one (const (i64.of 8))) (i64.of 0))
+        (Inss (lget c "%mk") (Inss (i32_wrap) (Inss (const (wide (tag_of (get c sigs) "None"))) (Inss (store_word (u32.of 0)) (inss_one (lget c "%mk")))))))
+        (Inss (lget c "%ia") (Inss (WOp (u8.of 80)) (inss_one (WIf true no yes)))))))
 
   ; Every time is a number of nanoseconds (or device ticks), as in compiler/lower.wtn.
   (fn is_time_op ((op Str)) Bool

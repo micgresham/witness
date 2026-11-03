@@ -71,7 +71,7 @@
 
   (use "wtn:625ae72e651c1f2a8f51d9f48bc664f5ce39c2811b4f066e5aafb9cb51bbd817" as decl_findings)
 
-  (use "wtn:dffe9b9bcf665cfb307b712c8e4da0bf700db56f6402e73e93e9641034744b75" as proved)
+  (use "wtn:86c3155baece9d6fafb89669cf59fdfc5b5eda7236721bc09d60d5b9018e3d6f" as proved)
 
   ; --- the other passes' lines, read back ------------------------------------------------------
   ; decl_rules and verify say what they found as text; it is cut into its pieces here rather
