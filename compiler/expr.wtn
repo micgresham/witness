@@ -14,7 +14,7 @@
 (module expr
   ; Every label a type carries, wherever in it: the kernel's own walk, taken rather than
   ; written again under another name.
-  (use "wtn:608532136ea7a9cc73a01524073c19bacd7aaefce3efb4faebb6528ea4a86b11"
+  (use "wtn:339265f0f42729c216772a83a104bdafa7ca0e4d6f184079e11215a3e47f762f"
     as
     labels_deep)
 
@@ -36,7 +36,7 @@
     as
     signature_of)
 
-  (use "wtn:73475838d70d180b65533219f2e05082fc567733e46dbd77b0dd6ee3a4a325da"
+  (use "wtn:b06765da4d5498e65fcee3b018f3e2413b5da901675aa19c0c1d5d017f94f2ca"
     as
     env_of_source)
 
@@ -50,9 +50,9 @@
 
   (use "wtn:a1bfb0d57b638229fc7a5772ac4d6b49ca9bfd6668aeeef9dced9e6d8f141bfa" as field_at)
 
-  (use "wtn:0806fb421a4d2267c936e2efbc71aada4a3d2f76ac8116019678462d0ad0348a" as ty_plus)
+  (use "wtn:65d1e0d28f2a988c4142d9f1cdc66b775142a60643741d636c81f6130f6a5afc" as ty_plus)
 
-  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+  (use "wtn:c37ee73279854d2b4786fbe270b159b6be0a139ec05f486b0e47f5506ffa34d0" as primitive)
 
   (use "wtn:239508bf7fe41345cc8ffe9f317fc3c35f7629f881efa5ea44d60ff81b7f574c"
     as
@@ -80,11 +80,11 @@
 
   (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
 
-  (use "wtn:3fdd718f00ba3dd37317de926fb93b14c7438de6daffd8a4f75e03ae9353df32" as type_of)
+  (use "wtn:28ef4edfc6594a88290b6b57a08835f65ec209a1734ed9af496ed5069f8c2bc4" as type_of)
 
   (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
 
-  (use "wtn:989f32a48713655e7f23a328a06d723337463cf98766e4dcd27980b76a609597" as collected)
+  (use "wtn:7af8c52ae72e64991efbf63b16f70dfd1bb3fb3675dbd6535f91faf251b6e881" as collected)
 
   (use "wtn:8cad77ce8028c78b6f80b49536f0448d8c6f075789964549c88ebef18b6275ab" as dims_eq)
 
@@ -106,9 +106,9 @@
     as
     is_primitive)
 
-  (use "wtn:389c32161549ec786e2e27e301b832610ff750d6be481603802f9a9a25ed52a8" as ty_strip)
+  (use "wtn:431e7ddd637c56fdcbbbb26d2947777f60137b8ffe69f2b07f98d3ac3986895e" as ty_strip)
 
-  (use "wtn:4aab89ca9b8d498c2f69d8799321ce4c6aae73c69e22950b63f8b9f8f4f63fbe"
+  (use "wtn:beaeea2a4c06f932a3dce695fa02ed2d6cb5c321499f1c7a3155f21d7ff17182"
     as
     names_union)
 
@@ -118,7 +118,7 @@
 
   (use "wtn:fa0c3f1564b61f14efea122459d97a80aee0a0200a55894c0585e196050765c8" as model_of)
 
-  (use "wtn:c22a070d8cde78f6b2529a7cee9c92f95fe21e2ab57a3467911fb3d5a4bb3dce" as uses_in)
+  (use "wtn:a7f02391b308ddd8747d7859258a8a291ab40240799688957ec45c274856463c" as uses_in)
 
   (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
 

@@ -51,7 +51,7 @@
 
   (use "wtn:0ea36c877618cc86be2bef4b0173f77bbb8fb09bee708ab4918e31c9ccb519f7" as digits)
 
-  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+  (use "wtn:c37ee73279854d2b4786fbe270b159b6be0a139ec05f486b0e47f5506ffa34d0" as primitive)
 
   ; --- the representation ---------------------------------------------------------------------------
   (enum Atom (AVar (name Str)) (AInt (n Int)) (ABool (b Bool)))

@@ -30,9 +30,9 @@
 
   (use "wtn:7212eca72e7beebda6e114dc0b126af825c2e404943f60c530a1191b7ee31f8b" as module_items)
 
-  (use "wtn:3749d8b1a4565992277ef7bf100b7437ff7a11d23dcffa4778c6fefa9f6979ed" as env_with_prelude)
+  (use "wtn:01fc0fec7dae5f12e8e758f001fe83e6e7e98dfec750ac384652c15c53041950" as env_with_prelude)
 
-  (use "wtn:6c940a2bb7f16667a54dd36bcda4c622c6961231381c73434b0edc436a0d255e" as effects_in)
+  (use "wtn:4028ccfcf137e66462cffb528a03d39af35f6a743987f5e697f95f93d51f581a" as effects_in)
 
   (use "wtn:576e185d796d2bc495dcd13ac5e662b7352fc09b2cfad7e8918a760f207d1c0f" as known_effect)
 

@@ -19,8 +19,9 @@ Witness written in Witness: the compiler, its runtime, its backends and the kern
 re-checks proofs, with nothing in any other language but a page of JavaScript that loads
 a WebAssembly module. The Python prototype the language was settled with (Stage 0), and
 the test suite that checks everything here against it, are in
-[witness-bootstrap](https://github.com/micgresham/witness-bootstrap), which stays as the
-reference implementation.
+witness-bootstrap, which stays as the reference implementation. That repository is private,
+so its links in these documents do not open, and neither do the links in
+[docs/ROADMAP.md](docs/ROADMAP.md) to the tests and Python generators that live there.
 
 | Path | What |
 |---|---|

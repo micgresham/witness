@@ -19,7 +19,7 @@
 ;
 ;   witness test tools/conform.wtn
 (module conform
-  (use "wtn:f035dfff10fe7dbf381b4ef0baf371a1dc62256056535e1c871650ca5848c3c3" as check_source)
+  (use "wtn:4de3a9971c4aa7b829bd8162d2ccdb96cbf28db12d8c4cf9c2cf11bf56c0bd2d" as check_source)
 
   (fn lit ((s Str)) Bytes (uses Alloc) (str.encode s))
 

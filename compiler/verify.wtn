@@ -96,7 +96,7 @@
 
   (use "wtn:e5a6ab2c906fe1946e8c2c39266ac6c26bac2a09875208c709923b034d440a51" as verdict)
 
-  (use "wtn:a327a3354cda09d706b7552c925e0e5817b918bd5eb5e7b104369c6cdf63a871" as primitive)
+  (use "wtn:c37ee73279854d2b4786fbe270b159b6be0a139ec05f486b0e47f5506ffa34d0" as primitive)
 
   ; --- formulas, built as the Python prover builds them -----------------------------------
   (fn f_true () Formula (And (NoFormulas)))

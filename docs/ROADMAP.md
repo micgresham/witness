@@ -12,7 +12,7 @@ Phases 0–3 are the bootstrap stages of DESIGN.md §5 (Phase 0 = Stage 0, and s
 |---|---|---|
 | 0 | Prototype in Python: settle the semantics | **done** — 0.1–0.7 |
 | 1 | Trusted proof-checking kernel | **done** — kernel in Witness, [reviewed](../kernel/REVIEW.md) |
-| 2 | Self-hosted compiler with its own backends | **in progress** — exit criteria met; one kernel change waits on review |
+| 2 | Self-hosted compiler with its own backends | **done** |
 | 3 | Verified backend: proof chain to machine code | not started |
 | 4 | Platform: ML, scale range, concurrency runtime, fleet | not started |
 | 5 | Tools: an optimising backend beside the reference ones | not started |
@@ -405,7 +405,7 @@ Witness module imports nothing. A module system is Phase 2's work.
 
 ---
 
-## Phase 2 — self-hosting — in progress
+## Phase 2 — self-hosting — done
 
 The Witness compiler written in Witness, with its own backends (no LLVM). Phase 0 is not
 retired: it stays as the reference implementation, in
@@ -477,10 +477,12 @@ the rest of the list, and each open item is waiting on something other than effo
 - *The front end in Witness* is whole: compiler/check.wtn gives the Python checker's verdict on
   every conformance case, and it runs compiled into the seed, without the reference.
 
-**What is left** is one kernel change, written and not yet in the repository because a person
-has to read it first: it takes the unused `Alloc` declarations out of kernel/core.wtn and gives
-a `Bytes` literal a derivation (a sixth `const` kind). Reading it renews kernel/REVIEW.md, and
-that ends this phase.
+**The last of it was the kernel's change**, read and recorded on 2026-11-04
+([kernel/REVIEW.md](../kernel/REVIEW.md)): kernel/core.wtn lost `Alloc` from the 84 functions
+that declared it and never performed it, and a `Bytes` literal has a derivation (a sixth `const`
+kind). Twenty-two such declarations remain in arith.wtn, costs.wtn and decls.wtn, for the next
+change to those modules, and compiler functions that call the kernel now carry the same warning
+of their own; neither fails anything.
 
 **Moved out of this phase** on 2026-11-03, to [Phase 4](#phase-4--platform), because none of the
 three is what self-hosting rests on: regions, heap bounds for a block whose size is computed,
@@ -553,7 +555,7 @@ that has to emit bytes — every item below was blocked behind three missing pri
       every other, so that is one set for the group -- in the Python checker and in
       [compiler/effects.wtn](../compiler/effects.wtn) alike, with a conformance case; it
       found `largest` in examples/sequence.wtn declaring an `Alloc` nothing performs, and
-      `names_union` in kernel/core.wtn doing the same, which waits for the kernel's next review).
+      `names_union` in kernel/core.wtn doing the same, which was fixed at the review of 2026-11-04).
       Neither can make an undeclared effect slip through, so both are diagnostic quality
       rather than soundness — but the first one costs an afternoon when it bites. The
       relevance filter is not a change to the search alone: the evidence states which
@@ -1050,10 +1052,9 @@ that has to emit bytes — every item below was blocked behind three missing pri
       refinement and sit in its range exactly as a parameter does
       ([witness/verify.py](../witness/verify.py); `tests/test_contracts.py`). The Witness
       translation does not read records yet, so it refuses them by name as before
-- [ ] Smaller things the encoder wanted, each cheap and each paying for itself across
+- [x] Smaller things the encoder wanted, each cheap and each paying for itself across
       every backend: ~~a **`Bytes` literal**~~ (done: `(bytes "0061736d")`, a new syntax node, pairs of hex digits;
-      the Wasm backend pools it like a string. It is **not** derivable yet -- the kernel's `const` knows five
-      kinds, and the sixth is the kernel change waiting on review -- so `witness evidence` reports it unelaborated. Nothing
+      the Wasm backend pools it like a string. It is derivable: `Bytes` is the sixth kind the kernel's `const` knows. Nothing
       uses it yet: the preamble and `no_bytes` still wait to be rewritten);
       ~~a **range fact for `bit.and`**, so that a masked value narrows to `U8` without a
       guard~~ (done: a mask by a non-negative constant leaves 0..k on any width, and

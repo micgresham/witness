@@ -179,15 +179,15 @@
 
   (use "wtn:92f81a40f63652dea9fbf74791ba55b839d7db7e5dbbb2f5e8a7c2512a911780" as named)
 
-  (use "wtn:3fdd718f00ba3dd37317de926fb93b14c7438de6daffd8a4f75e03ae9353df32" as type_of)
+  (use "wtn:28ef4edfc6594a88290b6b57a08835f65ec209a1734ed9af496ed5069f8c2bc4" as type_of)
 
-  (use "wtn:582264e40da2a590b46be413458ffdf29c9a475bc163f15200ae177003c24907" as expr_type)
+  (use "wtn:1e182a790ce0eb759d75b28eab03473eb05f6699f33e02c8edb74f7ecf654fad" as expr_type)
 
   (use "wtn:5508c7d96fa2d42431d9f97870d408804428e2a159150591209172966b542804" as Locals)
 
   (use "wtn:b46746af4939ea24630f986c53614000661ba3b268ffc17d7a3ee0e7dfccca73" as unknown)
 
-  (use "wtn:31171d9f60946b8e64202a837c2bf545b46de9023f823212b4646b1bdf5a4dee" as subst_all)
+  (use "wtn:d3056a5e42ea218696c4dd1cb520a4a2ee33c3d2e184c06d83c873e89cdbc1ea" as subst_all)
 
   (use "wtn:c6b12f9f76d7b8009f10375465b08d69fa06928a90735ee2b0430696c173daf0" as prelude)
 
@@ -195,7 +195,7 @@
     as
     module_items)
 
-  (use "wtn:3749d8b1a4565992277ef7bf100b7437ff7a11d23dcffa4778c6fefa9f6979ed"
+  (use "wtn:01fc0fec7dae5f12e8e758f001fe83e6e7e98dfec750ac384652c15c53041950"
     as
     env_with_prelude)
 

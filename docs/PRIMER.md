@@ -675,7 +675,7 @@ Missing on purpose — write the equivalent:
 | `(> a b)` / `(>= a b)` | `(< b a)` / `(<= b a)` |
 | negation | `(- 0 x)` or a literal `-5` |
 | a fixed-width literal | `(u8.of 200)`; a bare literal is always `Int` |
-| a byte literal | `(bytes "0061736d")`, pairs of hex digits (`witness evidence` reports it unelaborated) |
+| a byte literal | `(bytes "0061736d")`, pairs of hex digits |
 | string indexing, slicing, search, case folding | not yet |
 | Bool or Str equality | `if` / `and` / `or` / `not`; `str.eq` |
 | division | `num.div`, which answers an `Option`; there is no modulo |

@@ -30,7 +30,7 @@
 
   (use "wtn:42b4ccfa1dfd980872f5b7d61cea430d7a963973d64fb38f0bbb8c4cf1b8581b" as repeated)
 
-  (use "wtn:3fdd718f00ba3dd37317de926fb93b14c7438de6daffd8a4f75e03ae9353df32" as type_of)
+  (use "wtn:28ef4edfc6594a88290b6b57a08835f65ec209a1734ed9af496ed5069f8c2bc4" as type_of)
 
   (use "wtn:92f81a40f63652dea9fbf74791ba55b839d7db7e5dbbb2f5e8a7c2512a911780" as named)
 

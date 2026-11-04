@@ -45,23 +45,23 @@
 
   (use "wtn:2bf9db991f79bd86386f9d48b3d14c3938df6dbacab323d8c9f06fdbab332347" as newtype_of)
 
-  (use "wtn:3749d8b1a4565992277ef7bf100b7437ff7a11d23dcffa4778c6fefa9f6979ed" as env_with_prelude)
+  (use "wtn:01fc0fec7dae5f12e8e758f001fe83e6e7e98dfec750ac384652c15c53041950" as env_with_prelude)
 
-  (use "wtn:e23991bdf3b1415d3e5a9000e2284743f680a60722372e5e58c0a7822dc6f6af" as check_fn)
+  (use "wtn:4237cbcf9bea86a4535b9812b937ef33c4d61ab06941ba9d7db2c08dfacf0885" as check_fn)
 
-  (use "wtn:582264e40da2a590b46be413458ffdf29c9a475bc163f15200ae177003c24907" as expr_type)
+  (use "wtn:1e182a790ce0eb759d75b28eab03473eb05f6699f33e02c8edb74f7ecf654fad" as expr_type)
 
-  (use "wtn:a53bdcef9dacef67d1fd894c2d13fd9e95b7c742b662957f520bab0f9b5d9e42" as param_locals)
+  (use "wtn:24859cee37ede8be2c3d7e9bcf1dcfbabd7f9c851bf7fdfc54300bf80b6d52d1" as param_locals)
 
   (use "wtn:1d19b19c3c97e9a5947a2f089b5e062d4105217a91ccd058f389e31071424503" as param_trees)
 
   (use "wtn:067c64fa27ab7a72d98c4581c29f839893b78cbfc1cc2e6c03f771c1cdfae128" as type_params_of)
 
-  (use "wtn:6c940a2bb7f16667a54dd36bcda4c622c6961231381c73434b0edc436a0d255e" as effects_in)
+  (use "wtn:4028ccfcf137e66462cffb528a03d39af35f6a743987f5e697f95f93d51f581a" as effects_in)
 
   (use "wtn:4860d2be35e65ee99e288d5d2c7909496204de57011aac655ed0a8e51865e468" as declared_name)
 
-  (use "wtn:43c4c21da4bc0d19c22eed1873ba08ccd8cd90767ae2d919ade0b22eca736331" as items_findings)
+  (use "wtn:e2ed2e26d95bf7abafe8af874775f7b3084ba120dee016b94242b7a9039f0e80" as items_findings)
 
   (use "wtn:0141881f6c8988560314249b14a07d343336e76dfcc4889d1c1055005eb45261" as fn_items)
 
@@ -71,7 +71,7 @@
 
   (use "wtn:625ae72e651c1f2a8f51d9f48bc664f5ce39c2811b4f066e5aafb9cb51bbd817" as decl_findings)
 
-  (use "wtn:86c3155baece9d6fafb89669cf59fdfc5b5eda7236721bc09d60d5b9018e3d6f" as proved)
+  (use "wtn:f6b26811fe8f489af89c844cf69fa98cde4f18fd470c8a46d3bb073b41495873" as proved)
 
   ; --- the other passes' lines, read back ------------------------------------------------------
   ; decl_rules and verify say what they found as text; it is cut into its pieces here rather

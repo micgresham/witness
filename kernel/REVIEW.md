@@ -4,10 +4,10 @@
 document: witness-kernel-review
 phase: 1
 reviewed_by: Michael Gresham <micgresham@gmail.com>
-reviewed_on: 2026-11-01
-commit: 9c97898
-lines: 2465
-findings: one -- `names_union` (core.wtn) declares Alloc and never performs it (the unused-effect warning, tests/test_env.py); not a soundness matter, left for the next change to the kernel
+reviewed_on: 2026-11-04
+commit: 4d95808
+lines: 2378
+findings: `names_union` and the 83 other functions of core.wtn that declared Alloc and never performed it are fixed; 22 such declarations remain in arith.wtn (9), costs.wtn (4) and decls.wtn (9), not a soundness matter, left for the next change to those modules
 ```
 
 Phase 1's exit criteria have two halves. The first is mechanical and the build checks it:
@@ -21,7 +21,7 @@ here instead, with what was read and the exact text that was read.
 | Module | Lines | SHA-256 of the file, first 32 |
 |---|---|---|
 | [`arith.wtn`](arith.wtn) | 452 | `f3b8e214b8a5ae8aeb8ac67f64103073` |
-| [`core.wtn`](core.wtn) | 1,279 | `0b38704d4786dd874ad5b9043514c6b9` |
+| [`core.wtn`](core.wtn) | 1,192 | `322899c2cc7729bdebc81141d72ac01c` |
 | [`costs.wtn`](costs.wtn) | 348 | `78b78a7de3b628509500f7baa34ef977` |
 | [`decls.wtn`](decls.wtn) | 386 | `20b6c8f1b1fc82697b74150d75ed33ac` |
 
@@ -53,7 +53,7 @@ Stated plainly, because a review record that overstates its reach is worse than 
   kernel refuse, not accept, so they are outside the trusted base by construction — but
   they are also outside this review.
 - **The size target.** [EVIDENCE.md §1](../docs/EVIDENCE.md) hoped for "a few hundred
-  lines". The four modules are 2,465, of which about 260 are the primitive table of
+  lines". The four modules are 2,378, of which about 260 are the primitive table of
   SPEC §6.3 written out as data and a good deal more is the same list and set handling
   repeated in each module, because a Witness module imports nothing. The review happening
   is the stronger evidence that the kernel is readable; the number is recorded here
