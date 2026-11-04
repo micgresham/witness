@@ -24,7 +24,7 @@ reference implementation.
 
 | Path | What |
 |---|---|
-| [compiler/](compiler/) | The compiler: reader, parser, type reader, verifier, intermediate representation, runtime, and backends for WebAssembly, x86-64, AArch64, RISC-V (RV64, RV32), Cortex-M, ESP32, ESP32-S3, ESP32-P4 and ESP32-S31; `driver.wtn` is the whole of it as one function |
+| [compiler/](compiler/) | The compiler: reader, parser, type reader, verifier, intermediate representation, runtime, and backends for WebAssembly, x86-64, AArch64, RISC-V (RV64, RV32, RV32E), Cortex-M (ARMv7-M, ARMv6-M), ESP32, ESP32-S3, ESP32-P4 and ESP32-S31; `driver.wtn` is the whole of it as one function |
 | [kernel/](kernel/) | The trusted kernel, [reviewed line by line](kernel/REVIEW.md), that re-checks derivations, declarations, bounds and certificates |
 | [seed/](seed/) | The compiler, compiled, and its source as one module: what `./build.sh` starts from |
 | [tools/](tools/) | `wasmc.js` and `irc.js`, the node hosts that run a compiled compiler |
@@ -67,14 +67,14 @@ know what each old hash was, and rewrites only the hashes.
 
 ```bash
 ./conform.sh        # every conformance case, checked by compiler/check.wtn
-./gen.sh            # remake native_riscv32, _thumb, _xtensa, _xtensa_s3, _esp32p4, _esp32s31
+./gen.sh            # remake native_riscv32, _thumb, _armv6m, _xtensa, _xtensa_s3, _esp32p4, _esp32s31, _rv32e
 ```
 
 `conform.sh` runs [tools/conform.wtn](tools/conform.wtn): each case of
 [conformance/manifest.json](conformance/manifest.json) is checked under its profile and must
 come out with the manifest's verdict and the very rules among its errors and its warnings; a
 case the checker does not read is listed as `unread`, never counted as agreeing. `gen.sh` runs
-[tools/gen.wtn](tools/gen.wtn), which makes six backends from the RISC-V one: edit
+[tools/gen.wtn](tools/gen.wtn), which makes eight backends from the RISC-V one: edit
 `compiler/native_riscv.wtn`, `riscv.wtn`, `thumb.wtn`, `xtensa.wtn` or the generator, never
 the files it writes.
 
@@ -109,8 +109,7 @@ Stated plainly, so nothing here claims more than it does:
   under the Witness checker (`./conform.sh`), and the backends made from the RISC-V one
   (`./gen.sh`, which writes them; `git diff` says whether anything changed).
 
-That is the last step on the [roadmap](docs/ROADMAP.md) toward this repository standing on
-its own. The documents are carried as they are, so where they name a test file or a Python
+Writing those runs in Witness is on the [roadmap](docs/ROADMAP.md), in Phase 4. The documents are carried as they are, so where they name a test file or a Python
 module, it is witness-bootstrap's.
 
 ## License

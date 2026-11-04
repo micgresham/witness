@@ -12,7 +12,7 @@ Phases 0–3 are the bootstrap stages of DESIGN.md §5 (Phase 0 = Stage 0, and s
 |---|---|---|
 | 0 | Prototype in Python: settle the semantics | **done** — 0.1–0.7 |
 | 1 | Trusted proof-checking kernel | **done** — kernel in Witness, [reviewed](../kernel/REVIEW.md) |
-| 2 | Self-hosted compiler with its own backends | **in progress** |
+| 2 | Self-hosted compiler with its own backends | **in progress** — exit criteria met; one kernel change waits on review |
 | 3 | Verified backend: proof chain to machine code | not started |
 | 4 | Platform: ML, scale range, concurrency runtime, fleet | not started |
 | 5 | Tools: an optimising backend beside the reference ones | not started |
@@ -477,19 +477,14 @@ the rest of the list, and each open item is waiting on something other than effo
 - *The front end in Witness* is whole: compiler/check.wtn gives the Python checker's verdict on
   every conformance case, and it runs compiled into the seed, without the reference.
 
-**What is left**, each with what it is waiting on:
+**What is left** is one kernel change, written and not yet in the repository because a person
+has to read it first: it takes the unused `Alloc` declarations out of kernel/core.wtn and gives
+a `Bytes` literal a derivation (a sixth `const` kind). Reading it renews kernel/REVIEW.md, and
+that ends this phase.
 
-- *Regions.* [DESIGN.md](DESIGN.md) names them and nothing else does: the specification has no
-  syntax or rule for one, and neither the compiler nor the runtime has one. What a region is has
-  to be decided before it can be built.
-- *Heap bounds for a block whose size is computed* (`concat`, `bytes.slice`). The bound is read
-  off the compiled module, where such a size is only known at run time, so it needs lengths
-  bounded at the source.
-- *The emulator runs in Witness*, the last thing the Witness-only repository takes from here.
-  The emulators are Python and Unicorn today, so this means writing them in Witness.
-- *The kernel*, which waits on a person's review: ten functions in kernel/core.wtn declare an
-  `Alloc` they never perform (`names_union` among them), and a `Bytes` literal has no derivation
-  because `const` knows five kinds and a sixth is a kernel edit.
+**Moved out of this phase** on 2026-11-03, to [Phase 4](#phase-4--platform), because none of the
+three is what self-hosting rests on: regions, heap bounds for a block whose size is computed,
+and the emulator runs in Witness.
 
 Starting it found that **none of it was possible**, and not for want of effort. Nothing
 could look inside a `Str` or a `Bytes`: the complete set of primitives that touched text
@@ -1058,15 +1053,14 @@ that has to emit bytes — every item below was blocked behind three missing pri
 - [ ] Smaller things the encoder wanted, each cheap and each paying for itself across
       every backend: ~~a **`Bytes` literal**~~ (done: `(bytes "0061736d")`, a new syntax node, pairs of hex digits;
       the Wasm backend pools it like a string. It is **not** derivable yet -- the kernel's `const` knows five
-      kinds and a sixth is a reviewed-kernel edit -- so `witness evidence` reports it unelaborated. Nothing
+      kinds, and the sixth is the kernel change waiting on review -- so `witness evidence` reports it unelaborated. Nothing
       uses it yet: the preamble and `no_bytes` still wait to be rewritten);
       ~~a **range fact for `bit.and`**, so that a masked value narrows to `U8` without a
       guard~~ (done: a mask by a non-negative constant leaves 0..k on any width, and
       `arm64.wtn` lost its guard; `sha256.wtn` still has its own); and ~~**`witness run --entry f --arg ...`**~~
       (done: integers, `Bool` and `Str`; the entry's `requires` are taken on trust)
-- [ ] Minimal runtime: reference counting and regions; no tracing GC. **Reference counting is
-      done** and the compiler runs on it (above); regions are not defined yet (the summary at the
-      top of this phase)
+- [x] Minimal runtime: reference counting; no tracing GC. The compiler runs on it (above).
+      Regions moved to [Phase 4](#phase-4--platform): they are not defined yet
 - [x] Compile the compiler with Phase 0, then with itself
 - [x] **Byte-identical fixpoint; deterministic, content-hashed build artifacts.**
       `witness bootstrap` flattens the driver ([compiler/driver.wtn](../compiler/driver.wtn))
@@ -1146,7 +1140,7 @@ that has to emit bytes — every item below was blocked behind three missing pri
       taken modulo 32, the instruction-level translation of the 64-bit backends carries
       over; what does not is the runtime (its checked `Int` arithmetic is 64-bit) and the
       container formats
-- [ ] Native freestanding backend for microcontrollers: **Cortex-M** (ARMv6-M/v7-M/v8-M),
+- [x] Native freestanding backend for microcontrollers: **Cortex-M** (ARMv6-M/v7-M/v8-M),
       **RISC-V** (RV32I and RV32E, with and without M), and **Xtensa LX6/LX7** for the
       ESP32 family. Xtensa is there for one reason: the ESP32, ESP32-S2 and ESP32-S3 are
       Xtensa cores, and nothing else in the plan reaches them. The ESP32-C and -H parts
@@ -1163,10 +1157,9 @@ that has to emit bytes — every item below was blocked behind three missing pri
       as the M3 does, so an emulator's agreeing says nothing about the smaller machine: the tests
       read every instruction of an image, and every one a run reaches, against what that machine
       has. Neither has run on silicon, and the RV32E layout is a board of no particular make: 512
-      KiB of RAM, far more than a CH32V003's 2 KiB. **All are written and run in emulators**; what is not done is the
-      `esp32` profile (below), and with it a bound for the ESP32 image like the one `mcu`
-      has for Cortex-M: compiler/stack.wtn knows Thumb's layout, not the ESP32's
-- [ ] An `esp32` target profile: Internal Memory: 512 KB SRAM, 384 KB ROM, and 16 KB RTC SRAM, External Memory: Support for high-speed Octal SPI flash and PSRAM, AI Acceleration (ESP32-S3, ESP32-S31 and ESP32-P4 only): Vector instructions extension for neural network and signal processing  and a radio, so it sits between `mcu` and `embedded` rather than at either end — heap allowed,`Net` allowed, and the proven bounds of the `mcu` profile still enforced, because a
+      KiB of RAM, far more than a CH32V003's 2 KiB. **All are written and run in emulators**; their
+      bounds are under the `esp32` profile, next
+- [x] An `esp32` target profile: Internal Memory: 512 KB SRAM, 384 KB ROM, and 16 KB RTC SRAM, External Memory: Support for high-speed Octal SPI flash and PSRAM, AI Acceleration (ESP32-S3, ESP32-S31 and ESP32-P4 only): Vector instructions extension for neural network and signal processing  and a radio, so it sits between `mcu` and `embedded` rather than at either end — heap allowed,`Net` allowed, and the proven bounds of the `mcu` profile still enforced, because a
       device that reboots on a stack overflow in the field is the case the bounds exist
       for. **The effects are decided** (SPEC 5.13: `Alloc Clock Log Net`, placement up to
       `inline thread core`, bounds required). The memory above is the ESP32-S3's, which the
@@ -1203,8 +1196,8 @@ that has to emit bytes — every item below was blocked behind three missing pri
       time and the operand stack has what the pages leave. The bounded builds for Cortex-M,
       the ESP32 and the ESP32-S3 take such programs now, and on all three the heap pointer
       at exit is read back and never past its bound ([tests/test_heap.py](../tests/test_heap.py)).
-      **Not yet:** a block whose size the program computes -- what `concat` or `bytes.slice`
-      makes -- which needs bounds on lengths, and is refused by name
+      **Moved to [Phase 4](#phase-4--platform):** a block whose size the program computes -- what
+      `concat` or `bytes.slice` makes -- which needs bounds on lengths, and is refused by name
 - [x] **Proven stack and heap bounds enforced for the `mcu` profile**
       ([compiler/stack.wtn](../compiler/stack.wtn)). Before a Cortex-M image is written, what
       it can use of each of its two stacks is bounded in bytes from the compiled module:
@@ -1228,11 +1221,12 @@ that has to emit bytes — every item below was blocked behind three missing pri
       those tests. What a board's host functions use of the machine stack is the board's
       own, outside the bound. **Not yet:** a bound on a heap that grows, which `esp32` will
       need, since a block's size is data-dependent
-- [ ] ~~Retire Phase 0~~ (decided against: the prototype stays, as witness-bootstrap, the
+- [x] ~~Retire Phase 0~~ (decided against: the prototype stays, as witness-bootstrap, the
       reference every implementation is checked against.) Instead, **the `witness` repository
       stands on its own**: it has the compiler, the kernel, the documents and a seed, fresh
       history, and `./build.sh` reaches the fixpoint with node alone. What it still takes from
-      witness-bootstrap, each to be done in Witness:
+      witness-bootstrap, each to be done in Witness (the emulator runs, the one still open, are in
+      Phase 4):
   - [x] **Checking a program**: the front end in Witness as the whole checker (above), one
         `check` that gives the Python checker's verdict on every conformance case. **The
         checker is written** (compiler/check.wtn, exact on the suite but for the import);
@@ -1279,18 +1273,19 @@ that has to emit bytes — every item below was blocked behind three missing pri
         are made from the RISC-V one by Python in `tools/`. **Done**: tools/gen.wtn is all four
         generators in Witness -- the form reader, the three little assemblers (RV32 in words,
         Thumb with its two-instruction `bz`, Xtensa in three-byte steps), the replacement and
-        patch tables, and each chip's layout as a record -- and every one of the six backends
-        it makes is the file in compiler/ byte for byte, interpreted
+        patch tables, and each chip's layout as a record -- and every one of the backends
+        it makes (eight now, with ARMv6-M and RV32E) is the file in compiler/ byte for byte, interpreted
         ([tests/test_gen_wtn.py](../tests/test_gen_wtn.py)) and compiled by the seed and run
         by node. The tables were carried over from the Python mechanically, so the two say the
         same; the Python generators stay as the reference, and the test keeps them agreeing.
         The Witness-only repository's `gen.sh` remakes the six with node alone
-  - [ ] **The tests**: the conformance suite run by the Witness checker, and the backends'
+  - [x] **The tests**: the conformance suite run by the Witness checker, and the backends'
         agreement with the interpreter, which today runs in Python emulators. The first half is
         **done**: tools/conform.wtn reads the manifest and holds compiler/check.wtn to it, a
         case a run, and the Witness-only repository's `conform.sh` runs it with node alone --
         89 cases agree, none differs, and the one it cannot read alone (a program that
-        imports, which `check.sh` resolves) is listed as unread. Left: the emulator runs
+        imports, which `check.sh` resolves) is listed as unread. Moved to
+        [Phase 4](#phase-4--platform): the emulator runs.
 
 **Exit criteria:** the compiler compiles itself to byte-identical output (fixpoint),
 and deterministic content-hashed builds make that verifiable by anyone.
@@ -1309,6 +1304,18 @@ and deterministic content-hashed builds make that verifiable by anyone.
 ---
 
 ## Phase 4 — platform
+
+Moved here from Phase 2:
+
+- [ ] *Regions.* [DESIGN.md](DESIGN.md) names them and nothing else does: the specification has no
+      syntax or rule for one, and neither the compiler nor the runtime has one. What a region is
+      has to be decided before it can be built.
+- [ ] *Heap bounds for a block whose size is computed* (`concat`, `bytes.slice`). The bound is read
+      off the compiled module, where such a size is only known at run time, so it needs lengths
+      bounded at the source.
+- [ ] *The emulator runs in Witness*, the last thing the Witness-only repository takes from
+      witness-bootstrap. The emulators are Python and Unicorn today, so this means writing them in
+      Witness.
 
 Can start once the Phase 2 Wasm backend works; items do not wait for Phase 3.
 
