@@ -33,9 +33,9 @@
 
   (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
 
-  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+  (use "wtn:93b5829b146cf7fa9243f9e59065dc5c37d7f2b66bf5d70f9c359d5b870fe715" as parse)
 
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
   (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
 
@@ -52,6 +52,8 @@
   (use "wtn:0ea36c877618cc86be2bef4b0173f77bbb8fb09bee708ab4918e31c9ccb519f7" as digits)
 
   (use "wtn:c37ee73279854d2b4786fbe270b159b6be0a139ec05f486b0e47f5506ffa34d0" as primitive)
+
+  (use "wtn:a43bad4f20a43d786b4872430dbad5617e4350e08e52014ddbac17fa0a81bb64" as bytes_literal)
 
   ; --- the representation ---------------------------------------------------------------------------
   (enum Atom (AVar (name Str)) (AInt (n Int)) (ABool (b Bool)))
@@ -335,22 +337,28 @@
           (if (str.eq name "get")
             (conv_get sigs vars args n (- left 1))
             (if (str.eq name "and")
-              (conv_if sigs vars (both_args args (Leaf (str.encode "false") false) false) n (- left 1))
+              (conv_both sigs vars args (Leaf (str.encode "false") false) false n (- left 1))
             (if (str.eq name "or")
-              (conv_if sigs vars (both_args args (Leaf (str.encode "true") false) true) n (- left 1))
+              (conv_both sigs vars args (Leaf (str.encode "true") false) true n (- left 1))
+            (if (str.eq name "bytes")
+              (conv_bytes sigs vars args n (- left 1))
+            (if (str.eq name "str.octets")
+              (conv sigs vars (form (two (word_leaf "bytes.len") (form (Trees (word_leaf "str.encode") args)))) n (- left 1))
+            (if (str.eq name "str.chars")
+              (conv sigs vars (form (Trees (word_leaf "rt_chars") args)) n (- left 1))
+            (if (or (str.eq name "sat.add") (or (str.eq name "sat.sub") (str.eq name "sat.mul")))
+              (conv_sat sigs vars name args n (- left 1))
             (if (str.eq name "with")
               (conv_with sigs vars args n (- left 1))
             (if (str.eq name "bytes.decode")
               (conv_decode sigs vars args n (- left 1))
-            (if (or (or (str.eq name "Count") (str.eq name "Octets")) (str.eq name "unwrap"))
+            (if (or (or (str.eq name "Count") (or (str.eq name "Octets") (str.eq name "Chars"))) (str.eq name "unwrap"))
               (conv_erased sigs vars args n (- left 1))
-              (if (str.eq name "context")
-                (conv_context sigs vars args n (- left 1))
               (if (str.eq name "declassify")
                 (conv_declassify sigs vars args n (- left 1))
               (match (find_sig sigs name)
                 ((Some sig) (conv_sig sigs vars sig args n (- left 1)))
-                ((None) (conv_prim sigs vars name args n (- left 1))))))))))))))))
+                ((None) (conv_prim sigs vars name args n (- left 1)))))))))))))))))))
 
   ; `(declassify Label e)` is `e`: a label is the checker's, and nothing at run time.
   (fn conv_declassify ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
@@ -430,8 +438,121 @@
           ((None) (Node (Trees (Leaf (str.encode f) false) (Trees (Node (Trees (Leaf (str.encode "get") false) (Trees (Leaf (str.encode x) false) (Trees (Leaf (str.encode f) false) (NoTrees))))) (NoTrees))))))
         (with_pairs rest given x)))))
 
-  ; `and` and `or` decide on the first and look at the second only when they must:
-  ; `(and x y)` is `(if x y false)` and `(or x y)` is `(if x true y)`.
+  ; `and` and `or` evaluate both sides (SPEC 6.1). When the second side can do nothing the outside
+  ; world sees, not running it cannot be told apart from running it, since every function ends:
+  ; so `(and x y)` is `(if x y false)` and `(or x y)` is `(if x true y)`. When it can, both run,
+  ; the first first, and then they are compared.
+  (fn conv_both ((sigs Sigs) (vars TEnv) (args Trees) (fixed Tree) (first Bool) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match (nth args 1)
+        ((None) (conv_if sigs vars (both_args args fixed first) n (- left 1)))
+        ((Some y) (if (seen_outside sigs y 100000)
+          (match (nth args 0)
+            ((None) (conv_if sigs vars (both_args args fixed first) n (- left 1)))
+            ((Some x) (let a (fresh n)
+              (let b (fresh (+ n 1))
+                (conv_let_bound sigs vars a x
+                  (form (four (word_leaf "let") (word_leaf b) y
+                    (form (Trees (word_leaf "if") (both_args (two (word_leaf a) (word_leaf b)) fixed first)))))
+                  (+ n 2) (- left 1))))))
+          (conv_if sigs vars (both_args args fixed first) n (- left 1)))))))
+
+  ; Whether anything this tree calls does something other than allocate.
+  (fn seen_outside ((sigs Sigs) (t Tree) (left Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      true
+      (match (node_items t)
+        ((None) false)
+        ((Some items) (match items
+          ((NoTrees) false)
+          ((Trees h rest) (or (named_outside sigs (word_of h)) (any_outside sigs items (- left 1)))))))))
+
+  (fn any_outside ((sigs Sigs) (ts Trees) (left Int)) Bool
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      true
+      (match ts
+        ((NoTrees) false)
+        ((Trees h rest) (or (seen_outside sigs h (- left 1)) (any_outside sigs rest (- left 1)))))))
+
+  (fn named_outside ((sigs Sigs) (name Str)) Bool
+    (uses Alloc)
+    (match (find_sig sigs name)
+      ((Some s) (effects_outside (get s effects)))
+      ((None) (match (primitive name)
+        ((Some b) (effects_outside (names_text (get b effects))))
+        ((None) false)))))
+
+  (fn effects_outside ((fx Str)) Bool (not (or (str.eq fx "") (str.eq fx "Alloc"))))
+
+  ; A saturating operation is the exact answer in `Int`, held to the width's ends.
+  (fn conv_sat ((sigs Sigs) (vars TEnv) (name Str) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match (nth args 0)
+        ((None) (unsupported "a saturating operation needs operands"))
+        ((Some a) (match (nth args 1)
+          ((None) (unsupported "a saturating operation needs operands"))
+          ((Some b) (match (conv sigs vars a n (- left 1))
+            ((Err f) (Err f))
+            ((Ok c) (match (width_ends (get c ty))
+              ((None) (unsupported (concat "a saturating operation on " (get c ty))))
+              ((Some ends) (conv sigs vars (sat_tree name a b ends (fresh n)) (+ n 1) (- left 1)))))))))))) 
+
+  (record Ends (of Str) (low Str) (high Str))
+
+  (fn width_ends ((ty Str)) (Option Ends)
+    (if (str.eq ty "U8") (Some (make Ends (of "u8.of") (low "0") (high "255")))
+    (if (str.eq ty "U16") (Some (make Ends (of "u16.of") (low "0") (high "65535")))
+    (if (str.eq ty "U32") (Some (make Ends (of "u32.of") (low "0") (high "4294967295")))
+    (if (str.eq ty "U64") (Some (make Ends (of "u64.of") (low "0") (high "18446744073709551615")))
+    (if (str.eq ty "I8") (Some (make Ends (of "i8.of") (low "-128") (high "127")))
+    (if (str.eq ty "I16") (Some (make Ends (of "i16.of") (low "-32768") (high "32767")))
+    (if (str.eq ty "I32") (Some (make Ends (of "i32.of") (low "-2147483648") (high "2147483647")))
+    (if (str.eq ty "I64") (Some (make Ends (of "i64.of") (low "-9223372036854775808") (high "9223372036854775807")))
+      (None))))))))))
+
+  (fn sat_tree ((name Str) (a Tree) (b Tree) (ends Ends) (x Str)) Tree
+    (uses Alloc)
+    (let op (if (str.eq name "sat.add") "+" (if (str.eq name "sat.sub") "-" "*"))
+      (form (four (word_leaf "let") (word_leaf x)
+          (form (three (word_leaf op) (form (two (word_leaf "int.of") a)) (form (two (word_leaf "int.of") b))))
+          (form (four (word_leaf "if")
+            (form (three (word_leaf "<") (word_leaf x) (word_leaf (get ends low))))
+            (form (two (word_leaf (get ends of)) (word_leaf (get ends low))))
+            (form (four (word_leaf "if")
+              (form (three (word_leaf "<") (word_leaf (get ends high)) (word_leaf x)))
+              (form (two (word_leaf (get ends of)) (word_leaf (get ends high))))
+              (form (two (word_leaf (get ends of)) (word_leaf x)))))))))))
+
+  ; `(bytes "hex")` is its octets joined, which is what the IR has words for.
+  (fn conv_bytes ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (unsupported "the expression is nested too deeply")
+      (match (bytes_literal (Trees (word_leaf "bytes") args))
+        ((None) (unsupported "a bytes literal is pairs of hex digits"))
+        ((Some b) (conv sigs vars (octets_tree b 0 (unwrap (bytes.len b))) n (- left 1))))))
+
+  (fn octets_tree ((b Bytes) (at Int) (left Int)) Tree
+    (uses Alloc)
+    (if (<= left 0)
+      (form (two (word_leaf "str.encode") (text_leaf "")))
+      (match (bytes.at b (Octets at))
+        ((None) (form (two (word_leaf "str.encode") (text_leaf ""))))
+        ((Some d) (form (three (word_leaf "bytes.concat")
+          (form (two (word_leaf "bytes.of") (form (two (word_leaf "u8.of") (word_leaf (num.to_str (int.of d)))))))
+          (octets_tree b (+ at 1) (- left 1))))))))
+
   (fn both_args ((args Trees) (fixed Tree) (first Bool)) Trees
     (match args
       ((NoTrees) args)
@@ -452,18 +573,6 @@
         ((Trees h rest) (match (conv sigs vars h n (- left 1))
           ((Err f) (Err f))
           ((Ok c) (Ok (make Conv (pend (get c pend)) (atom (get c atom)) (ty "Int") (next (get c next))))))))))
-
-  ; `(context r op why)` is `r`: the prelude's `context` names a failure for whoever reads
-  ; it and changes nothing, so it is its first argument; the other two are text built for
-  ; no one, and pure.
-  (fn conv_context ((sigs Sigs) (vars TEnv) (args Trees) (n Int) (left Int)) (Result Conv Fault)
-    (uses Alloc)
-    (requires (<= 0 left))
-    (if (<= left 0)
-      (unsupported "the expression is nested too deeply")
-      (match args
-        ((NoTrees) (unsupported "a context needs the result it is about"))
-        ((Trees h rest) (conv sigs vars h n (- left 1))))))
 
   (fn conv_sig ((sigs Sigs) (vars TEnv) (sig Sig) (args Trees) (n Int) (left Int)) (Result Conv Fault)
     (uses Alloc)
@@ -860,7 +969,7 @@
 
   (fn mentions ((ir Ir) (v Str)) Bool
     (match ir
-      ((Let x ty rhs rest) (or (rhs_mentions rhs v) (mentions rest v)))
+      ((Let x ty rhs rest) (or (rhs_mentions rhs v) (and (not (str.eq x v)) (mentions rest v))))
       ((Done a) (atom_is a v))
       ((Drop x rest) (or (str.eq x v) (mentions rest v)))
       ((Retain x rest) (or (str.eq x v) (mentions rest v)))))
@@ -879,7 +988,16 @@
   (fn arms_mention ((arms Arms) (v Str)) Bool
     (match arms
       ((NoArms) false)
-      ((Arms c bs body more) (or (mentions body v) (arms_mention more v)))))
+      ((Arms c bs body more) (or (and (not (binds bs v)) (mentions body v)) (arms_mention more v)))))
+
+  ; A name a form binds is not a use of a variable of that name outside it: two matches side by
+  ; side may each call a binder `v`, and neither is the other's.
+  (fn binds ((bs TEnv) (v Str)) Bool
+    (match bs ((NoTEnv) false) ((TEnv n t rest) (or (str.eq n v) (binds rest v)))))
+
+  (fn without_binders ((names Strs) (bs TEnv)) Strs
+    (uses Alloc)
+    (match bs ((NoTEnv) names) ((TEnv n t rest) (without_binders (without names n) rest))))
 
   (fn atom_names ((a Atom)) Strs (match a ((AVar n) (Strs n (NoStrs))) ((AInt k) (NoStrs)) ((ABool b) (NoStrs))))
 
@@ -890,7 +1008,7 @@
   (fn names_of ((ir Ir)) Strs
     (uses Alloc)
     (match ir
-      ((Let x ty rhs rest) (strs_join (rhs_names rhs) (names_of rest)))
+      ((Let x ty rhs rest) (strs_join (rhs_names rhs) (without (names_of rest) x)))
       ((Done a) (atom_names a))
       ((Drop x rest) (Strs x (names_of rest)))
       ((Retain x rest) (Strs x (names_of rest)))))
@@ -911,7 +1029,7 @@
     (uses Alloc)
     (match arms
       ((NoArms) (NoStrs))
-      ((Arms c bs body more) (strs_join (names_of body) (arms_names more)))))
+      ((Arms c bs body more) (strs_join (without_binders (names_of body) bs) (arms_names more)))))
 
   ; A heap value is a string, or a record or enum value, which the type environment marks
   ; with an entry named `%heap:` and the type.
@@ -1454,7 +1572,8 @@
   ; runtime library is there to do wide arithmetic, the functions that hand it an `Int`.
   (fn with_prelude ((items Trees)) Trees
     (uses Alloc)
-    (with_glue (if (and (wants_fault items) (lacks_fault items)) (trees_join items (prelude_items)) items)))
+    (let plain (erase_newtypes items)
+      (with_glue (with_helpers (if (and (wants_fault plain) (lacks_fault plain)) (trees_join plain (prelude_items)) plain)))))
 
   ; For a machine whose memory is bounded before it runs (the bare-metal targets), where a
   ; number without a bound has nowhere to go: the prelude, and no glue -- an `Int` there is a
@@ -1462,7 +1581,7 @@
   ; on numbers too wide for a word, which nothing then calls.
   (fn with_prelude_words ((items Trees)) Trees
     (uses Alloc)
-    (let plain (without_wide items) (if (and (wants_fault plain) (lacks_fault plain)) (trees_join plain (prelude_items)) plain)))
+    (let plain (erase_newtypes (without_wide items)) (with_helpers (if (and (wants_fault plain) (lacks_fault plain)) (trees_join plain (prelude_items)) plain))))
 
   (fn without_wide ((items Trees)) Trees
     (uses Alloc)
@@ -1498,6 +1617,131 @@
 
   (fn glue_text () Str
     "(module g (fn rt_int_bytes ((n Int)) Bytes (uses Alloc) (if (%small n) (rt_big_of_small n) (%unbox n))) (fn rt_int_boxed ((b Bytes)) Int (uses Alloc) (if (rt_big_is_small b) (rt_big_small_value b) (%box b))) (fn rt_int_add_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_add (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_sub_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_sub (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_mul_slow ((a Int) (b Int)) Int (uses Alloc) (rt_int_boxed (rt_big_mul (rt_int_bytes a) (rt_int_bytes b)))) (fn rt_int_cmp_slow ((a Int) (b Int)) Int (uses Alloc) (rt_big_cmp (rt_int_bytes a) (rt_int_bytes b))) (fn rt_int_str_slow ((a Int)) Str (uses Alloc) (rt_big_to_str (rt_int_bytes a))) (fn rt_int_of_u64_slow ((w U64)) Int (uses Alloc) (rt_int_boxed (rt_big_of_u64 w))) (fn rt_int_of_i64_slow ((w I64)) Int (uses Alloc) (rt_int_boxed (rt_big_of_i64 w))) (fn rt_u64_of_int_slow ((n Int)) U64 (uses Alloc) (rt_big_to_u64 (rt_int_bytes n))) (fn rt_i64_of_int_slow ((n Int)) I64 (uses Alloc) (rt_big_to_i64 (rt_int_bytes n))) (fn rt_int_div_slow ((a Int) (b Int)) (Option Int) (uses Alloc) (match (rt_big_div (rt_int_bytes a) (rt_int_bytes b)) ((None) (None)) ((Some q) (Some (rt_int_boxed q))))))")
+
+  ; What is written out only for a module that names it: `context`, the prelude's, which adds a
+  ; layer, and counting the characters of a text, which is the bytes that do not continue one.
+  (fn context_text () Str
+    "(module p (fn (context T) ((r (Result T Fault)) (op Str) (why Str)) (Result T Fault) (match r ((Ok v) (Ok v)) ((Err e) (Err (make Fault (op op) (why why) (cause (Some e))))))))")
+
+  (fn chars_text () Str
+    "(module p (fn rt_chars_from ((b Bytes) (at Int) (left Int) (acc Int)) Int (if (<= left 0) acc (match (bytes.at b (Octets at)) ((None) acc) ((Some d) (rt_chars_from b (+ at 1) (- left 1) (if (and (<= 128 (int.of d)) (< (int.of d) 192)) acc (+ acc 1))))))) (fn rt_chars ((s Str)) Int (uses Alloc) (let b (str.encode s) (rt_chars_from b 0 (unwrap (bytes.len b)) 0))))")
+
+  (fn with_helper ((items Trees) (word Str) (present Str) (text Str)) Trees
+    (uses Alloc)
+    (if (and (names_word items word 100000) (not (present_fn items present)))
+      (match (parse (tokens_of (str.encode text))) ((Err f) items) ((Ok tree) (trees_join items (module_items tree))))
+      items))
+
+  (fn with_helpers ((items Trees)) Trees
+    (uses Alloc)
+    (with_helper (with_helper items "context" "context" (context_text)) "str.chars" "rt_chars" (chars_text)))
+
+  ; A newtype and a label are the checker's and nothing at run time: `(N x)` is `x`, the type `N` is
+  ; what it wraps, and `(label L T)` is `T`, so that what they hold is owned, read and narrowed as
+  ; what it is. A label parameter, `(name (label L))`, goes with them.
+  (fn erase_newtypes ((items Trees)) Trees
+    (uses Alloc)
+    (let nts (newtypes_in items)
+      (erase_all nts (without_newtypes items) 100000)))
+
+  (fn newtypes_in ((items Trees)) Trees
+    (uses Alloc)
+    (match items
+      ((NoTrees) items)
+      ((Trees h rest) (if (head_is h "newtype") (Trees h (newtypes_in rest)) (newtypes_in rest)))))
+
+  (fn without_newtypes ((items Trees)) Trees
+    (uses Alloc)
+    (match items
+      ((NoTrees) items)
+      ((Trees h rest) (if (head_is h "newtype") (without_newtypes rest) (Trees h (without_newtypes rest))))))
+
+  (fn newtype_base ((nts Trees) (w Str)) (Option Tree)
+    (uses Alloc)
+    (match nts
+      ((NoTrees) (None))
+      ((Trees h rest) (match (nth (after_head h) 0)
+        ((None) (newtype_base rest w))
+        ((Some name) (if (str.eq (word_of name) w) (nth (after_head h) 1) (newtype_base rest w)))))))
+
+  (fn erase_all ((nts Trees) (ts Trees) (left Int)) Trees
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      ts
+      (match ts
+        ((NoTrees) ts)
+        ((Trees h rest) (Trees (erase_tree nts h (- left 1)) (erase_all nts rest (- left 1)))))))
+
+  (fn erase_tree ((nts Trees) (t Tree) (left Int)) Tree
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      t
+      (match t
+        ((Leaf text quoted) (if quoted
+          t
+          (match (newtype_base nts (word_of t))
+            ((None) t)
+            ((Some base) (erase_tree nts base (- left 1))))))
+        ((Node items) (match items
+          ((NoTrees) t)
+          ((Trees h rest) (if (label_type h rest)
+            (erase_last nts rest (- left 1))
+            (match (node_items h)
+              ((Some inner) (Node (erase_all nts items (- left 1))))
+              ((None) (match (newtype_base nts (word_of h))
+                ((None) (without_label_params nts t h rest (- left 1)))
+                ((Some base) (match rest
+                  ((NoTrees) t)
+                  ((Trees arg none) (erase_tree nts arg (- left 1)))))))))))))))
+
+  ; `(label L... T)`, in a type: one label or more, and the type last.
+  (fn label_type ((h Tree) (rest Trees)) Bool
+    (uses Alloc)
+    (and (is_word h "label") (<= 2 (trees_len rest))))
+
+  (fn is_word ((t Tree) (w Str)) Bool
+    (uses Alloc)
+    (match (node_items t)
+      ((Some items) false)
+      ((None) (str.eq (word_of t) w))))
+
+  (fn erase_last ((nts Trees) (ts Trees) (left Int)) Tree
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      (Node ts)
+      (match ts
+        ((NoTrees) (Node ts))
+        ((Trees h rest) (match rest
+          ((NoTrees) (erase_tree nts h (- left 1)))
+          ((Trees x more) (erase_last nts rest (- left 1))))))))
+
+  ; `(f (label L))` declares a label parameter of a generic function. With none left, it is `f`.
+  (fn without_label_params ((nts Trees) (t Tree) (h Tree) (rest Trees) (left Int)) Tree
+    (uses Alloc)
+    (requires (<= 0 left))
+    (if (<= left 0)
+      t
+      (let kept (not_label_params rest)
+        (if (and (not (= (trees_len kept) (trees_len rest))) (= (trees_len kept) 0))
+          h
+          (Node (Trees h (erase_all nts kept (- left 1))))))))
+
+  (fn not_label_params ((ts Trees)) Trees
+    (uses Alloc)
+    (match ts
+      ((NoTrees) ts)
+      ((Trees h rest) (if (is_label_param h) (not_label_params rest) (Trees h (not_label_params rest))))))
+
+  (fn is_label_param ((t Tree)) Bool
+    (uses Alloc)
+    (match (node_items t)
+      ((None) false)
+      ((Some items) (match items
+        ((NoTrees) false)
+        ((Trees h rest) (and (is_word h "label") (= (trees_len rest) 1)))))))
 
   (fn lacks_fault ((items Trees)) Bool
     (uses Alloc)

@@ -8,9 +8,9 @@
 ;
 ;   witness run compiler/driver.wtn --grant Alloc,Console
 (module driver
-  (use "wtn:4de3a9971c4aa7b829bd8162d2ccdb96cbf28db12d8c4cf9c2cf11bf56c0bd2d" as check_source)
+  (use "wtn:ffccfb4d51da4c152675a4adff291dd6155d12d60e347e00d9d4d19dc9097cce" as check_source)
 
-  (use "wtn:28f6248f6071624ab0cba044e105a0bbc6966ccc14085fb75bdb5e6eb7101672" as flattened)
+  (use "wtn:cb945ff039ebec5dbe7f4b1df9c961b11ead64b8694699e2886bd82c72edaca6" as flattened)
 
   (use "wtn:04852b0bc4bbba2ffbb78275cfe77192e76f28ec12528c975b2558092906f0f9" as arm_elf_of)
 
@@ -22,15 +22,15 @@
 
   (use "wtn:5b123f88fe4b7128f93dd24d20649bd7d4698fd584f7abd052dcf27110bda4b1" as xtensa_s3_elf_of)
 
-  (use "wtn:bd2c90aea81df7b80fefdefa085f4873de8414074cf014afbf91ff11a8730fcc" as checked_bound)
+  (use "wtn:b93b118cfe3ef7024a8e0c3891d78433241484eb58bd21433ec76b525b5585d7" as checked_bound)
 
-  (use "wtn:1cb1723bb5fb60aea560cf171d671082647b157b9561352ba849ce0ebcd33f3d" as checked_bound_in)
+  (use "wtn:a1e621738ce0abd64976898fc520fca034b1a193f2cda6e84aa78a93aa9f4798" as checked_bound_in)
 
   (use "wtn:61b215edb2c7025de42e889ce2b3e73ee789f2b9ff345a30b6aad643572f3b6a" as esp32_room)
 
   (use "wtn:3b5197a59216c6648cb24412ef872cfb200d1b64f7af3e49c6030b2fd5fdb227" as esp32s3_room)
 
-  (use "wtn:285ec8ea602a2c6e2a86837e63b8b3381e2296c260aba42bc6e00edba7852e3e" as checked_bounds_in)
+  (use "wtn:ed61bb67749496aaab4d6f16d0f9f449561cb8eaae960410ea2d29995837887c" as checked_bounds_in)
 
   (use "wtn:eb01605a4ed93c26fd7b1776e3234637fd8fed5a5f96948a551ce1becd2d6280" as thumb_room)
 
@@ -50,15 +50,15 @@
 
   (use "wtn:2a999d54fe797c4a17cc3e5cda80c7ccc1787a02d6f0a3c877cc10910db29df9" as riscv32_elf_of)
 
-  (use "wtn:a3c72dd99bfedaade779b55366108fc4dad8865a29c1e512f30902f1cf6b8f14" as module_ir)
+  (use "wtn:9e177e5a9b4e3d36e7ae050fb12af0113a56c38fec13d071ace7c28472dcb4b0" as module_ir)
 
   ; The bare-metal targets, whose memory is bounded before the program runs, keep an `Int` that
   ; is a word and traps on overflow (compiler/ir.wtn's `with_prelude_words`).
-  (use "wtn:4e2c6a5b897457bccc8a4b1eb63c875987cc44e1ec70cfb74c57e37cff68123d" as module_ir_words)
+  (use "wtn:d32c91bb2152d54e5a9a75ef8b092e1ad78ba97af68329d31f38ad91dd933744" as module_ir_words)
 
   (use "wtn:dc55715dcac24a1489129d0f2e28460470bbabf0de7086cfa46e5806d3435145" as elf_of)
 
-  (use "wtn:07461154cec53978c9078b1684d103b01b7a14500bb6c4c162996b9721fd15dd" as compile_ir)
+  (use "wtn:807555a4d1d7cd66b5127e562db667c386f253504bdd0474b5a5ce621835f44a" as compile_ir)
 
   (fn drive ((src Str)) Bytes
     (uses Alloc)

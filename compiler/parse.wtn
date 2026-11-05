@@ -23,9 +23,9 @@
 ;
 ;   witness run compiler/parse.wtn --grant Alloc,Console
 (module parse
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
-  (use "wtn:c8e6358e9de0097130dc8a674ef168139a96e44b0164d15be43ce52b738c2496"
+  (use "wtn:fd0e3ea3c0b67e09ba56090a23f496d33f2cccb5daaf84121bab3a2948fa4cbc"
     as
     tokens_count)
 

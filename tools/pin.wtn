@@ -20,11 +20,11 @@
 ;
 ;   witness test tools/pin.wtn
 (module pin
-  (use "wtn:1cab8de3e8124d429588631292862cdaee19c2f71bb17f7b891344bf8f3c0370" as linked)
+  (use "wtn:ae1f1ed8e034ea0277b4c595d5dd1d0ba8c8a92ed006fec8c5e790fec959028b" as linked)
 
   (use "wtn:704c900a148195fd6f4bd090561c4b9eee73f44d3ac76ab990455fd49a1273b9" as resolved)
 
-  (use "wtn:f5df45a82c0bac3af88a1777ffcd5e572f850d0a0e8169392a5ad9cc5f7bfb92" as done_of)
+  (use "wtn:bd5a9272af69eb3f820a5717464b42f3c230dcfda5144f5946889c616dd235ec" as done_of)
 
   (use "wtn:a534fe0c0571a603e0112cb9dd1bbc3915a7a104c4d1b57cb3fde133f37e5890" as look)
 
@@ -40,9 +40,9 @@
 
   (use "wtn:3a233fc1610ddea8229aeec72fe5a2accf26f5d31d23df9acc7446f8dca0444c" as word)
 
-  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+  (use "wtn:93b5829b146cf7fa9243f9e59065dc5c37d7f2b66bf5d70f9c359d5b870fe715" as parse)
 
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
   (fn lit ((s Str)) Bytes (uses Alloc) (str.encode s))
 

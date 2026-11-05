@@ -175,7 +175,7 @@
 
   (use "wtn:b74a1973df7919505307399950487f6de6ccf432871b362157e7698205a90710" as is_word)
 
-  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+  (use "wtn:93b5829b146cf7fa9243f9e59065dc5c37d7f2b66bf5d70f9c359d5b870fe715" as parse)
 
   (use "wtn:92f81a40f63652dea9fbf74791ba55b839d7db7e5dbbb2f5e8a7c2512a911780" as named)
 
@@ -195,11 +195,11 @@
     as
     module_items)
 
-  (use "wtn:01fc0fec7dae5f12e8e758f001fe83e6e7e98dfec750ac384652c15c53041950"
+  (use "wtn:7518a5761f73ffc446d23354ad998a9ba8eebe261f6b9accdc77657d32a79574"
     as
     env_with_prelude)
 
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
   ; --- what lowering is told ---------------------------------------------------
   ; The functions of the module (name, index in the module, parameter count), and the

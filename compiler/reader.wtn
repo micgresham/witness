@@ -17,14 +17,42 @@
 
   (enum Tokens (NoTokens) (Tokens (head Token) (rest Tokens)))
 
+  ; How many tokens there are, walked in stretches for the same reason the scan is (below): a
+  ; call per token is as deep as the source is long. A list has no number to count down that
+  ; could be known before counting it, so the stretches have a budget of their own, far beyond
+  ; any source. Meeting it gives a count too low, and the parser, which this is the budget of,
+  ; then says the source is too long: an error and not a wrong answer.
   (fn tokens_count ((ts Tokens)) Int
     (ensures (<= 0 result))
-    (match ts ((NoTokens) 0) ((Tokens h rest) (+ 1 (tokens_count rest)))))
+    (let counted (count_stretches ts 0 1099511627776)
+      (if (<= 0 counted) counted 0)))
+
+  (enum Counted (Counted (n Int) (more Tokens)))
+
+  (fn count_stretch ((ts Tokens) (n Int) (room Int)) Counted
+    (requires (<= 0 room))
+    (if (<= room 0)
+      (Counted n ts)
+      (match ts
+        ((NoTokens) (Counted n ts))
+        ((Tokens h rest) (count_stretch rest (+ n 1) (- room 1))))))
+
+  (fn count_stretches ((ts Tokens) (n Int) (left Int)) Int
+    (requires (<= 0 left))
+    (if (<= left 0)
+      n
+      (match (count_stretch ts n 256)
+        ((Counted m more) (match more
+          ((NoTokens) m)
+          ((Tokens h rest) (count_stretches more m (- left 1))))))))
 
   ; Built up in reverse and turned round once at the end, so adding a token is a step
   ; and not a walk.
   ; No `Alloc`: a variant is fixed-size, so turning a list round builds nothing whose
   ; size its type does not already fix.
+  ; What a stretch of the scan found, backwards, and where the next one starts.
+  (enum Scanned (Scanned (out Tokens) (at Int) (left Int)))
+
   (fn reversed ((ts Tokens) (onto Tokens)) Tokens
     (match ts ((NoTokens) onto) ((Tokens h rest) (reversed rest (Tokens h onto)))))
 
@@ -48,22 +76,26 @@
   ; still be done: it falls at every step, which is what makes the scan finite -- nothing
   ; about an index into a sequence gets smaller on its own. Going round through a string
   ; or a word costs two steps rather than one, so the budget allows two per byte.
-  (fn scan ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+  ;
+  ; `room` is how many steps this stretch may take. A step of the scan is a call, so a source
+  ; scanned in one go nests as deep as it is long, and a host's stack is what that runs out of.
+  ; So the scan comes back up every so often with what it has and where it got to.
+  (fn scan ((src Bytes) (at Int) (left Int) (room Int) (out Tokens)) Scanned
     (uses Alloc)
     (requires (<= 0 left))
-    (if (or (<= left 1) (<= (unwrap (bytes.len src)) at))
-      (reversed out (NoTokens))
+    (if (or (or (<= room 0) (<= left 1)) (<= (unwrap (bytes.len src)) at))
+      (Scanned out at left)
       (if (is_space (byte_at src at))
-        (scan src (+ at 1) (- left 1) out)
+        (scan src (+ at 1) (- left 1) (- room 1) out)
         (if (is_comment (byte_at src at))
-          (scan src (past_line src at left) (- left 1) out)
+          (scan src (past_line src at left) (- left 1) (- room 1) out)
           (if (= (byte_at src at) 40)
-            (scan src (+ at 1) (- left 1) (Tokens (Open) out))
+            (scan src (+ at 1) (- left 1) (- room 1) (Tokens (Open) out))
             (if (= (byte_at src at) 41)
-              (scan src (+ at 1) (- left 1) (Tokens (Close) out))
+              (scan src (+ at 1) (- left 1) (- room 1) (Tokens (Close) out))
               (if (is_quote (byte_at src at))
-                (scan_text src at (- left 1) out)
-                (scan_word src at (- left 1) out))))))))
+                (scan_text src at (- left 1) (- room 1) out)
+                (scan_word src at (- left 1) (- room 1) out))))))))
 
   ; Where the next line starts, or the end of the source.
   (fn past_line ((src Bytes) (at Int) (left Int)) Int
@@ -76,12 +108,13 @@
 
   ; A quoted string, from its opening quote to past its closing one. A backslash escapes
   ; whatever follows it, so a quote can be written inside one.
-  (fn scan_text ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+  (fn scan_text ((src Bytes) (at Int) (left Int) (room Int) (out Tokens)) Scanned
     (uses Alloc)
     (requires (< 0 left))
     (scan src
       (+ (end_of_text src (+ at 1) left) 1)
       (- left 1)
+      room
       (Tokens (Text (bytes.slice src (Octets (+ at 1)) (Octets (end_of_text src (+ at 1) left))))
         out)))
 
@@ -98,12 +131,13 @@
             (end_of_text src (+ at 1) (- left 1)))))))
 
   ; Everything up to the next delimiter: a name, a keyword, or a number.
-  (fn scan_word ((src Bytes) (at Int) (left Int) (out Tokens)) Tokens
+  (fn scan_word ((src Bytes) (at Int) (left Int) (room Int) (out Tokens)) Scanned
     (uses Alloc)
     (requires (< 0 left))
     (scan src
       (end_of_word src at left)
       (- left 1)
+      room
       (Tokens (worded (bytes.slice src (Octets at) (Octets (end_of_word src at left))) (byte_at src at))
         out)))
 
@@ -120,7 +154,20 @@
 
   (fn tokens_of ((src Bytes)) Tokens
     (uses Alloc)
-    (scan src 0 (+ 2 (* 2 (unwrap (bytes.len src)))) (NoTokens)))
+    (stretches src 0 (+ 2 (* 2 (unwrap (bytes.len src)))) (+ 2 (* 2 (unwrap (bytes.len src))))))
+
+  ; One stretch of the scan and then the rest. Every stretch takes a step, so `stretches_left`
+  ; cannot run out before `left` does.
+  (fn stretches ((src Bytes) (at Int) (left Int) (stretches_left Int)) Tokens
+    (uses Alloc)
+    (requires (and (<= 0 left) (<= 0 stretches_left)))
+    (if (or (or (<= stretches_left 0) (<= left 1)) (<= (unwrap (bytes.len src)) at))
+      (NoTokens)
+      (match (scan src at left 256 (NoTokens))
+        ((Scanned out next more)
+          (if (<= 0 more)
+            (reversed out (stretches src next more (- stretches_left 1)))
+            (reversed out (NoTokens)))))))
 
   ; --- showing what was read -------------------------------------------------
   (fn text_of ((b Bytes)) Str

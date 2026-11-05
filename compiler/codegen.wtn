@@ -36,7 +36,7 @@
 
   (use "wtn:005b734fa344ec5d8501fe8b91eaaeca68ae600bebf49c44660fbf7d11429b05" as digits)
 
-  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+  (use "wtn:93b5829b146cf7fa9243f9e59065dc5c37d7f2b66bf5d70f9c359d5b870fe715" as parse)
 
   (use "wtn:209085983cb25b9fe57efaa3917faee8873e6f23e495572eee5f6038a2782322" as last_of)
 
@@ -50,7 +50,7 @@
 
   (use "wtn:8f001b8eb331c35b82070b925765a08ae8e67c3f0971edbcf672934f1e75dea3" as Trees)
 
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
   (use "wtn:726e882e80cd3e9021af16dfbc8be44de67d22ef62892ebceeca01b349d08ab1" as byte_at)
 

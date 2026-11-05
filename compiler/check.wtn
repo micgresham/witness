@@ -25,9 +25,9 @@
 (module check
   (use "wtn:86a99f8451d3c7998900c44d4eac8671aac7a339305b840140e9696becd82774" as Tree)
 
-  (use "wtn:4518c8219b4cc1aa6d0d1c0e4490160bbddfdf49348a92c47e1f9de9e69fb47e" as parse)
+  (use "wtn:93b5829b146cf7fa9243f9e59065dc5c37d7f2b66bf5d70f9c359d5b870fe715" as parse)
 
-  (use "wtn:37b77793359240afd68298a030a33b6f0d6fc0868bd10d00420a1edfb8d92d26" as tokens_of)
+  (use "wtn:c446aed2ef4f4f25647bf791e2bf4a9479729720d31da569a963f2684759b773" as tokens_of)
 
   (use "wtn:51ca6ecd82025968aecc39ecfd111bccc8f5a3500e43cf0488a54d017947ed8e" as node_items)
 
@@ -45,7 +45,7 @@
 
   (use "wtn:2bf9db991f79bd86386f9d48b3d14c3938df6dbacab323d8c9f06fdbab332347" as newtype_of)
 
-  (use "wtn:01fc0fec7dae5f12e8e758f001fe83e6e7e98dfec750ac384652c15c53041950" as env_with_prelude)
+  (use "wtn:7518a5761f73ffc446d23354ad998a9ba8eebe261f6b9accdc77657d32a79574" as env_with_prelude)
 
   (use "wtn:4237cbcf9bea86a4535b9812b937ef33c4d61ab06941ba9d7db2c08dfacf0885" as check_fn)
 
@@ -71,7 +71,7 @@
 
   (use "wtn:625ae72e651c1f2a8f51d9f48bc664f5ce39c2811b4f066e5aafb9cb51bbd817" as decl_findings)
 
-  (use "wtn:f6b26811fe8f489af89c844cf69fa98cde4f18fd470c8a46d3bb073b41495873" as proved)
+  (use "wtn:27c86104d697625c26037c5f396d3dc89199fe2395e7894dad74442248c31d15" as proved)
 
   ; --- the other passes' lines, read back ------------------------------------------------------
   ; decl_rules and verify say what they found as text; it is cut into its pieces here rather
